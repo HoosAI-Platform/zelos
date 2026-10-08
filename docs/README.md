@@ -25,9 +25,10 @@ and asking you to trust them. Zelos is built the other way round:
   Ollama, LM Studio, llama.cpp — Zelos treats them exactly like a paid API.
   With one of those selected, Zelos makes no outbound connection except to
   your own mail and calendar servers, and to the host of any source you add
-  in Settings → Sources, unless you request a manual update check.
+  in Settings → Sources, apart from update checks to the official GitHub
+  release (see [SECURITY.md § 5, item 7](SECURITY.md#5-what-leaves-your-machine)).
 - **Nothing else phones home.** No analytics, no telemetry, no crash reports, no
-  automatic update checks, no web fonts, no tracking pixels. There is no code in Zelos
+  web fonts, no tracking pixels. There is no code in Zelos
   that talks to us, because there is no "us" to talk to.
 - **It has no third-party code.** Zelos is written entirely against what Node
   ships with. There are no packages to audit, no supply chain, nothing that can
@@ -150,7 +151,7 @@ technical parts.
 ### Option A — a model on your own machine
 
 AI assessment and answers stay on your computer with a local model. Reading
-connected sources still contacts their services, and manual update checks contact
+connected sources still contacts their services, and update checks contact
 GitHub. Zelos looks for local models automatically when you first open Settings
 and offers whatever it finds first.
 
@@ -556,17 +557,17 @@ pattern can still miss — a bare alias like `const go = fetch` — and
 `grep -rnw fetch core/ zelos.mjs` is the noisier superset that cannot. Run
 it after this one if you want to be sure.
 
-The command above returns **23 lines** today. Eleven of them are not network
+The command above returns **24 lines** today. Eleven of them are not network
 calls, and you can throw them out by two rules:
 
-- **Comments.** Eight of the twenty-three are prose inside `/* */` or `//`
+- **Comments.** Eight of the twenty-four are prose inside `/* */` or `//`
   blocks that happen to mention `fetch(`.
 - **Zelos's own IMAP object.** Three lines in `core/sources/imap.mjs` say
   `async fetch(` or `client.fetch(`. That is Zelos's IMAP client having a
   method named after the IMAP `FETCH` command. It talks on a socket that is
   already open; it does not open one.
 
-So: **twelve real outbound calls**, and this is all of them. They are named by
+So: **thirteen real outbound calls**, and this is all of them. They are named by
 function rather than by line, because the line numbers in the last version of
 this table went stale within a week and nobody noticed; a function name is
 something you can `grep` for, and the test named below checks that each of
@@ -584,10 +585,15 @@ these still exists in the file this table says it is in.
 | `core/doctor.mjs` | `DEFAULT_DEPS.fetchImpl` | the one `fetch` `zelos doctor` uses, to try your model endpoint and your calendar address — both from your settings |
 | `core/connectors/http.mjs` | `createHttp` | **every source in Settings → Sources**, through one transport: GitHub, Slack, Linear, Todoist, Fireflies and a feed each reach the host their connector declares in `origins` (`core/connectors/*.mjs`), plus any address you typed into that source's own fields. Anything else is refused before a socket exists |
 | `core/sources/oauth.mjs` | `postForm` | `oauth2.googleapis.com`, and only for a mailbox you set to **Sign in with Google** — the code exchange when you sign in, and the token refresh before a sweep; see [OAUTH.md](OAUTH.md) |
-| `core/updates.mjs` | `createUpdateChecker` | the official Zelos latest-release endpoint on `api.github.com`, only when you press **Check for updates**, with no account content or credentials |
+| `core/updates.mjs` | `fetchLatestRelease` | the official Zelos latest-release endpoint on `api.github.com`, with no account content or credentials. Two lines: `fetchLatestRelease` makes the request, and `createUpdateChecker` passes it the `fetch` to use. It runs when you press **Check for updates**, and in a signed desktop app with automatic updates on, when the app opens and every six hours |
 
-Reading and model calls go to configured services; the manual update check has
-one fixed official destination. There is no thirteenth through these three primitives — the one question that leaves
+Reading and model calls go to configured services; the update check has one
+fixed official destination. The desktop app adds the update *download*, which
+lives in `desktop/updater.js` rather than `core/` and so is outside this grep:
+it fetches only files of the release it has just verified, from
+`github.com/HoosAI-Platform/zelos/releases/download/…` and the GitHub storage
+hosts that address redirects to, every hop checked against a fixed list
+(`DOWNLOAD_HOSTS`). There is no fourteenth through these three primitives — the one question that leaves
 another way is counted below. The one directory in that table that grows is
 `core/connectors/`, and the test *no connector reaches the network except
 through ctx.http* in `test/repo.test.mjs` fails the build on a connector that

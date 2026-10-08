@@ -35,7 +35,7 @@ for (const name of ['index.html', 'help.html', 'privacy.html']) {
 }
 const headers = path.join(out, '_headers');
 fs.writeFileSync(headers, fs.readFileSync(headers, 'utf8').replace('{{SCRIPT_HASHES}}', [...scriptHashes].join(' ')));
-const base = `https://github.com/HoosAILLC/zelos/releases/download/v${version}`;
+const base = `https://github.com/HoosAI-Platform/zelos/releases/download/v${version}`;
 const downloads = {
   'Zelos-mac-apple-silicon.dmg': `Zelos-${version}-arm64.dmg`,
   'Zelos-mac-intel.dmg': `Zelos-${version}-x64.dmg`,

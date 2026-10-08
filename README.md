@@ -74,7 +74,8 @@ In the desktop app, **Settings → Your data** creates and restores private back
 Item cards offer **More → What changed?** for recorded deadline, priority and status changes.
 The **Commands** button, or **⌘/Ctrl+Shift+P**, searches navigation and common actions.
 Connection warnings lead to the relevant account, and **Settings → About → Check for updates**
-checks the official release only when you ask.
+checks the official release. A signed desktop app also updates itself, with your say on the restart —
+see [What leaves your machine](#what-leaves-your-machine).
 
 Seven MCP tools, none of which sends, deletes or reconfigures anything. Six declare `readOnlyHint`;
 `zelos_board` does not, because reading the board does what opening the window does — wakes a snooze
@@ -91,8 +92,13 @@ or Microsoft adds that provider's sign-in service — `accounts.google.com` and
 `oauth2.googleapis.com`, or `login.microsoftonline.com` — for the length of the sign-in and of each
 token refresh, and still no Zelos server. Of all of those, only
 the model request carries what Zelos read; point it at a local model and nothing it read leaves at
-all. **Check for updates** makes a manual request to the official GitHub release API,
-without account content or credentials. No telemetry, analytics, automatic update pings or crash reports.
+all. **Update checks** go to the official GitHub release API, without account content or
+credentials: when you press **Check for updates**, and in a signed desktop app with automatic updates
+on (the default; Settings → About turns it off), when the app opens and every six hours. A newer
+release is then fetched from that release's own files on GitHub (on a Mac, when you choose
+**Restart to update**), checked against the publisher's code signature, and installed only when you
+choose **Restart to update**. Builds that are not yet
+signed — which today is all of them — check only when you ask. No telemetry, analytics or crash reports.
 
 Your keys live in your operating system's keychain — **when there is one**. With no keychain
 available (a headless Linux box, or a desktop without `secret-tool`), they go to `secrets.enc` in

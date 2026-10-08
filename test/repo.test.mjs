@@ -691,7 +691,7 @@ describe('every import in core/, ui/ and test/', () => {
     for (const file of filesUnder('ui')) {
       const original = fs.readFileSync(file, 'utf8');
       const src = file === path.join(ROOT, 'ui/lib/updates.js')
-        ? original.replace('const official = `https://github.com/HoosAILLC/zelos/releases/tag/v${release.latestVersion}`;', '') : original;
+        ? original.replace('const OFFICIAL_RELEASE = (version) => `https://github.com/HoosAI-Platform/zelos/releases/tag/v${version}`;', '') : original;
       for (const m of src.matchAll(/\b(?:https?:)?\/\/[a-z0-9.-]+\.[a-z]{2,}/gi)) {
         // A URL in a comment is prose; one in code would be a fetch.
         const line = src.slice(0, m.index).split('\n').pop();
@@ -1030,7 +1030,7 @@ test('no tracked file carries the operator\'s real identity', () => {
 
      Fixtures must use a RESERVED name: `.example`, `.test`, `.invalid`, or
      `example.com` (RFC 2606 / 6761). Those can never resolve, so a fixture
-     address can never become mail to a real person. `github.com/HoosAILLC/zelos`
+     address can never become mail to a real person. `github.com/HoosAI-Platform/zelos`
      is the project's own public URL and is allowed by name — it is a fact about
      where the code lives, not a personal detail.
 
@@ -1055,7 +1055,7 @@ test('no tracked file carries the operator\'s real identity', () => {
     { what: 'an absolute path into somebody\'s home directory', re: /\/Users\/(?!you\b|nemo\b)[a-z][a-z0-9._-]*/ },
     { what: 'something shaped like a live API key', re: /\b(sk-[a-zA-Z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|xox[bp]-[A-Za-z0-9-]{20,})\b/ },
   ];
-  const allowed = [/github\.com\/HoosAILLC\/zelos/i];
+  const allowed = [/github\.com\/HoosAI-Platform\/zelos/i];
 
   /* Walked rather than taken from `git ls-files`, so the check still runs from
      an extracted tarball — which is the copy a stranger actually reads, and the

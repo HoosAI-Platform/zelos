@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -69,4 +70,50 @@ test('CI installs the shell\'s build tools from the lockfile, with no fallback',
     'the workflow no longer installs the shell\'s build tools with npm ci alone');
   assert.doesNotMatch(workflow, /npm ci\s*\|\|/,
     'a fallback after npm ci ships whatever resolves that day instead of what the lockfile pinned');
+});
+
+test('a release carries the files installed apps update from, and every one is checksummed', async () => {
+  /* The desktop updater (desktop/updater.js) reads three kinds of release file
+     that a first install never needs: the Mac ZIPs Squirrel.Mac installs from,
+     the per-architecture feeds naming them, and SHA256SUMS.txt for the
+     Windows installer. This runs the real staging script against stand-in
+     build outputs and holds what it writes to what the updater will accept. */
+  const { checkMacFeed, parseChecksums } = await import('../desktop/updater.js');
+  const { REPOSITORY } = await import('../core/updates.mjs');
+  const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-release-'));
+  try {
+    fs.mkdirSync(path.join(work, 'desktop'));
+    fs.mkdirSync(path.join(work, 'release-assets'));
+    fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(work, 'package.json'));
+    fs.copyFileSync(path.join(ROOT, 'desktop', 'package.json'), path.join(work, 'desktop', 'package.json'));
+    const built = [`Zelos-${version}-arm64.dmg`, `Zelos-${version}-x64.dmg`, `Zelos-${version}-arm64.zip`, `Zelos-${version}-x64.zip`,
+      `Zelos-${version}-setup-arm64.exe`, `Zelos-${version}-setup-x64.exe`, 'zelos-source.zip'];
+    for (const name of built) fs.writeFileSync(path.join(work, 'release-assets', name), Buffer.alloc(2048, name.length));
+    execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'prepare-release.mjs')], {
+      cwd: work, stdio: 'pipe', env: { ...process.env, GITHUB_REF_NAME: `v${version}`, GITHUB_SHA: 'a'.repeat(40) },
+    });
+    const manifest = JSON.parse(fs.readFileSync(path.join(work, 'release-assets', 'release.json'), 'utf8'));
+    const sums = parseChecksums(fs.readFileSync(path.join(work, 'release-assets', 'SHA256SUMS.txt'), 'utf8'));
+    for (const arch of ['arm64', 'x64']) {
+      const name = `zelos-update-mac-${arch}.json`;
+      const feed = JSON.parse(fs.readFileSync(path.join(work, 'release-assets', name), 'utf8'));
+      const zipUrl = `${REPOSITORY}/releases/download/v${version}/Zelos-${version}-${arch}.zip`;
+      assert.equal(checkMacFeed(feed, { version, zipUrl }), true, `${name} must pass the updater's own check`);
+      assert.ok(sums.has(name) && manifest.assets.some((a) => a.name === name), `${name} is published and checksummed`);
+    }
+    for (const name of built) assert.ok(sums.has(name), `${name} is checksummed`);
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('the Mac build makes the ZIPs the updater installs, and CI keeps them', () => {
+  const desktop = JSON.parse(fs.readFileSync(path.join(ROOT, 'desktop', 'package.json'), 'utf8'));
+  const zip = desktop.build.mac.target.find((t) => t.target === 'zip');
+  assert.deepEqual(zip?.arch, ['arm64', 'x64'], 'both Mac architectures need a ZIP for Squirrel.Mac');
+  assert.equal(desktop.build.mac.artifactName, '${productName}-${version}-${arch}.${ext}');
+  const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'desktop.yml'), 'utf8');
+  assert.match(workflow, /desktop\/dist\/\*\.zip/, 'the macOS job must upload the ZIPs it built');
+  assert.equal(desktop.dependencies, undefined, 'the updater adds no runtime dependency to the shell');
 });

@@ -33,7 +33,11 @@ jobs:
           - os: macos-latest
             label: macos disk images
             script: dist:mac
-            out: 'desktop/dist/*.dmg'
+            # The DMGs are for first installs; the ZIPs are what Squirrel.Mac
+            # installs from when an already-installed Zelos updates itself.
+            out: |
+              desktop/dist/*.dmg
+              desktop/dist/*.zip
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

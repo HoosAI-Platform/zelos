@@ -1270,7 +1270,7 @@ function handlePresets(ctx) {
  * text, which is honest and still usable.
  */
 const GUIDES = Object.freeze({
-  microsoftSetup: 'https://github.com/HoosAILLC/zelos/blob/main/docs/OAUTH.md#microsoft--register-zeloss-multi-tenant-public-client',
+  microsoftSetup: 'https://github.com/HoosAI-Platform/zelos/blob/main/docs/OAUTH.md#microsoft--register-zeloss-multi-tenant-public-client',
   calendars: Object.freeze({
     google: Object.freeze({ settings: 'https://calendar.google.com/calendar/r/settings' }),
     icloud: Object.freeze({ caldav: 'https://caldav.icloud.com/', appPasswords: 'https://account.apple.com/account/manage' }),

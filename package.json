@@ -23,10 +23,10 @@
   "homepage": "https://zelos-app.netlify.app",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HoosAILLC/zelos.git"
+    "url": "git+https://github.com/HoosAI-Platform/zelos.git"
   },
   "bugs": {
-    "url": "https://github.com/HoosAILLC/zelos/issues"
+    "url": "https://github.com/HoosAI-Platform/zelos/issues"
   },
   "scripts": {
     "start": "node zelos.mjs",

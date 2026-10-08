@@ -23,7 +23,7 @@ bracketed line at the end is the one to edit.
 > user's own computer. It reads the user's mailbox and calendar, asks a language model of the
 > user's choosing which messages need a reply, a decision, or a follow-up, and shows the result on
 > one page. It has no server of its own: there is no Zelos account, no Zelos backend, and no
-> endpoint operated by us that user data is ever sent to. Source: github.com/HoosAILLC/zelos.
+> endpoint operated by us that user data is ever sent to. Source: github.com/HoosAI-Platform/zelos.
 >
 > **What the scope is used for.** Zelos connects to `imap.gmail.com` over TLS and authenticates
 > with `AUTHENTICATE XOAUTH2` using the access token this scope grants. Over that connection it
@@ -123,14 +123,14 @@ the sections are tested.
 
 | CASA asks about | Zelos's answer | where it is written down and tested |
 |---|---|---|
-| architecture; data flows; where Google user data is stored and processed | no Zelos server; the archive is stored on the user's disk in `~/.zelos`; reading and model calls use configured services, sign-in and refresh use the provider's sign-in services, and manual update checks use the official GitHub release API without archived content or credentials | [SECURITY.md § 5](SECURITY.md#5-what-leaves-your-machine) — the complete list and its footnotes; [README.md § Count the places it could phone home](README.md) is a grep the test suite keeps true |
+| architecture; data flows; where Google user data is stored and processed | no Zelos server; the archive is stored on the user's disk in `~/.zelos`; reading and model calls use configured services, sign-in and refresh use the provider's sign-in services, and update checks (manual, and automatic in a signed desktop app) use the official GitHub release API without archived content or credentials | [SECURITY.md § 5](SECURITY.md#5-what-leaves-your-machine) — the complete list and its footnotes; [README.md § Count the places it could phone home](README.md) is a grep the test suite keeps true |
 | third-party components and supply chain | zero runtime dependencies; Node built-ins only; `package.json` has no `dependencies` key; the desktop shell's Electron is the named exception and never reaches the core | `test/repo.test.mjs` walks every import in the tree; [README.md § Zero dependencies](../README.md) |
 | network exposure | the HTTP server binds `127.0.0.1` only; per-launch session token on every API route; `Origin` and `Host` checks; no CORS at any status; a strict CSP | [SECURITY.md § 6](SECURITY.md#6-the-local-http-surface); `test/security.test.mjs` parses the route table out of the router so no route is exempt |
 | the OAuth redirect | `GET /oauth/callback` is loopback-only, bound to a pending `state`, exchanges the code immediately with PKCE, stores only the refresh token, and answers a page with no token, address or script | [SECURITY.md § 6 and § 7](SECURITY.md) |
 | credential storage | refresh tokens and passwords in the OS keychain (Keychain / DPAPI / libsecret), by reference from config; an encrypted-file fallback whose limits are stated rather than hidden; values never on a command line | [SECURITY.md § 7](SECURITY.md#7-secrets); `test/secrets.test.mjs` |
 | token handling | the refresh token is spent only against the provider's own token endpoint; any other origin is refused before a socket opens; access tokens are refreshed a minute early and never logged | `assertTokenEndpoint` in `core/sources/imap.mjs`; the Google counterpart in `core/sources/oauth.mjs` |
 | transport security | TLS to every non-loopback host; `STARTTLS` stripping aborts the connection before a credential is sent (`requireTls`) | [SECURITY.md § 5 item 1](SECURITY.md#5-what-leaves-your-machine); `test/imap.test.mjs` |
-| logging and telemetry | no telemetry, analytics, crash reporting or update check; logs redact by key name and by value shape | [SECURITY.md § 5 and § 7](SECURITY.md); `core/log.mjs` |
+| logging and telemetry | no telemetry, analytics or crash reporting; update checks carry no user data (SECURITY.md § 5, item 7); logs redact by key name and by value shape | [SECURITY.md § 5 and § 7](SECURITY.md); `core/log.mjs` |
 | input handling / injection | mail is treated as hostile input; model output is rendered, never acted on; URLs screened; markup stripped before storage | [SECURITY.md § 2–4](SECURITY.md); `test/safety.test.mjs`, `test/ai-security.test.mjs` |
 | data deletion | removing the account deletes the keychain entry; deleting `~/.zelos` deletes every message; no copy exists anywhere else | [SECURITY.md § 7](SECURITY.md#7-secrets); `/privacy` on the site § *Deleting everything* |
 | access control to production systems | there are none — no cloud account holds Google user data, so the *Tier 3* deployment review (read-only cloud access for the assessor) has nothing to review | state this in the questionnaire; it is the reason to ask Trust & Safety for the local-only determination in writing |

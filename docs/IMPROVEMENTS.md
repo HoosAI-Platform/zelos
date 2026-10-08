@@ -30,6 +30,6 @@
 1. **Publisher signing and provider registrations.** Register the application with Apple/Microsoft and configure signing credentials; complete provider reviews before advertising a warning-free install or shared OAuth sign-in. These depend on the publisher's accounts and approvals.
 2. **Live provider acceptance.** Exercise real Gmail, Microsoft, iCloud and task-provider accounts through expiry, revocation and reconnect; synthetic connector tests cannot establish provider acceptance.
 3. **Live model evaluation.** Run the synthetic assessment cases with the models people use, then review missed work, invented claims and wording alongside the structured results.
-4. **Signed automatic updates.** The manual release check is available now. Automatic installation needs verified publisher signing and a separately reviewed update path.
+4. **Signed automatic updates.** The updater is built (`desktop/updater.js`, no npm dependencies) and switches itself on once item 1's signing is configured and `updates.macTeamId` / `updates.windowsPublisher` are filled in `desktop/package.json`. What remains is the signing itself and an end-to-end test across two signed releases on each platform (see RELEASING.md).
 
 Automatic sending and cloud synchronization require separate product and permission decisions. Zelos continues to read connected sources and lets the user decide what to do.

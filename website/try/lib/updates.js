@@ -23,7 +23,7 @@ export function updatesPanel() {
           ? `Zelos ${release.latestVersion} is available. You have ${release.currentVersion}.`
           : release.ahead ? `You have ${release.currentVersion}, newer than the latest public release (${release.latestVersion}).`
             : `You have the latest release: Zelos ${release.currentVersion}.`;
-        const official = `https://github.com/HoosAILLC/zelos/releases/tag/v${release.latestVersion}`;
+        const official = `https://github.com/HoosAI-Platform/zelos/releases/tag/v${release.latestVersion}`;
         if (!/^\d+\.\d+\.\d+$/.test(release.latestVersion) || release.releaseUrl !== official) throw new Error('The release link could not be verified.');
         const notes = typeof release.notes === 'string' ? release.notes : '';
         replace(result, [

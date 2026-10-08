@@ -72,7 +72,7 @@
       <h2>What Zelos collects about you</h2>
       <p><strong>Nothing.</strong> The people who make Zelos do not receive your mail, your
         calendar, your address, your name, a device identifier, usage statistics, crash reports,
-        or a record that you installed it. There is no telemetry, no analytics, no automatic update check,
+        or a record that you installed it. There is no telemetry, no analytics,
         no remote font, no remote image. The source is public, the program has zero third-party
         dependencies, and the only outbound connections it can make are the ones listed on this
         page — you can watch it with <code>lsof -i</code> and count them against your own
@@ -81,10 +81,14 @@
         analytics. Netlify keeps ordinary server logs for the requests that fetch it, under its own
         privacy policy, which we do not see.</p>
       <p><strong>Check for updates</strong> in the app asks GitHub for the latest public Zelos
-        release only when you press it. That request includes no mail, calendar data, credentials
-        or installed version. GitHub receives ordinary connection information, such as your IP
-        address. Opening Settings does not start a check, and no update installs itself. The
-        website demo does not perform this check.</p>
+        release. That request includes no mail, calendar data, credentials or installed version.
+        GitHub receives ordinary connection information, such as your IP address. A desktop app
+        signed by the Zelos publisher also makes that request when it opens and every six hours,
+        and downloads a newer release from GitHub; you can turn this off in Settings, and nothing
+        installs until you choose <strong>Restart to update</strong>. On a Mac that download uses
+        macOS's standard downloader, which, like a browser, names the app and its version. Builds that are not yet
+        signed check only when you press the button. The website demo does not perform this
+        check.</p>
     </div>
 
     <div class="glass pane boundary">
@@ -95,7 +99,7 @@
         <li><span class="dot"></span>Your model endpoint <em>you chose it — or localhost</em></li>
         <li><span class="dot"></span>Each source you add <em>you chose it — one host apiece</em></li>
         <li><span class="dot"></span>Google or Microsoft sign-in <em>only while signing in and refreshing</em></li>
-        <li><span class="dot"></span>GitHub releases <em>only when you press Check for updates</em></li>
+        <li><span class="dot"></span>GitHub releases <em>update checks and downloads — you can switch the automatic ones off</em></li>
       </ul>
       <p class="boundary-foot">Never a server of ours. There isn't one.</p>
     </div>
@@ -224,9 +228,9 @@
       <!-- OPERATOR: replace the placeholder below with a real, monitored address
            before submitting the Google consent screen — Google's reviewers check
            that the contact works. -->
-      <p>Questions about this policy: open an issue at <a href="https://github.com/HoosAILLC/zelos/issues">github.com/HoosAILLC/zelos</a>. The source,
+      <p>Questions about this policy: open an issue at <a href="https://github.com/HoosAI-Platform/zelos/issues">github.com/HoosAI-Platform/zelos</a>. The source,
         the security document and the tests are at
-        <a href="https://github.com/HoosAILLC/zelos">github.com/HoosAILLC/zelos</a>.</p>
+        <a href="https://github.com/HoosAI-Platform/zelos">github.com/HoosAI-Platform/zelos</a>.</p>
     </div>
 
   </div>
@@ -238,7 +242,7 @@
   <div class="foot-inner">
     <p class="foot-mark"><img class="brand-wordmark" src="/img/brand/zelos-wordmark.svg" width="1460" height="600" alt="Zelos"></p>
     <p class="foot-line">A local-first second brain. MIT licensed —
-      <a href="https://github.com/HoosAILLC/zelos">the source is on GitHub</a>, all of it, including the tests.
+      <a href="https://github.com/HoosAI-Platform/zelos">the source is on GitHub</a>, all of it, including the tests.
       · <a href="/help">Help</a> · <a href="/privacy">Privacy</a></p>
     <p class="foot-greek">Named for <span lang="grc" title="Zelos, in Greek">Ζῆλος</span> — Zelos — who in Greek myth stood
       beside Zeus as the spirit of devotion: the one who did the work so the god could rule.</p>

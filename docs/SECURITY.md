@@ -298,9 +298,10 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    `core/connectors/http.mjs`, which refuses any other origin before a socket
    exists. Footnote 4 below has the list.
 
-Those are the configured reading and model destinations. A manual update check
-adds the official GitHub release API, as described below.
-There is no telemetry, no analytics, no crash reporting, no automatic update check, no
+Those are the configured reading and model destinations. An update check adds
+the official GitHub release API, and a desktop update download adds GitHub's
+release file storage, both as described in item 7 below.
+There is no telemetry, no analytics, no crash reporting, no
 CDN, no remote font, no remote image, no "anonymous usage statistics". The
 package has zero third-party runtime dependencies, which is what makes that
 claim checkable rather than merely stated: there is no transitive package that
@@ -374,14 +375,60 @@ true.
    from `imap.gmail.com` or `outlook.office365.com` exactly as with a
    password, under item 1. [OAUTH.md](OAUTH.md) has the table of every step.
 
-7. **Manual update checks.** Pressing Settings → About → Check for updates calls
-   `POST /api/updates/check` through the normal local session gate. The server
-   fetches only `https://api.github.com/repos/HoosAILLC/zelos/releases/latest`,
+7. **Update checks and automatic updates.**
+
+   *In a browser, or a desktop build that is not signed:* pressing
+   Settings → About → Check for updates calls `POST /api/updates/check` through
+   the normal local session gate. The server fetches only
+   `https://api.github.com/repos/HoosAI-Platform/zelos/releases/latest`,
    refuses redirects, caps the response at 1 MiB, and applies an eight-second
    deadline. It sends an Accept header and a fixed User-Agent, with no account
    content, credentials, request body or installation identifier. Successful
    results are cached for five minutes. Only exact official release destinations
    are offered; the check downloads and installs nothing. No check runs at startup.
+
+   *In a signed desktop app* (`desktop/updater.js`), with **Install updates
+   automatically** on — the default, switched in Settings → About and stored as
+   `updates.json` in the data folder — the shell makes the same request one
+   minute after it opens and then every six hours (a failed attempt is retried
+   after an hour). The request is the same fixed, credential-free one above.
+   When the release is newer, the files Zelos itself fetches are files **of
+   that release only**: the address must begin
+   `https://github.com/HoosAI-Platform/zelos/releases/download/`, redirects are
+   followed by hand, and every hop must be HTTPS to `github.com`,
+   `objects.githubusercontent.com` or `release-assets.githubusercontent.com`.
+   - **macOS:** the release's `zelos-update-mac-<arch>.json` feed is read
+     and must name exactly that version and that release's ZIP; the update is
+     then shown as ready. Only when the person chooses **Restart to update** is
+     the feed handed to Electron's built-in Squirrel.Mac, because Squirrel
+     installs whatever it has downloaded at the next quit. Squirrel fetches the
+     feed and the ZIP itself, over HTTPS but without Zelos's host list, using
+     macOS's standard downloader (whose User-Agent names the app and its
+     version), and refuses to install a ZIP whose code signature does not
+     satisfy the running app's designated requirement (the same Apple team).
+     Once a restart is chosen, that download has no deadline and the switch
+     does not cancel it: Squirrel cannot be stopped, and a download it
+     finished after Zelos stopped waiting would be installed at the next quit
+     anyway, so Zelos waits for it and then restarts as asked.
+   - **Windows:** the installer for this machine is streamed to a folder in
+     the app's own settings directory (not the data folder), held to the exact
+     size GitHub lists, compared with the release's `SHA256SUMS.txt`, and then
+     checked with Windows' `Get-AuthenticodeSignature`: the status must be
+     `Valid` and the signer's name, as Windows reads it from the certificate,
+     must equal the publisher fixed in the build. Both checks run again when
+     the person chooses **Restart to update**, and the checksum once more in
+     the moment before the installer is started.
+
+   Nothing is installed until the person chooses **Restart to update**, and
+   the restart goes through the normal shutdown first. The page can ask the
+   shell for the updater's state, start a check, choose a download, flip the
+   switch (one boolean) and request the restart; it cannot name a file, an
+   address or a version. A build is "signed" for this purpose only when
+   `updates.macTeamId` / `updates.windowsPublisher` are set in
+   `desktop/package.json` and, on macOS, `codesign` reports that team for the
+   running app; otherwise the updater stays off and says why. Updating adds no
+   npm dependency: Squirrel.Mac is part of Electron, and the rest is Node
+   built-ins and Windows' own PowerShell.
 
 ### `privacy.sendBodies`
 

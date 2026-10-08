@@ -36,18 +36,34 @@ export const VIEWS = Object.freeze([
 ]);
 
 /**
+ * The one update item, from the updater's state (desktop/updater.js). A ready
+ * update offers the restart that installs it; otherwise the item opens
+ * Settings → Updates and checks, which is also where an unsigned build
+ * explains why it cannot update itself.
+ */
+export function updateMenuItem({ update = null, actions = {} } = {}) {
+  if (update?.status === 'ready') {
+    return { label: update.latestVersion ? `Restart to Install Zelos ${update.latestVersion}` : 'Restart to Install Update', click: () => actions.restartToUpdate?.() };
+  }
+  if (!actions.checkForUpdates) return null;
+  return { label: 'Check for Updates…', click: () => actions.checkForUpdates() };
+}
+
+/**
  * `actions` is every effect a menu item can have; main.js supplies them.
  * Missing ones simply drop their item rather than crashing a menu build.
  */
-export function buildAppMenuTemplate({ platform = process.platform, appName = 'Zelos', actions = {} } = {}) {
+export function buildAppMenuTemplate({ platform = process.platform, appName = 'Zelos', actions = {}, update = null } = {}) {
   const mac = platform === 'darwin';
   const template = [];
+  const updateItem = updateMenuItem({ update, actions });
 
   if (mac) {
     template.push({
       label: appName,
       submenu: [
         { role: 'about' },
+        ...(updateItem ? [updateItem] : []),
         { type: 'separator' },
         { label: 'Settings…', accelerator: 'Command+,', click: () => actions.showView?.('settings') },
         { type: 'separator' },
@@ -153,18 +169,28 @@ export function buildAppMenuTemplate({ platform = process.platform, appName = 'Z
       // click on themselves.
       { label: 'Install notes', click: () => actions.openInstallNotes?.() },
       { label: 'Security notes', click: () => actions.openSecurityNotes?.() },
-      ...(mac ? [] : [{ type: 'separator' }, { label: `About ${appName}`, click: () => actions.about?.() }]),
+      ...(mac ? [] : [
+        { type: 'separator' },
+        ...(updateItem ? [updateItem] : []),
+        { label: `About ${appName}`, click: () => actions.about?.() },
+      ]),
     ],
   });
 
   return template;
 }
 
-/** The tray menu — the three things the spec asks for, and nothing else. */
-export function buildTrayMenuTemplate({ actions = {} } = {}) {
+/**
+ * The tray menu — the three things the spec asks for, plus a restart item
+ * only while a downloaded update is waiting. A tray-resident Zelos may not
+ * have a window open, and this is where the person would otherwise not learn
+ * that an update is ready.
+ */
+export function buildTrayMenuTemplate({ actions = {}, update = null } = {}) {
   return [
     { label: 'Check now', click: () => actions.sweepNow?.() },
     { label: 'Open Zelos', click: () => actions.openBoard?.() },
+    ...(update?.status === 'ready' ? [{ type: 'separator' }, updateMenuItem({ update, actions })] : []),
     { type: 'separator' },
     { label: 'Quit Zelos', click: () => actions.quit?.() },
   ];
