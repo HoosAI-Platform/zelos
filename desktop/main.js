@@ -43,14 +43,15 @@ import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
-  app, autoUpdater, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, screen, session, shell,
+  app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, screen, session, shell,
 } from 'electron';
 
 import { classifyTarget, guardWebContents } from './guard.js';
 import { buildAppMenuTemplate, buildTrayMenuTemplate, VIEWS } from './menus.js';
 import { startCore } from './runtime.js';
 import {
-  createUpdater, macTeamIdReader, PENDING_DIR, windowsInstallerLauncher, windowsSignatureVerifier,
+  createUpdater, macAppCopier, macBundleInfoReader, macOtherInstances, macReplaceCheck, macSwapLauncher, macZipExtractor,
+  PENDING_DIR, publicKeyFrom, windowsInstallerLauncher, windowsReplaceCheck, windowsSignatureVerifier,
 } from './updater.js';
 import { clampToDisplays, WindowState } from './window-state.js';
 
@@ -99,22 +100,24 @@ export function versionLabel(version, commit = '') {
 const BUILD_COMMIT = readBuildCommit(HERE);
 
 /**
- * Who a genuine update is signed by, from the `updates` block of the
- * package.json beside this file. Both empty is an unsigned build, and an
- * unsigned build does not update itself — see desktop/updater.js. Values that
- * are not plain names are treated as absent rather than trusted.
+ * How this build recognises a genuine update, from the `updates` block of the
+ * package.json beside this file: the Zelos update keys (Ed25519 public keys,
+ * base64url — scripts/generate-update-key.mjs prints one), and optionally the
+ * Windows publisher an installer's Authenticode signature must also name. No
+ * valid key means the build does not update itself — see desktop/updater.js.
+ * Anything malformed is dropped rather than trusted.
  */
-export function readUpdateSigning(dir) {
+export function readUpdateConfig(dir) {
   try {
     const { updates } = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const keys = Array.isArray(updates?.publicKeys) ? updates.publicKeys : [];
     const publisher = typeof updates?.windowsPublisher === 'string' ? updates.windowsPublisher.trim() : '';
-    const team = typeof updates?.macTeamId === 'string' ? updates.macTeamId.trim() : '';
     return {
+      publicKeys: keys.filter((key) => publicKeyFrom(key) !== null),
       windowsPublisher: /^[^\0-\x1f"=]{1,200}$/.test(publisher) ? publisher : '',
-      macTeamId: /^[A-Z0-9]{10}$/.test(team) ? team : '',
     };
   } catch {
-    return { windowsPublisher: '', macTeamId: '' };
+    return { publicKeys: [], windowsPublisher: '' };
   }
 }
 
@@ -131,8 +134,6 @@ const ALLOWED_PERMISSIONS = new Set(['clipboard-sanitized-write']);
  * dialog that says what happened and where to look.
  */
 const CRASH_WINDOW_MS = 60_000;
-/** How long Squirrel.Mac is given to take over the exit before Zelos quits itself. */
-const UPDATE_INSTALL_GRACE_MS = 30_000;
 const CRASH_RELOAD_DELAYS_MS = Object.freeze([0, 750, 3_000]);
 
 let zelos = null;      // the running core (runtime.js handle)
@@ -747,12 +748,23 @@ export function updateHandlers({ isBoard, getUpdater, restart }) {
  * way it always does — drafts saved, core stopped, home lock released — and
  * beginShutdown hands the exit to the installer instead of a plain quit.
  */
-async function restartToUpdate() {
+let restarting = null;
+
+/** One restart at a time: the menu, the tray and Settings can all ask at once. */
+function restartToUpdate() {
+  restarting ??= restartOnce().finally(() => { restarting = null; });
+  return restarting;
+}
+
+async function restartOnce() {
   if (!updater || updater.state().status !== 'ready') return { ok: false, error: 'No update is ready to install.' };
   if (maintenanceActive) return { ok: false, error: 'Finish the backup or restore first, then restart to update.' };
   if (!(await updater.prepareInstall())) return { ok: false, error: updater.state().error || 'The update could not be verified.' };
-  // A Mac download can take minutes; a backup or restore may have begun meanwhile.
-  if (maintenanceActive) return { ok: false, error: 'Finish the backup or restore first, then restart to update.' };
+  // Preparing a Mac update takes a moment; a backup or restore may have begun meanwhile.
+  if (maintenanceActive) {
+    updater.abandonInstall();
+    return { ok: false, error: 'Finish the backup or restore first, then restart to update.' };
+  }
   let blocked = false;
   const left = await leaveBoard(() => {
     // A backup or restore that began while drafts were saving wins: quitting
@@ -762,6 +774,7 @@ async function restartToUpdate() {
     quitting = true;
     app.quit();
   }, { quit: true });
+  if (blocked || !left) updater.abandonInstall();
   if (blocked) return { ok: false, error: 'Finish the backup or restore first, then restart to update.' };
   return left ? { ok: true } : { ok: false, error: 'Zelos stayed open so your draft edits are not lost.' };
 }
@@ -795,10 +808,21 @@ function startUpdater() {
       // Outside the data folder on purpose: a backup of the data folder must
       // not carry a hundred-megabyte installer along with it.
       downloadDir: path.join(app.getPath('userData'), PENDING_DIR),
-      signing: readUpdateSigning(HERE),
-      mac: process.platform === 'darwin' ? { autoUpdater, readTeamId: macTeamIdReader({ execFile, bundlePath: bundle }) } : {},
-      windows: process.platform === 'win32'
-        ? { verifySignature: windowsSignatureVerifier({ execFile }), launchInstaller: windowsInstallerLauncher({ spawn }) } : {},
+      ...readUpdateConfig(HERE),
+      mac: process.platform === 'darwin' ? {
+        bundlePath: bundle,
+        canReplace: macReplaceCheck(),
+        extractZip: macZipExtractor({ execFile }),
+        readBundleInfo: macBundleInfoReader({ execFile }),
+        copyApp: macAppCopier({ execFile }),
+        otherInstances: macOtherInstances({ execFile }),
+        launchSwap: macSwapLauncher({ spawn }),
+      } : {},
+      windows: process.platform === 'win32' ? {
+        canReplace: windowsReplaceCheck(),
+        verifySignature: windowsSignatureVerifier({ execFile }),
+        launchInstaller: windowsInstallerLauncher({ spawn }),
+      } : {},
       logger: zelos.logger,
       // The menus show only whether an update is ready and which; download
       // progress changes neither, so it does not rebuild them.
@@ -809,7 +833,13 @@ function startUpdater() {
         refreshMenus();
       },
     });
-    updater.start().catch((err) => zelos?.logger.warn('desktop: the updater could not start', { error: err.message }));
+    updater.start().then((state) => {
+      // An update the last restart did not land is said once, out loud; the
+      // Updates panel keeps saying it for the rest of the session.
+      if (!state.installProblem) return;
+      showWindow();
+      return dialog.showMessageBox({ type: 'warning', buttons: ['OK'], message: 'The update did not install', detail: state.installProblem });
+    }).catch((err) => zelos?.logger.warn('desktop: the updater could not start', { error: err.message }));
   } catch (err) {
     updater = null;
     zelos?.logger.warn('desktop: the updater could not start', { error: err.message });
@@ -941,8 +971,8 @@ function buildActions() {
       updater?.checkNow().catch(() => {});
     },
     restartToUpdate: () => {
-      // From the tray or a menu there may be no window; a Mac restart can wait
-      // on a download first, so put the panel that shows its progress up front.
+      // From the tray or a menu there may be no window, and preparing a Mac
+      // update takes a moment; show the panel that reports how it went.
       showWindow();
       mainWindow?.webContents
         .executeJavaScript(`window.location.hash = ${JSON.stringify('#/settings/about')};`)
@@ -1056,17 +1086,11 @@ function beginShutdown() {
       // Electron drains microtasks inside will-quit while its native quit
       // guard is still set. Wait for that event to return before retrying,
       // or an idle core can stop while the second app.quit is ignored.
-      // A restart for an update hands the exit to the installer instead; if
-      // the installer gives up, Zelos still exits rather than hang windowless.
+      // A restart for an update first hands off to the installer (Windows)
+      // or the swap script (macOS); both wait for this process to exit, so
+      // the quit follows either way.
       setImmediate(() => {
-        if (installAfterShutdown && updater?.install({ onFailure: () => app.quit() })) {
-          // macOS: Squirrel relaunches into the update and ends this process
-          // itself; the timer only covers it doing neither. Windows: the
-          // installer runs on its own and waits for Zelos to go, so go.
-          if (process.platform === 'darwin') setTimeout(() => app.quit(), UPDATE_INSTALL_GRACE_MS);
-          else app.quit();
-          return;
-        }
+        if (installAfterShutdown) updater?.install({ onFailure: () => {} });
         app.quit();
       });
     }

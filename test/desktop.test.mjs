@@ -64,39 +64,24 @@ it('shutdown retries native quit after Electron clears its reentrant quit guard'
   assert.equal(observed.exited, true, 'the core stopped but the native shell stayed alive');
 });
 
-it('a restart for an update hands the exit to the installer only after the core has stopped', async () => {
+it('a restart for an update hands off to the installer only after the core has stopped, then quits', async () => {
+  /* The Windows installer and the macOS swap script both wait for this
+     process to exit, so the shell quits after the hand-off — and quits just
+     the same when the hand-off is refused. */
   const source = fs.readFileSync(path.join(REPO, 'desktop/main.js'), 'utf8');
   const shutdown = /function beginShutdown\(\) \{[\s\S]*?\n\}/.exec(source)?.[0];
-  const grace = /const UPDATE_INSTALL_GRACE_MS = [\d_]+;/.exec(source)?.[0];
-  assert.ok(grace, 'the watchdog constant is read from main.js, not restated here');
-  const graceMs = Number(grace.replace(/\D/g, ''));
-  /* Windows: the installer runs detached and waits for Zelos to exit, so the
-     shell must quit itself. macOS: Squirrel ends the process, and a timer
-     quits anyway if it never does. A refused install still exits. */
-  const cases = [
-    ['win32', true, ['updater-stop', 'core-stop', 'install', 'quit'], []],
-    ['darwin', true, ['updater-stop', 'core-stop', 'install'], [graceMs]],
-    ['win32', false, ['updater-stop', 'core-stop', 'install', 'quit'], []],
-  ];
-  for (const [platform, installs, expected, graces] of cases) {
+  for (const installs of [true, false]) {
     const order = [];
-    const timers = [];
     vm.runInNewContext(`
       let shuttingDown = null, crashTimer = null, windowState = null, installAfterShutdown = true;
-      ${grace}
       let updater = { stop: () => order.push('updater-stop'), install: () => { order.push('install'); return installs; } };
       let zelos = { stop: async () => { order.push('core-stop'); } };
       ${shutdown}
       beginShutdown();
-    `, {
-      order, installs, setImmediate, clearTimeout, process: { platform },
-      setTimeout: (fn, ms) => { timers.push(ms); },
-      app: { quit: () => order.push('quit') },
-    });
+    `, { order, installs, setImmediate, clearTimeout, app: { quit: () => order.push('quit') } });
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(order, expected, `${platform}, install ${installs}`);
-    assert.deepEqual(timers, graces);
+    assert.deepEqual(order, ['updater-stop', 'core-stop', 'install', 'quit'], `install ${installs}`);
   }
 });
 
@@ -843,16 +828,6 @@ export const shell = {
 export const ipcMain = {
   handle(channel, handler) { recorded.ipcHandlers.set(channel, handler); },
 };
-// Squirrel.Mac, as far as the shell touches it. An unpackaged shell never
-// points it anywhere, which the suite checks by its staying untouched.
-export const autoUpdater = {
-  handlers: new Map(),
-  feeds: [],
-  on(event, handler) { push(this.handlers, event, handler); return this; },
-  setFeedURL(options) { this.feeds.push(options); },
-  checkForUpdates() { recorded.squirrelChecks = (recorded.squirrelChecks || 0) + 1; },
-  quitAndInstall() { recorded.squirrelInstalls = (recorded.squirrelInstalls || 0) + 1; },
-};
 recorded.revealed = [];
 recorded.ipcHandlers = new Map();
 recorded.userData = '';
@@ -1001,20 +976,21 @@ describe('the shell, booted against a stub Electron', () => {
     }
   });
 
-  it('reads the update signing identity from the shell\'s package.json, refusing anything malformed', () => {
+  it('reads the update keys from the shell\'s package.json, dropping anything malformed', async () => {
     const committed = JSON.parse(fs.readFileSync(path.join(REPO, 'desktop', 'package.json'), 'utf8'));
-    assert.deepEqual(committed.updates, { windowsPublisher: '', macTeamId: '' },
-      'the committed build is unsigned, so it does not update itself');
-    const dir = fs.mkdtempSync(path.join(sandbox, 'signing-'));
+    assert.deepEqual(committed.updates, { publicKeys: [], windowsPublisher: '' },
+      'no key is committed until one is generated, so today\'s build does not update itself');
+    const { generateKeyPairSync } = await import('node:crypto');
+    const x = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x;
+    const dir = fs.mkdtempSync(path.join(sandbox, 'keys-'));
     const read = (updates) => {
       fs.writeFileSync(path.join(dir, 'package.json'), typeof updates === 'string' ? updates : JSON.stringify({ updates }));
-      return main.readUpdateSigning(dir);
+      return main.readUpdateConfig(dir);
     };
-    assert.deepEqual(read({ windowsPublisher: ' Example, Ltd ', macTeamId: 'ABCDE12345' }), { windowsPublisher: 'Example, Ltd', macTeamId: 'ABCDE12345' });
-    assert.deepEqual(read({ windowsPublisher: 'Bad"Name', macTeamId: 'short' }), { windowsPublisher: '', macTeamId: '' });
-    assert.deepEqual(read({ windowsPublisher: 'CN=Injected', macTeamId: 'abcde12345' }), { windowsPublisher: '', macTeamId: '' });
-    assert.deepEqual(read({ windowsPublisher: 42, macTeamId: null }), { windowsPublisher: '', macTeamId: '' });
-    assert.deepEqual(read('{broken'), { windowsPublisher: '', macTeamId: '' });
+    assert.deepEqual(read({ publicKeys: [x, 'nope', 42, `${x}=`], windowsPublisher: ' Example, Ltd ' }), { publicKeys: [x], windowsPublisher: 'Example, Ltd' });
+    assert.deepEqual(read({ publicKeys: x, windowsPublisher: 'Bad"Name' }), { publicKeys: [], windowsPublisher: '' });
+    assert.deepEqual(read({ windowsPublisher: 'CN=Injected' }), { publicKeys: [], windowsPublisher: '' });
+    assert.deepEqual(read('{broken'), { publicKeys: [], windowsPublisher: '' });
   });
 
   it('wires an unpackaged shell\'s updater off, so it contacts nobody', async () => {
@@ -1027,8 +1003,6 @@ describe('the shell, booted against a stub Electron', () => {
     assert.equal(answer.ok, true);
     assert.equal(answer.state.supported, false);
     assert.match(answer.state.reason, /runs from source/);
-    assert.equal(electron.autoUpdater.feeds.length, 0, 'Squirrel is never pointed anywhere by an unpackaged shell');
-    assert.equal(recorded.squirrelChecks ?? 0, 0);
   });
 
   it('answers the update channels for the board\'s own frame only, and takes one boolean at most', async () => {

@@ -21,8 +21,8 @@
     "dist:win": "electron-builder --win"
   },
   "updates": {
-    "windowsPublisher": "",
-    "macTeamId": ""
+    "publicKeys": [],
+    "windowsPublisher": ""
   },
   "devDependencies": {
     "electron": "^43.3.0",

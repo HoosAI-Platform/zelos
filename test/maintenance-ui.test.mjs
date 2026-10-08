@@ -171,20 +171,35 @@ test('the desktop update panel shows no link for an unverified release address',
   assert.match(text(panel), /Downloading Zelos 1\.9\.0… 0%/);
 });
 
-test('an unsigned desktop build keeps the manual check and says why it cannot update itself', async t => {
+test('a desktop build without the update key keeps the manual check and says why it cannot update itself', async t => {
   const document = installDom(t);
   const previousFetch = globalThis.fetch; t.after(() => { globalThis.fetch = previousFetch; });
   const fetched = [];
   globalThis.fetch = (...args) => { fetched.push(args); return new Promise(() => {}); };
-  const fake = fakeUpdaterBridge({ supported: false, reason: 'This build is not signed by the Zelos publisher, so it cannot install updates by itself.' });
+  const fake = fakeUpdaterBridge({ supported: false, reason: 'This build has no Zelos update key, so it cannot install updates by itself.' });
   window.zelos = { desktop: true, updates: fake.bridge };
   const { updatesPanel } = await import('../ui/lib/updates.js');
   const panel = updatesPanel();
   document.body.appendChild(panel);
   await settle();
-  assert.match(text(panel), /not signed by the Zelos publisher/);
+  assert.match(text(panel), /no Zelos update key/);
   assert.equal(panel.querySelector('input'), null, 'no switch for something this build cannot do');
   assert.equal(fetched.length, 0);
   findButton(panel, 'Check for updates').click();
   assert.equal(fetched[0][0], '/api/updates/check', 'the manual check is the one the browser uses');
+});
+
+test('the desktop update panel keeps saying when the last update did not install', async t => {
+  const document = installDom(t);
+  const fake = fakeUpdaterBridge({ installProblem: 'Zelos 1.9.0 was not installed, so you are still on 1.8.1.' });
+  window.zelos = { desktop: true, updates: fake.bridge };
+  const { updatesPanel } = await import('../ui/lib/updates.js');
+  const panel = updatesPanel();
+  document.body.appendChild(panel);
+  await settle();
+  assert.match(text(panel), /1\.9\.0 was not installed/);
+  fake.set({ status: 'current' });
+  findButton(panel, 'Check for updates').click();
+  await settle();
+  assert.match(text(panel), /1\.9\.0 was not installed/, 'a later check does not hide it');
 });

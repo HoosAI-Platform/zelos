@@ -387,48 +387,72 @@ true.
    results are cached for five minutes. Only exact official release destinations
    are offered; the check downloads and installs nothing. No check runs at startup.
 
-   *In a signed desktop app* (`desktop/updater.js`), with **Install updates
-   automatically** on — the default, switched in Settings → About and stored as
-   `updates.json` in the data folder — the shell makes the same request one
-   minute after it opens and then every six hours (a failed attempt is retried
-   after an hour). The request is the same fixed, credential-free one above.
-   When the release is newer, the files Zelos itself fetches are files **of
-   that release only**: the address must begin
+   *In a desktop app that carries the Zelos update key* (`desktop/updater.js`),
+   with **Install updates automatically** on — the default, switched in
+   Settings → About and stored as `updates.json` in the data folder — the shell
+   makes the same request one minute after it opens and then every six hours
+   (a failed attempt is retried after an hour). The request is the same fixed,
+   credential-free one above. When the release is newer, the files it fetches
+   are files **of that release only**: the address must begin
    `https://github.com/HoosAI-Platform/zelos/releases/download/`, redirects are
    followed by hand, and every hop must be HTTPS to `github.com`,
    `objects.githubusercontent.com` or `release-assets.githubusercontent.com`.
-   - **macOS:** the release's `zelos-update-mac-<arch>.json` feed is read
-     and must name exactly that version and that release's ZIP; the update is
-     then shown as ready. Only when the person chooses **Restart to update** is
-     the feed handed to Electron's built-in Squirrel.Mac, because Squirrel
-     installs whatever it has downloaded at the next quit. Squirrel fetches the
-     feed and the ZIP itself, over HTTPS but without Zelos's host list, using
-     macOS's standard downloader (whose User-Agent names the app and its
-     version), and refuses to install a ZIP whose code signature does not
-     satisfy the running app's designated requirement (the same Apple team).
-     Once a restart is chosen, that download has no deadline and the switch
-     does not cancel it: Squirrel cannot be stopped, and a download it
-     finished after Zelos stopped waiting would be installed at the next quit
-     anyway, so Zelos waits for it and then restarts as asked.
-   - **Windows:** the installer for this machine is streamed to a folder in
-     the app's own settings directory (not the data folder), held to the exact
-     size GitHub lists, compared with the release's `SHA256SUMS.txt`, and then
-     checked with Windows' `Get-AuthenticodeSignature`: the status must be
-     `Valid` and the signer's name, as Windows reads it from the certificate,
-     must equal the publisher fixed in the build. Both checks run again when
-     the person chooses **Restart to update**, and the checksum once more in
-     the moment before the installer is started.
+
+   **What makes an update trusted is the update key, not GitHub.** Each release
+   carries `release.json` (its version, and the size and SHA-256 of every file)
+   and `release.json.sig`, an Ed25519 signature over those exact bytes, made in
+   CI with a private key held only as an Actions secret and offline. The app
+   carries the public keys in `desktop/package.json` (`updates.publicKeys`).
+   Before anything large is downloaded, the signature must verify against one
+   of them, the manifest must name the release's own version, and it must list
+   this computer's file at the size GitHub reports. The file is then streamed
+   to a folder in the app's own settings directory (not the data folder) and
+   must hash to the signed SHA-256, or it is deleted. Public keys that cannot
+   mean anything — small-order points, against which a signature can be forged
+   without any private key — are refused as if absent. Someone able to change
+   the GitHub release, but without the private key, cannot get an update
+   accepted. The private key is a secret of a protected GitHub environment
+   that only a reviewer-approved run for a `v*` tag can use; so someone who can
+   get a malicious commit tagged *and* that run approved can ship an update,
+   as can anyone holding the key who can also publish a release.
+   [RELEASING.md](RELEASING.md) sets that up and says what to do if the key
+   leaks.
+   - **Windows:** the verified installer runs silently on **Restart to
+     update** and relaunches Zelos; it closes any other Zelos process,
+     including an AI app's MCP server, which that app will need to restart.
+     Its hash is checked again when the restart is chosen and once more in
+     the moment before it starts. An installation for all users, or in a
+     folder the account cannot write, does not update itself, since the
+     silent installer would need an administrator; the panel says so. The
+     next launch reports an update that did not land, as on macOS. If the build also
+     names a Windows publisher (`updates.windowsPublisher`), Windows'
+     `Get-AuthenticodeSignature` must report `Valid` and that exact publisher
+     as well.
+   - **macOS:** on **Restart to update** the verified ZIP is hashed again and
+     unpacked with the system's `ditto`; the result must be an app with this
+     app's bundle identifier and the new version, and no other Zelos process
+     (such as an AI app's MCP server) may be running from the installed app.
+     It is then copied beside the installed app as `Zelos.app.zelos-new`,
+     while the board is still open to report a refusal. After Zelos has quit,
+     a fixed shell script (`MAC_SWAP_SCRIPT`; every path reaches it as an
+     argument, never as script text) renames the old app aside and the new
+     one into its place, checking each step: if the new one cannot be moved
+     in, the old one is put back, and if even that fails it is left as
+     `Zelos (previous).app`. The script records the outcome, and the next
+     launch compares its own version with the one the restart was installing
+     and reports, in a dialog and in Settings, an update that did not land.
+     macOS may ask the person to allow Zelos to update apps (App
+     Management), and because these builds have no Apple team identity it
+     may ask again for later updates.
 
    Nothing is installed until the person chooses **Restart to update**, and
    the restart goes through the normal shutdown first. The page can ask the
    shell for the updater's state, start a check, choose a download, flip the
    switch (one boolean) and request the restart; it cannot name a file, an
-   address or a version. A build is "signed" for this purpose only when
-   `updates.macTeamId` / `updates.windowsPublisher` are set in
-   `desktop/package.json` and, on macOS, `codesign` reports that team for the
-   running app; otherwise the updater stays off and says why. Updating adds no
-   npm dependency: Squirrel.Mac is part of Electron, and the rest is Node
-   built-ins and Windows' own PowerShell.
+   address or a version. A build with no valid key in `updates.publicKeys`
+   does not update itself and says why. Updating adds no npm dependency: it is
+   Node built-ins (`node:crypto` for Ed25519), the system's `ditto`, `plutil`
+   and `/bin/sh` on macOS, and Windows' own PowerShell.
 
 ### `privacy.sendBodies`
 

@@ -39,12 +39,16 @@ The command-line/browser app retains the full-folder backup procedure above.
 **Settings → About → Check for updates** checks the official GitHub release when
 pressed. It sends no account content or credentials.
 
-**Automatic updates (signed desktop builds).** A desktop app signed by the Zelos
-publisher also checks when it opens and every six hours, gets a newer release
-ready (on Windows it downloads in the background; on a Mac the download happens
-when you restart), verifies the publisher's signature, and installs it when you
-choose **Restart to update** (in Settings → About, the app menu, or the tray). **Install updates automatically** in Settings → About turns this off.
-Current builds are not yet signed, so they check only when you ask and you
+**Automatic updates.** A desktop app that carries the Zelos update key also
+checks when it opens and every six hours, downloads a newer release in the
+background, checks it against the release's signed manifest, and installs it
+when you choose **Restart to update** (in Settings → About, the app menu, or
+the tray). **Install updates automatically** in Settings → About turns this
+off. On a Mac, Zelos must be in a folder you can change (normally
+Applications), and macOS may ask whether Zelos may update apps, possibly at
+each update. On Windows it works for an installation just for you; one for all
+users is updated from the release page. Current
+builds do not carry the key yet, so they check only when you ask and you
 install new versions yourself, as described above.
 
 ## Path 1 — Command-line usage

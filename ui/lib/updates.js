@@ -94,6 +94,8 @@ function desktopUpdatesPanel(bridge) {
   // One status node for the panel's life: a live region that is replaced on
   // every change is one screen readers stop announcing.
   const status = el('p', { class: 'quiet-note', role: 'status', 'aria-live': 'polite', tabindex: '-1', text: 'Reading the update status…' });
+  // An update the last restart did not land, said for the rest of the session.
+  const problemNote = el('p', { class: 'quiet-note', hidden: true });
   const controls = el('div', { class: 'stack' });
   // The release link and notes live apart from the buttons, so a status change
   // during a check or download never snaps shut notes someone is reading.
@@ -103,7 +105,7 @@ function desktopUpdatesPanel(bridge) {
     el('div', { class: 'check-row' }, [box, el('label', { class: 'check-label', for: id, text: 'Install updates automatically' })]),
     el('p', { class: 'field-hint', text: 'Zelos asks GitHub for the latest official release when it opens and every six hours, and gets it ready. Nothing is installed until you choose Restart to update. Your email, calendar and AI keys are never included.' }),
   ]);
-  const panel = el('div', { class: 'stack update-panel' }, [el('h3', { text: 'Updates' }), field, status, controls, release]);
+  const panel = el('div', { class: 'stack update-panel' }, [el('h3', { text: 'Updates' }), field, problemNote, status, controls, release]);
   let state = null;
   let problem = '';
   let shown = '';
@@ -169,6 +171,9 @@ function desktopUpdatesPanel(bridge) {
     if (status.textContent !== text) status.textContent = text;
     if (!state) return;
     field.hidden = false;
+    const installProblem = typeof state.installProblem === 'string' ? state.installProblem : '';
+    if (problemNote.textContent !== installProblem) problemNote.textContent = installProblem;
+    problemNote.hidden = !installProblem;
     box.checked = state.auto === true;
     box.disabled = acting;
 
