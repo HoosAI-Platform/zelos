@@ -1,21 +1,21 @@
-# Zelos 1.8.1
+# Zelos 1.9.0
 
-This patch corrects outdated privacy wording in the native About window, Settings and documentation: manual update checks contact GitHub only when requested. It includes the backup and recovery tools, recorded item history, and navigation improvements introduced in 1.8.
+This release lets the desktop app keep itself up to date. From now on, Zelos finds new versions, downloads them, checks they are genuine, and installs them when you choose to restart. This is the last version you need to install by hand.
 
-- **Back up and restore:** Settings → Your data can create a private backup of the archive, drafts, captures, history, settings and portable credentials. Restore validates the file, previews its contents, asks before replacement, and keeps a recovery copy. Other Zelos and AI clients must close before the data is replaced.
-- **What changed?:** Item cards show recorded changes to deadlines, priority, status and explanations. Repeated unchanged assessments add no noise. History begins with this version; older changes are not invented. Task-selection changes remain distinct from completing a task.
-- **Commands:** The visible Commands button and ⌘/Ctrl+Shift+P open searchable navigation, capture and check actions with keyboard selection and focus return.
-- **Connection recovery:** Reading warnings open the exact account. Setup status distinguishes saved configuration from a recorded successful read; retry controls respect connection waiting times.
-- **Manual update checks:** Settings → About checks the official GitHub release only when pressed, without account content or credentials. It shows release notes and downloads; installation remains a user action.
-- **Maintenance reliability:** Delayed password-store checks cannot start a retired scheduled run after stop/restart. Tests cover sleep, outage recovery, backup corruption, interrupted restore and the new controls.
-- **Faster archive imports:** Initial search indexing checks existing references once per source batch. A synthetic 50,000-message import fell from 360 seconds to 3.3 seconds on the review Mac, with replacement and duplicate handling preserved. See QA-1.8.md for scope and repeatable benchmarks.
+- **Automatic updates:** The Mac and Windows apps look for a new version when they open and every six hours, download it in the background, and show **Restart to update** in Settings → About, the app menu and the tray. Nothing is installed until you choose it, and your drafts are saved first. **Install updates automatically** in Settings → About turns this off.
+- **Update checks carry nothing of yours:** Checks contact only the official Zelos release on GitHub, with no email, calendar data, credentials or AI keys. The browser and command-line versions still check only when you press **Check for updates**.
 
 ## Install or update
 
-Choose the DMG for Apple silicon (`arm64`) or Intel (`x64`), or the Windows installer for your PC (`x64` for most PCs, `arm64` for Windows on Arm). Quit Zelos before replacing the application. Your existing data folder is retained and its database is upgraded on first launch.
+**From 1.8.1 or earlier, install this version by hand once.** Earlier versions cannot update themselves to it. Choose the DMG for Apple silicon (`arm64`) or Intel (`x64`), or the Windows installer for your PC (`x64` for most PCs, `arm64` for Windows on Arm). Quit Zelos before replacing the application. Your existing data folder is kept.
 
-Before upgrading, quit Zelos and copy your data folder to a safe location. The default is `~/.zelos`; a custom data folder is shown in Settings. From 1.8 onward, native backups are also available. A board snapshot is not a full backup. Keep the backup if you may need to return to an older application version; older versions may not support schema 4. Backup files are not password protected and may contain portable credentials. Credentials kept in the operating system's keychain may need reconnecting on a different computer.
+For automatic updates to work afterwards:
 
-These builds are unsigned on Windows and ad-hoc signed, without Apple notarisation, on macOS. Only continue past an operating-system warning if you trust this release. Checksums verify that your downloaded file matches the release; they are not an independent security review. See INSTALL.md for first-launch instructions.
+- **Mac:** drag Zelos into your **Applications** folder and open it from there. A copy opened from the disk image, or from a folder your account cannot change, does not update itself. macOS may ask whether Zelos may update apps; allow it.
+- **Windows:** choose to install Zelos **only for you**. An installation for all users needs an administrator to update, so it does not update itself; download new versions from this page instead.
+
+Before upgrading, back up your data from Settings → Your data, or quit Zelos and copy your data folder (`~/.zelos` by default) to a safe place. Backup files are not password protected and may contain portable credentials.
+
+These builds are unsigned on Windows and ad-hoc signed, without Apple notarisation, on macOS, so the first install still shows an operating-system warning; see INSTALL.md for what to click. Only continue if you trust this release.
 
 Google and Microsoft OAuth client registrations are not bundled. Gmail supports app-password setup when your account permits it; OAuth connections require the registration described in OAUTH.md. A model is needed for assessment and answers; sample data is available to explore the interface first. Zelos does not send messages or modify connected tasks.

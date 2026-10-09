@@ -977,9 +977,13 @@ describe('the shell, booted against a stub Electron', () => {
   });
 
   it('reads the update keys from the shell\'s package.json, dropping anything malformed', async () => {
+    // Every key the build ships must be one the updater accepts: a typo or a
+    // weak placeholder would leave installed apps unable to verify (or, for a
+    // weak key, unable to refuse) any release.
     const committed = JSON.parse(fs.readFileSync(path.join(REPO, 'desktop', 'package.json'), 'utf8'));
-    assert.deepEqual(committed.updates, { publicKeys: [], windowsPublisher: '' },
-      'no key is committed until one is generated, so today\'s build does not update itself');
+    assert.ok(Array.isArray(committed.updates?.publicKeys), 'desktop/package.json carries an updates.publicKeys list');
+    assert.deepEqual(main.readUpdateConfig(path.join(REPO, 'desktop')).publicKeys, committed.updates.publicKeys,
+      'every committed update key must be a valid, strong Ed25519 public key');
     const { generateKeyPairSync } = await import('node:crypto');
     const x = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x;
     const dir = fs.mkdtempSync(path.join(sandbox, 'keys-'));
