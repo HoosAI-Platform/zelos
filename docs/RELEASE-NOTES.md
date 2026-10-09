@@ -1,12 +1,10 @@
-# Zelos 1.9.2
+# Zelos 1.9.3
 
-This release makes a ready update easy to notice.
-
-- **Update banner:** When a new version has been downloaded and checked, a banner across the top of the window says it is ready to install. Choose **Restart to update** to install it now (your drafts are saved first), **Remind me later** to see it again the next time you open Zelos, or **Skip this version** to stop being reminded about this version. A newer version always gets its own banner, and you can still install a skipped one from Settings → About.
+A maintenance release with no new features. It confirms that installed copies of Zelos 1.9.2 learn about new versions through the update banner and install them with **Restart to update**.
 
 ## Install or update
 
-**From 1.9.0 or 1.9.1:** Zelos updates itself. Choose **Restart to update** in Settings → About, the app menu or the tray; your drafts are saved first.
+**From 1.9.0 or later:** Zelos updates itself. From 1.9.2, a banner at the top of the window says when this version is ready; choose **Restart to update**, **Remind me later** or **Skip this version**. You can also install it from Settings → About, the app menu or the tray. Your drafts are saved first.
 
 **From 1.8.1 or earlier:** install this version by hand once. Choose the DMG for Apple silicon (`arm64`) or Intel (`x64`), or the Windows installer for your PC (`x64` for most PCs, `arm64` for Windows on Arm). Quit Zelos before replacing the application; your data folder is kept. For automatic updates afterwards, on a Mac drag Zelos into **Applications** and open it from there, and on Windows install it **only for you**.
 
