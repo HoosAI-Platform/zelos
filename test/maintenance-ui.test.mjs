@@ -114,7 +114,7 @@ test('the desktop update panel reads local state on render and never fetches', a
   assert.deepEqual(fake.calls, [['state', []]]);
   assert.equal(fetched.length, 0);
   assert.match(text(panel), /Install updates automatically/);
-  assert.match(text(panel), /looks for updates when it opens and every few hours/);
+  assert.match(text(panel), /checks for updates periodically/);
   assert.equal(panel.querySelector('input').checked, true);
 
   panel.querySelector('input').checked = false;

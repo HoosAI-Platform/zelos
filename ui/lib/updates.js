@@ -78,7 +78,7 @@ function describeState(state) {
     case 'installing': return 'Restarting to install the update…';
     case 'error': return `Could not update. ${state.error || 'Please try again later.'}`;
     default: return state.auto
-      ? `You have Zelos ${state.currentVersion}. Zelos looks for updates when it opens and every few hours.`
+      ? `You have Zelos ${state.currentVersion}. Zelos checks for updates periodically.`
       : `You have Zelos ${state.currentVersion}. Automatic updates are off.`;
   }
 }
@@ -103,7 +103,7 @@ function desktopUpdatesPanel(bridge) {
   let shownRelease = '';
   const field = el('div', { class: 'field field-check', hidden: true }, [
     el('div', { class: 'check-row' }, [box, el('label', { class: 'check-label', for: id, text: 'Install updates automatically' })]),
-    el('p', { class: 'field-hint', text: 'Zelos asks GitHub for the latest official release when it opens and every six hours, and gets it ready. Nothing is installed until you choose Restart to update. Your email, calendar and AI keys are never included.' }),
+    el('p', { class: 'field-hint', text: 'Zelos periodically checks for updates and gets them ready in the background. Nothing is installed until you choose Restart to update. Your email, calendar and AI keys are never shared.' }),
   ]);
   const panel = el('div', { class: 'stack update-panel' }, [el('h3', { text: 'Updates' }), field, problemNote, status, controls, release]);
   let state = null;
