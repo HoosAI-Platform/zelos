@@ -407,7 +407,11 @@ true.
    of them, the manifest must name the release's own version, and it must list
    this computer's file at the size GitHub reports. The file is then streamed
    to a folder in the app's own settings directory (not the data folder) and
-   must hash to the signed SHA-256, or it is deleted. Public keys that cannot
+   must hash to the signed SHA-256, or it is deleted. The manifest and its
+   signature are kept beside the download, and at the next launch the whole
+   check runs again — signature, version newer than the running app, size and
+   SHA-256 — before the update is offered without downloading it a second
+   time; anything that fails is deleted. Public keys that cannot
    mean anything — small-order points, against which a signature can be forged
    without any private key — are refused as if absent. Someone able to change
    the GitHub release, but without the private key, cannot get an update

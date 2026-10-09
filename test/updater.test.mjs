@@ -570,6 +570,94 @@ describe('the Windows updater', () => {
     assert.equal(newer.updater.state().banner, '1.9.1', 'a newer version gets its own banner');
   });
 
+  it('a ready update survives a relaunch with no network request, and the banner with it', async () => {
+    const fx = fixture();
+    const first = windowsUpdater(fx);
+    await first.updater.start();
+    await first.updater.checkNow();
+    await until(() => first.updater.state().status === 'ready', 'the download');
+    first.updater.snoozeBanner();
+    first.updater.stop();
+
+    const again = windowsUpdater(fx);
+    const state = await again.updater.start();
+    assert.equal(state.status, 'ready', 'ready as soon as Zelos opens');
+    assert.equal(state.latestVersion, '1.9.0');
+    assert.equal(state.releaseUrl, `${REPOSITORY}/releases/tag/v1.9.0`);
+    assert.equal(state.notes, 'Fixes.');
+    assert.equal(state.banner, '1.9.0', 'a snooze lasts only until Zelos is reopened');
+    assert.equal(again.github.seen.length, 0, 'nothing is fetched to know that');
+
+    // The launch check finds the same release and leaves it ready, without downloading it again.
+    again.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => again.github.seen.length === 1, 'the launch check');
+    await settle();
+    assert.equal(again.updater.state().status, 'ready');
+    assert.equal(again.github.seen.length, 1, 'the installer is not fetched a second time');
+    assert.equal(await again.updater.prepareInstall(), true);
+    assert.equal(again.updater.install(), true);
+  });
+
+  for (const [what, tamper] of [
+    ['an installer changed since it was downloaded', (dir, fx) => fs.appendFileSync(path.join(dir, fx.name), 'x')],
+    ['a manifest changed since it was downloaded', (dir) => fs.writeFileSync(path.join(dir, 'release.json'), JSON.stringify({ version: '9.9.9', assets: [] }))],
+    ['a manifest signed with another key', (dir) => fs.writeFileSync(path.join(dir, 'release.json.sig'), signManifest(fs.readFileSync(path.join(dir, 'release.json')), OTHER_KEY.privateKey))],
+    ['a missing signature', (dir) => fs.rmSync(path.join(dir, 'release.json.sig'))],
+  ]) {
+    it(`does not offer ${what} at the next launch`, async () => {
+      const fx = fixture();
+      const first = windowsUpdater(fx);
+      await first.updater.start();
+      await first.updater.checkNow();
+      await until(() => first.updater.state().status === 'ready', 'the download');
+      first.updater.stop();
+      tamper(path.join(sandbox, PENDING_DIR), fx);
+      const again = windowsUpdater(fx);
+      assert.equal((await again.updater.start()).status, 'idle');
+      assert.equal(fs.existsSync(path.join(sandbox, PENDING_DIR)), false, 'the leftovers are deleted');
+    });
+  }
+
+  it('does not offer a kept update that is not newer than the running app', async () => {
+    const fx = fixture();
+    const first = windowsUpdater(fx);
+    await first.updater.start();
+    await first.updater.checkNow();
+    await until(() => first.updater.state().status === 'ready', 'the download');
+    first.updater.stop();
+    const upgraded = windowsUpdater(fx, { deps: { currentVersion: '1.9.0' } });
+    assert.equal((await upgraded.updater.start()).status, 'idle');
+    assert.equal(fs.existsSync(path.join(sandbox, PENDING_DIR)), false);
+  });
+
+  it('keeps checking while an update is ready: a newer release replaces it, a failed check does not', async () => {
+    let now = 1_000_000;
+    const fx = fixture();
+    const h = windowsUpdater(fx, { deps: { now: () => now } });
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    const tick = () => h.timers.timers.find((t) => !t.cleared && t.ms !== FIRST_CHECK_DELAY_MS && t.ms > 30_000);
+
+    fx.release.prerelease = true; // the next check fails
+    now += CHECK_INTERVAL_MS;
+    tick().fn();
+    await until(() => h.github.seen.filter((x) => x.url === RELEASE_API).length === 2, 'the failing check');
+    await settle();
+    assert.equal(h.updater.state().status, 'ready', 'a failed check leaves the ready update alone');
+    assert.equal(h.updater.state().error, '');
+
+    const newer = fixture('1.9.1');
+    fx.release = newer.release;
+    fx.files = newer.files;
+    fx.version = newer.version;
+    now += RETRY_INTERVAL_MS;
+    tick().fn();
+    await until(() => h.updater.state().status === 'ready' && h.updater.state().latestVersion === '1.9.1', 'the newer download');
+    assert.deepEqual(fs.readdirSync(path.join(sandbox, PENDING_DIR)).filter((f) => f.endsWith('.exe')), ['Zelos-1.9.1-setup-x64.exe'], 'only the newer installer is kept');
+    assert.equal(h.updater.state().banner, '1.9.1');
+  });
+
   it('turning automatic updates off while the download is being checked drops it', async () => {
     let h;
     h = windowsUpdater(fixture(), { publisher: PUBLISHER, duringVerify: async () => { h.updater.setAuto(false); } });
