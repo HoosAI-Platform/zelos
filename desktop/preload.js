@@ -43,6 +43,8 @@ const UPDATE_CHECK_CHANNEL = 'zelos:update-check';
 const UPDATE_DOWNLOAD_CHANNEL = 'zelos:update-download';
 const UPDATE_SET_AUTO_CHANNEL = 'zelos:update-set-auto';
 const UPDATE_RESTART_CHANNEL = 'zelos:update-restart';
+const UPDATE_SNOOZE_CHANNEL = 'zelos:update-snooze';
+const UPDATE_SKIP_CHANNEL = 'zelos:update-skip';
 
 // The updater answers with { ok, state } or { ok: false, error }; a channel
 // that throws is reported the same way, so the page has one shape to read.
@@ -66,6 +68,8 @@ try {
         download: () => updateCall(UPDATE_DOWNLOAD_CHANNEL),
         setAuto: (auto) => updateCall(UPDATE_SET_AUTO_CHANNEL, auto === true),
         restart: () => updateCall(UPDATE_RESTART_CHANNEL),
+        snooze: () => updateCall(UPDATE_SNOOZE_CHANNEL),
+        skip: () => updateCall(UPDATE_SKIP_CHANNEL),
       }),
     }),
   );

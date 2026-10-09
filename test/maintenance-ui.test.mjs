@@ -203,3 +203,66 @@ test('the desktop update panel keeps saying when the last update did not install
   await settle();
   assert.match(text(panel), /1\.9\.0 was not installed/, 'a later check does not hide it');
 });
+
+/** The banner's view of the shell: a state with or without a banner, and recorded choices. */
+function bannerBridge(banner = '1.9.2', { restart = { ok: true } } = {}) {
+  const calls = [];
+  let current = banner;
+  const answer = () => Promise.resolve({ ok: true, state: { status: current ? 'ready' : 'current', banner: current } });
+  return {
+    calls,
+    set: (value) => { current = value; },
+    bridge: {
+      state: () => { calls.push('state'); return answer(); },
+      snooze: () => { calls.push('snooze'); current = ''; return answer(); },
+      skip: () => { calls.push('skip'); current = ''; return answer(); },
+      restart: () => { calls.push('restart'); return Promise.resolve(restart); },
+    },
+  };
+}
+
+test('the update banner appears for a ready update and goes whichever way out is chosen', async t => {
+  for (const [label, expected] of [['Restart to update', ['state', 'snooze', 'restart']], ['Remind me later', ['state', 'snooze']], ['Skip this version', ['state', 'skip']]]) {
+    const document = installDom(t);
+    const fake = bannerBridge();
+    window.zelos = { desktop: true, updates: fake.bridge };
+    const { updateBanner } = await import('../ui/lib/update-banner.js');
+    const slot = updateBanner();
+    document.body.appendChild(slot);
+    await settle();
+    assert.match(text(slot), /Zelos 1\.9\.2 is ready to install/);
+    findButton(slot, label).click();
+    assert.equal(text(slot), '', `${label} removes the banner at once`);
+    await settle();
+    assert.deepEqual(fake.calls, expected, label);
+  }
+});
+
+test('the update banner shows nothing without a ready update, outside the desktop app, or for a malformed version', async t => {
+  const document = installDom(t);
+  const { updateBanner } = await import('../ui/lib/update-banner.js');
+  window.zelos = undefined;
+  assert.equal(text(updateBanner()), '', 'a browser tab has no updater');
+  for (const banner of ['', '<b>1.9.2</b>', '1.9']) {
+    window.zelos = { desktop: true, updates: bannerBridge(banner).bridge };
+    const slot = updateBanner();
+    document.body.appendChild(slot);
+    await settle();
+    assert.equal(text(slot), '', JSON.stringify(banner));
+  }
+});
+
+test('a restart that does not go ahead from the banner says why', async t => {
+  const document = installDom(t);
+  const fake = bannerBridge('1.9.2', { restart: { ok: false, error: 'Zelos stayed open so your draft edits are not lost.' } });
+  window.zelos = { desktop: true, updates: fake.bridge };
+  const { updateBanner } = await import('../ui/lib/update-banner.js');
+  const errors = [];
+  const slot = updateBanner({ onError: (message) => errors.push(message) });
+  document.body.appendChild(slot);
+  await settle();
+  findButton(slot, 'Restart to update').click();
+  await settle();
+  assert.deepEqual(errors, ['Zelos stayed open so your draft edits are not lost.']);
+  assert.equal(text(slot), '', 'the banner waits for the next launch rather than coming back');
+});

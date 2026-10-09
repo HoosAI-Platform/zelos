@@ -851,6 +851,7 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 .banner-list { margin-top: 0.5rem; display: grid; gap: 0.25rem; font-size: 0.8125rem; color: var(--ink-2); }
 .banner-list li { padding-left: 0.8rem; border-left: 2px solid var(--line); overflow-wrap: anywhere; }
 .banner-actions { margin-top: 0.8rem; }
+.update-banner { margin-top: 0.6rem; }
 
 .screen {
   display: grid;

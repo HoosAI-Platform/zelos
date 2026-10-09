@@ -106,22 +106,26 @@ const UNSUPPORTED = Object.freeze({
  * Settings
  * ------------------------------------------------------------------ */
 
+const VERSION = /^\d+\.\d+\.\d+$/;
+
 /**
- * `<home>/updates.json` holds one choice: whether to update automatically.
- * Missing, unreadable or malformed means the default, which is on.
+ * `<home>/updates.json` holds two choices: whether to update automatically
+ * (missing, unreadable or malformed means the default, which is on), and the
+ * one version whose "ready to install" banner the person chose to skip.
  */
 export function readUpdateSettings(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { auto: parsed?.auto !== false };
+    return { auto: parsed?.auto !== false, skipped: VERSION.test(parsed?.skipped ?? '') ? parsed.skipped : '' };
   } catch {
-    return { auto: true };
+    return { auto: true, skipped: '' };
   }
 }
 
 export function writeUpdateSettings(file, settings) {
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify({ auto: settings.auto === true }, null, 2)}\n`, { mode: 0o600 });
+  const saved = { auto: settings.auto === true, ...(VERSION.test(settings.skipped ?? '') ? { skipped: settings.skipped } : {}) };
+  fs.writeFileSync(temp, `${JSON.stringify(saved, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(temp, file);
 }
 
@@ -475,6 +479,7 @@ export function createUpdater({
   let stopped = false;
   let installFailed = null;
   let installProblem = '';       // an update the last restart did not land; kept for the session
+  let snoozed = '';              // a version whose banner waits for the next launch; never saved
 
   const log = (level, message, data) => { try { logger?.[level]?.(`updater: ${message}`, data); } catch { /* logging never breaks updating */ } };
 
@@ -490,6 +495,9 @@ export function createUpdater({
     progress,
     error,
     installProblem,
+    // The version the "ready to install" banner offers, or '' for none: a
+    // verified update that was neither skipped nor put off until next launch.
+    banner: status === 'ready' && latestVersion && latestVersion !== settings.skipped && latestVersion !== snoozed ? latestVersion : '',
     checkedAt: checkedAt === null ? null : new Date(checkedAt).toISOString(),
   });
 
@@ -514,6 +522,14 @@ export function createUpdater({
     nextAttemptAt = now() + RETRY_INTERVAL_MS;
     set({ status: 'error', error: message, progress: null });
   };
+
+  function save() {
+    try {
+      writeUpdateSettings(settingsFile, settings);
+    } catch (err) {
+      log('warn', 'could not save the update setting', { error: err.message });
+    }
+  }
 
   /** Empty the download folder; a file the system still holds open is left for next time. */
   function removeDownloads() {
@@ -788,12 +804,8 @@ export function createUpdater({
 
     setAuto(auto) {
       if (typeof auto !== 'boolean') return snapshot();
-      settings = { auto };
-      try {
-        writeUpdateSettings(settingsFile, settings);
-      } catch (err) {
-        log('warn', 'could not save the update setting', { error: err.message });
-      }
+      settings = { ...settings, auto };
+      save();
       // Turning updates off stops a download in progress; one that is already
       // verified and waiting stays ready, because the person can still choose it.
       if (!auto && (status === 'downloading' || status === 'checking')) {
@@ -839,6 +851,23 @@ export function createUpdater({
       }
       if (ready === preparing) set({ error: '' });
       return ready === preparing;
+    },
+
+    /** "Remind me later": hide the banner until Zelos is next opened. */
+    snoozeBanner() {
+      if (latestVersion) snoozed = latestVersion;
+      changed();
+      return snapshot();
+    },
+
+    /** "Skip this version": no banner for it again; a newer version still gets one. */
+    skipBanner() {
+      if (latestVersion) {
+        settings = { ...settings, skipped: latestVersion };
+        save();
+      }
+      changed();
+      return snapshot();
     },
 
     /**
