@@ -3062,7 +3062,7 @@ function privacyPanel() {
       hint: 'Switched off, the AI sees only who wrote, the subject, and the first couple of lines. It will be worse at judging what matters, and it will say less about why.',
     }),
     fold('Advanced', [
-      el('p', { class: 'quiet-note', text: 'There is no telemetry, analytics or remote font. Reading and AI use your configured services; Check for updates contacts GitHub only when you press it. These two numbers cap what each AI request carries.' }),
+      el('p', { class: 'quiet-note', text: 'There is no telemetry, analytics or remote font. Reading and AI use your configured services; update checks contact only the official GitHub release, without your data. These two numbers cap what each AI request carries.' }),
       el('div', { class: 'grid-2' }, [
         field('Characters of each email sent to the AI', charsInput),
         field('Most items per check', maxInput),

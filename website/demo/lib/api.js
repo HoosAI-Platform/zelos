@@ -877,7 +877,7 @@ const ROUTES = [
      outbound pages from this route, as the app does from core/server.mjs, so
      ui/ never carries a remote host of its own. Same addresses as the app. */
   ['GET', /^\/api\/guides$/, () => ({
-    microsoftSetup: 'https://github.com/HoosAILLC/zelos/blob/main/docs/OAUTH.md#microsoft--register-zeloss-multi-tenant-public-client',
+    microsoftSetup: 'https://github.com/HoosAI-Platform/zelos/blob/main/docs/OAUTH.md#microsoft--register-zeloss-multi-tenant-public-client',
     calendars: {
       google: { settings: 'https://calendar.google.com/calendar/r/settings' },
       icloud: { caldav: 'https://caldav.icloud.com/', appPasswords: 'https://account.apple.com/account/manage' },

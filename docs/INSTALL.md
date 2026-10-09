@@ -21,7 +21,7 @@ is not a complete backup, and credentials in your operating system's keychain
 may need reconnecting on another computer.
 
 Release notes, all four installers, source, and SHA-256 checksums are on the
-[GitHub releases page](https://github.com/HoosAILLC/zelos/releases).
+[GitHub releases page](https://github.com/HoosAI-Platform/zelos/releases).
 
 Starting with 1.8, the desktop app also offers **Settings → Your data → Create backup**.
 It saves a consistent archive of the database, captures, drafts, item history,
@@ -37,7 +37,19 @@ using it. Only restore a backup you trust, with a version that supports its sche
 The command-line/browser app retains the full-folder backup procedure above.
 
 **Settings → About → Check for updates** checks the official GitHub release when
-pressed. It sends no account content or credentials, and does not install anything.
+pressed. It sends no account content or credentials.
+
+**Automatic updates.** A desktop app that carries the Zelos update key also
+checks when it opens and every six hours, downloads a newer release in the
+background, checks it against the release's signed manifest, and installs it
+when you choose **Restart to update** (in Settings → About, the app menu, or
+the tray). **Install updates automatically** in Settings → About turns this
+off. On a Mac, Zelos must be in a folder you can change (normally
+Applications), and macOS may ask whether Zelos may update apps, possibly at
+each update. On Windows it works for an installation just for you; one for all
+users is updated from the release page. Current
+builds do not carry the key yet, so they check only when you ask and you
+install new versions yourself, as described above.
 
 ## Path 1 — Command-line usage
 

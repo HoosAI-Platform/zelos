@@ -39,6 +39,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
@@ -48,6 +49,10 @@ import {
 import { classifyTarget, guardWebContents } from './guard.js';
 import { buildAppMenuTemplate, buildTrayMenuTemplate, VIEWS } from './menus.js';
 import { startCore } from './runtime.js';
+import {
+  createUpdater, macAppCopier, macBundleInfoReader, macOtherInstances, macReplaceCheck, macSwapLauncher, macZipExtractor,
+  PENDING_DIR, publicKeyFrom, windowsInstallerLauncher, windowsReplaceCheck, windowsSignatureVerifier,
+} from './updater.js';
 import { clampToDisplays, WindowState } from './window-state.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -94,6 +99,28 @@ export function versionLabel(version, commit = '') {
 
 const BUILD_COMMIT = readBuildCommit(HERE);
 
+/**
+ * How this build recognises a genuine update, from the `updates` block of the
+ * package.json beside this file: the Zelos update keys (Ed25519 public keys,
+ * base64url — scripts/generate-update-key.mjs prints one), and optionally the
+ * Windows publisher an installer's Authenticode signature must also name. No
+ * valid key means the build does not update itself — see desktop/updater.js.
+ * Anything malformed is dropped rather than trusted.
+ */
+export function readUpdateConfig(dir) {
+  try {
+    const { updates } = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const keys = Array.isArray(updates?.publicKeys) ? updates.publicKeys : [];
+    const publisher = typeof updates?.windowsPublisher === 'string' ? updates.windowsPublisher.trim() : '';
+    return {
+      publicKeys: keys.filter((key) => publicKeyFrom(key) !== null),
+      windowsPublisher: /^[^\0-\x1f"=]{1,200}$/.test(publisher) ? publisher : '',
+    };
+  } catch {
+    return { publicKeys: [], windowsPublisher: '' };
+  }
+}
+
 /** ui/app.css: marble ground and black-figure ground. Kills the white flash. */
 const GROUND = { light: '#F4EFE6', dark: '#12100E' };
 /** The one permission the board needs: the Owed view copies drafts. */
@@ -119,6 +146,8 @@ let shuttingDown = null;
 let leaving = null;
 let leaveAction = null;
 let maintenanceActive = false;
+let updater = null;
+let installAfterShutdown = false;
 let crashes = [];      // timestamps of recent render-process-gone events
 let crashTimer = null;
 
@@ -534,7 +563,7 @@ function createTray(actions) {
     if (image.isEmpty()) throw new Error(`tray icon missing or unreadable`);
     tray = new Tray(image);
     tray.setToolTip(`${APP_NAME} — ${zelos.url}`);
-    tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate({ actions })));
+    tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate({ actions, update: updater?.state() })));
     // On Windows and Linux a left click is how people expect to reopen a
     // tray app; on macOS a click opens the menu, so this is not wired there.
     if (process.platform !== 'darwin') tray.on('click', () => actions.openBoard());
@@ -681,9 +710,155 @@ function installBackups() {
   ipcMain.handle(RESTORE_BACKUP_CHANNEL, handlers.restoreBackup);
 }
 
+export const UPDATE_STATE_CHANNEL = 'zelos:update-state';
+export const UPDATE_CHECK_CHANNEL = 'zelos:update-check';
+export const UPDATE_DOWNLOAD_CHANNEL = 'zelos:update-download';
+export const UPDATE_SET_AUTO_CHANNEL = 'zelos:update-set-auto';
+export const UPDATE_RESTART_CHANNEL = 'zelos:update-restart';
+
+/**
+ * The page's view of the updater. Every channel answers the board's own main
+ * frame and nobody else, and only one of them carries an argument: the
+ * automatic-updates switch, which must be a real boolean. Nothing the page
+ * sends can name a file, an address or a version — those come only from the
+ * verified release.
+ */
+export function updateHandlers({ isBoard, getUpdater, restart }) {
+  const refused = { ok: false, error: 'This action is only available in the Zelos desktop board.' };
+  const guard = (fn) => async (event, ...args) => {
+    if (!isBoard(event)) return refused;
+    const current = getUpdater();
+    if (!current) return { ok: false, error: 'Updates are not ready yet.' };
+    return fn(current, ...args);
+  };
+  const noArgs = (fn) => guard((current, ...args) => (args.length ? refused : fn(current)));
+  return {
+    state: noArgs((current) => ({ ok: true, state: current.state() })),
+    check: noArgs(async (current) => ({ ok: true, state: await current.checkNow() })),
+    download: noArgs(async (current) => ({ ok: true, state: await current.download() })),
+    setAuto: guard((current, ...args) => (args.length === 1 && typeof args[0] === 'boolean'
+      ? { ok: true, state: current.setAuto(args[0]) } : refused)),
+    restart: noArgs(() => restart()),
+  };
+}
+
+/**
+ * Restart into a downloaded update. The installer is re-verified first, while
+ * there is still a window to explain a failure in; then the shell leaves the
+ * way it always does — drafts saved, core stopped, home lock released — and
+ * beginShutdown hands the exit to the installer instead of a plain quit.
+ */
+let restarting = null;
+
+/** One restart at a time: the menu, the tray and Settings can all ask at once. */
+function restartToUpdate() {
+  restarting ??= restartOnce().finally(() => { restarting = null; });
+  return restarting;
+}
+
+async function restartOnce() {
+  if (!updater || updater.state().status !== 'ready') return { ok: false, error: 'No update is ready to install.' };
+  if (maintenanceActive) return { ok: false, error: 'Finish the backup or restore first, then restart to update.' };
+  if (!(await updater.prepareInstall())) return { ok: false, error: updater.state().error || 'The update could not be verified.' };
+  // Preparing a Mac update takes a moment; a backup or restore may have begun meanwhile.
+  if (maintenanceActive) {
+    updater.abandonInstall();
+    return { ok: false, error: 'Finish the backup or restore first, then restart to update.' };
+  }
+  let blocked = false;
+  const left = await leaveBoard(() => {
+    // A backup or restore that began while drafts were saving wins: quitting
+    // now would be refused anyway, and the install flag must not outlive it.
+    if (maintenanceActive) { blocked = true; return; }
+    installAfterShutdown = true;
+    quitting = true;
+    app.quit();
+  }, { quit: true });
+  if (blocked || !left) updater.abandonInstall();
+  if (blocked) return { ok: false, error: 'Finish the backup or restore first, then restart to update.' };
+  return left ? { ok: true } : { ok: false, error: 'Zelos stayed open so your draft edits are not lost.' };
+}
+
+function installUpdates() {
+  const handlers = updateHandlers({
+    isBoard: (event) => Boolean(mainWindow) && !mainWindow.isDestroyed()
+      && event?.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame
+      && classifyTarget(event.senderFrame?.url, { port: zelos?.port ?? 0 }).action === 'internal',
+    getUpdater: () => updater,
+    restart: restartToUpdate,
+  });
+  ipcMain.handle(UPDATE_STATE_CHANNEL, handlers.state);
+  ipcMain.handle(UPDATE_CHECK_CHANNEL, handlers.check);
+  ipcMain.handle(UPDATE_DOWNLOAD_CHANNEL, handlers.download);
+  ipcMain.handle(UPDATE_SET_AUTO_CHANNEL, handlers.setAuto);
+  ipcMain.handle(UPDATE_RESTART_CHANNEL, handlers.restart);
+}
+
+let menuKey = '';
+
+function startUpdater() {
+  const bundle = path.resolve(path.dirname(process.execPath), '..', '..');
+  try {
+    updater = createUpdater({
+      currentVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      isPackaged: app.isPackaged,
+      settingsFile: path.join(zelos.paths.home, 'updates.json'),
+      // Outside the data folder on purpose: a backup of the data folder must
+      // not carry a hundred-megabyte installer along with it.
+      downloadDir: path.join(app.getPath('userData'), PENDING_DIR),
+      ...readUpdateConfig(HERE),
+      mac: process.platform === 'darwin' ? {
+        bundlePath: bundle,
+        canReplace: macReplaceCheck(),
+        extractZip: macZipExtractor({ execFile }),
+        readBundleInfo: macBundleInfoReader({ execFile }),
+        copyApp: macAppCopier({ execFile }),
+        otherInstances: macOtherInstances({ execFile }),
+        launchSwap: macSwapLauncher({ spawn }),
+      } : {},
+      windows: process.platform === 'win32' ? {
+        canReplace: windowsReplaceCheck(),
+        verifySignature: windowsSignatureVerifier({ execFile }),
+        launchInstaller: windowsInstallerLauncher({ spawn }),
+      } : {},
+      logger: zelos.logger,
+      // The menus show only whether an update is ready and which; download
+      // progress changes neither, so it does not rebuild them.
+      onChange: (state) => {
+        const key = `${state.status === 'ready'}:${state.latestVersion}`;
+        if (key === menuKey) return;
+        menuKey = key;
+        refreshMenus();
+      },
+    });
+    updater.start().then((state) => {
+      // An update the last restart did not land is said once, out loud; the
+      // Updates panel keeps saying it for the rest of the session.
+      if (!state.installProblem) return;
+      showWindow();
+      return dialog.showMessageBox({ type: 'warning', buttons: ['OK'], message: 'The update did not install', detail: state.installProblem });
+    }).catch((err) => zelos?.logger.warn('desktop: the updater could not start', { error: err.message }));
+  } catch (err) {
+    updater = null;
+    zelos?.logger.warn('desktop: the updater could not start', { error: err.message });
+  }
+}
+
+/** Rebuild the menus whose items depend on state — the login item, a ready update. */
+function refreshMenus() {
+  installAppMenu();
+  if (tray && actions) {
+    try {
+      tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate({ actions, update: updater?.state() })));
+    } catch { /* a tray that vanished is not worth failing over */ }
+  }
+}
+
 function installAppMenu() {
   if (!actions) return;
-  Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenuTemplate({ appName: APP_NAME, actions })));
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenuTemplate({ appName: APP_NAME, actions, update: updater?.state() })));
 }
 
 /**
@@ -703,7 +878,7 @@ export function aboutText({ version, commit = '', url = null, home = '' }) {
       `Data    ${home}`,
       '',
       'Listening on 127.0.0.1 only. Reading and AI use the services you configure.',
-      'Update checks contact GitHub only when you request them.',
+      'Update checks contact GitHub, without your data, and can be turned off in Settings.',
     ].join('\n'),
     buttons: ['OK'],
   };
@@ -781,6 +956,32 @@ function buildActions() {
       // The checkbox's state is read when the template is built, so the menu is
       // rebuilt rather than left showing what it showed a moment ago.
       installAppMenu();
+    },
+
+    /**
+     * Settings → About, where the Updates panel is, with a fresh check started
+     * for the person who asked. A build that cannot update itself shows its
+     * manual check there instead, and the reason.
+     */
+    checkForUpdates: () => {
+      showWindow();
+      mainWindow?.webContents
+        .executeJavaScript(`window.location.hash = ${JSON.stringify('#/settings/about')};`)
+        .catch((err) => zelos?.logger.warn('desktop: could not open Settings', { error: err.message }));
+      updater?.checkNow().catch(() => {});
+    },
+    restartToUpdate: () => {
+      // From the tray or a menu there may be no window, and preparing a Mac
+      // update takes a moment; show the panel that reports how it went.
+      showWindow();
+      mainWindow?.webContents
+        .executeJavaScript(`window.location.hash = ${JSON.stringify('#/settings/about')};`)
+        .catch(() => {});
+      restartToUpdate().then((result) => {
+        if (result.ok) return;
+        showWindow();
+        return dialog.showMessageBox({ type: 'warning', buttons: ['OK'], message: 'Zelos did not restart to update', detail: result.error });
+      }).catch(() => {});
     },
 
     openDataFolder: () => openLocalPath(zelos.paths.home),
@@ -875,6 +1076,7 @@ function beginShutdown() {
         crashTimer = null;
       }
       windowState?.capture();
+      updater?.stop();
       await zelos?.stop();
     } catch {
       // Quitting is not allowed to fail; whatever did not close is about to
@@ -884,7 +1086,13 @@ function beginShutdown() {
       // Electron drains microtasks inside will-quit while its native quit
       // guard is still set. Wait for that event to return before retrying,
       // or an idle core can stop while the second app.quit is ignored.
-      setImmediate(() => app.quit());
+      // A restart for an update first hands off to the installer (Windows)
+      // or the swap script (macOS); both wait for this process to exit, so
+      // the quit follows either way.
+      setImmediate(() => {
+        if (installAfterShutdown) updater?.install({ onFailure: () => {} });
+        app.quit();
+      });
     }
   })();
   return shuttingDown;
@@ -1059,7 +1267,7 @@ async function bootstrap() {
     app.setAboutPanelOptions({
       applicationName: APP_NAME,
       applicationVersion: versionLabel(app.getVersion(), BUILD_COMMIT),
-      copyright: 'MIT licensed. Local-first: reading and AI use the services you configure. Update checks contact GitHub only when you request them.',
+      copyright: 'MIT licensed. Local-first: reading and AI use the services you configure. Update checks contact GitHub without your data.',
     });
   }
   if (process.platform === 'darwin' && app.dock) {
@@ -1073,6 +1281,8 @@ async function bootstrap() {
   createWindow();
   installShowHome();
   installBackups();
+  installUpdates();
+  startUpdater();
 
   // The badge is the only thing a swept-in-the-background Zelos says while its
   // window is shut. It is set when a sweep ends — from the clock or by hand,

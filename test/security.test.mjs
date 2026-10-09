@@ -1418,7 +1418,7 @@ test('UI remote destinations are limited to the explicitly requested official re
   for (const file of files) {
     const original = fs.readFileSync(file, 'utf8');
     const source = file === path.join(REPO, 'ui/lib/updates.js')
-      ? original.replace('const official = `https://github.com/HoosAILLC/zelos/releases/tag/v${release.latestVersion}`;', '') : original;
+      ? original.replace('const OFFICIAL_RELEASE = (version) => `https://github.com/HoosAI-Platform/zelos/releases/tag/v${version}`;', '') : original;
     const remotes = [...source.matchAll(/https?:\/\/([A-Za-z0-9.-]+)/g)]
       .map((m) => m[1])
       .filter((host) => !['127.0.0.1', 'localhost', 'www.w3.org'].includes(host));

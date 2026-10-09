@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compareVersions, describeRelease, createUpdateChecker, RELEASE_API } from '../core/updates.mjs';
 
-const BASE = 'https://github.com/HoosAILLC/zelos';
+const BASE = 'https://github.com/HoosAI-Platform/zelos';
 function release(version = '1.8.0') {
   return {
     tag_name: `v${version}`, html_url: `${BASE}/releases/tag/v${version}`,

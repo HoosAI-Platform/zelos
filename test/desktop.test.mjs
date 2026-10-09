@@ -46,7 +46,7 @@ it('shutdown retries native quit after Electron clears its reentrant quit guard'
   // native is_quitting flag after a prevented event. Model that boundary;
   // a plain EventEmitter misses the reentrant second-quit failure.
   vm.runInNewContext(`
-    let shuttingDown = null, crashTimer = null, windowState = null;
+    let shuttingDown = null, crashTimer = null, windowState = null, updater = null, installAfterShutdown = false;
     let zelos = { stop: async () => { observed.released = true; } };
     ${shutdown}
     beginShutdown();
@@ -62,6 +62,27 @@ it('shutdown retries native quit after Electron clears its reentrant quit guard'
   assert.equal(observed.released, true);
   assert.equal(observed.ignored, 0, 'Electron ignored the reentrant second quit');
   assert.equal(observed.exited, true, 'the core stopped but the native shell stayed alive');
+});
+
+it('a restart for an update hands off to the installer only after the core has stopped, then quits', async () => {
+  /* The Windows installer and the macOS swap script both wait for this
+     process to exit, so the shell quits after the hand-off — and quits just
+     the same when the hand-off is refused. */
+  const source = fs.readFileSync(path.join(REPO, 'desktop/main.js'), 'utf8');
+  const shutdown = /function beginShutdown\(\) \{[\s\S]*?\n\}/.exec(source)?.[0];
+  for (const installs of [true, false]) {
+    const order = [];
+    vm.runInNewContext(`
+      let shuttingDown = null, crashTimer = null, windowState = null, installAfterShutdown = true;
+      let updater = { stop: () => order.push('updater-stop'), install: () => { order.push('install'); return installs; } };
+      let zelos = { stop: async () => { order.push('core-stop'); } };
+      ${shutdown}
+      beginShutdown();
+    `, { order, installs, setImmediate, clearTimeout, app: { quit: () => order.push('quit') } });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(order, ['updater-stop', 'core-stop', 'install', 'quit'], `install ${installs}`);
+  }
 });
 
 /* ------------------------------------------------------------------ *
@@ -431,6 +452,36 @@ describe('menus', () => {
     assert.deepEqual(fired, ['sweep', 'open', 'quit']);
   });
 
+  it('adds a restart item to the tray only while a downloaded update is waiting', () => {
+    const fired = [];
+    const actions = { restartToUpdate: () => fired.push('restart'), checkForUpdates: () => fired.push('check') };
+    for (const status of ['idle', 'checking', 'downloading', 'available', 'error']) {
+      assert.deepEqual(labels(buildTrayMenuTemplate({ actions, update: { status, latestVersion: '1.9.0' } })),
+        ['Check now', 'Open Zelos', 'separator', 'Quit Zelos'], status);
+    }
+    const ready = buildTrayMenuTemplate({ actions, update: { status: 'ready', latestVersion: '1.9.0' } });
+    assert.deepEqual(labels(ready), ['Check now', 'Open Zelos', 'separator', 'Restart to Install Zelos 1.9.0', 'separator', 'Quit Zelos']);
+    ready[3].click();
+    assert.deepEqual(fired, ['restart']);
+  });
+
+  it('offers Check for Updates in the app menu, and Restart once an update is ready', () => {
+    const fired = [];
+    const actions = { restartToUpdate: () => fired.push('restart'), checkForUpdates: () => fired.push('check') };
+    const mac = buildAppMenuTemplate({ platform: 'darwin', actions, update: { status: 'idle' } });
+    const item = mac[0].submenu[1];
+    assert.equal(item.label, 'Check for Updates…');
+    item.click();
+    const win = buildAppMenuTemplate({ platform: 'win32', actions, update: { status: 'ready', latestVersion: '1.9.0' } });
+    const help = win.find((menu) => menu.label === 'Help').submenu;
+    const restart = help.find((entry) => entry.label === 'Restart to Install Zelos 1.9.0');
+    assert.ok(restart, 'Windows and Linux carry the update item in Help, beside About');
+    restart.click();
+    assert.deepEqual(fired, ['check', 'restart']);
+    assert.ok(!buildAppMenuTemplate({ platform: 'darwin', actions: {} })[0].submenu.some((entry) => /Update/.test(entry.label ?? '')),
+      'no updater wired, no update item');
+  });
+
   it('builds a macOS menu with the app menu first and a working Edit menu', () => {
     const template = buildAppMenuTemplate({ platform: 'darwin', appName: 'Zelos', actions: {} });
     assert.equal(template[0].label, 'Zelos');
@@ -695,6 +746,8 @@ export const app = {
   requestSingleInstanceLock() { return true; },
   setName(name) { recorded.appName = name; },
   getVersion() { return '1.0.0'; },
+  // Only the updater asks, and only for where a Windows installer would wait.
+  getPath(name) { return name === 'userData' ? recorded.userData : ''; },
   setAboutPanelOptions() {},
   setBadgeCount(n) { recorded.badgeCount = n; return true; },
   // Electron's own default is openAtLogin:false, and a Zelos that has never
@@ -777,6 +830,7 @@ export const ipcMain = {
 };
 recorded.revealed = [];
 recorded.ipcHandlers = new Map();
+recorded.userData = '';
 `;
 
 describe('the shell, booted against a stub Electron', () => {
@@ -920,6 +974,96 @@ describe('the shell, booted against a stub Electron', () => {
       assert.equal((await handler({ sender: board, senderFrame: frame })).ok, false);
       frame.url = booted.zelos.url;
     }
+  });
+
+  it('reads the update keys from the shell\'s package.json, dropping anything malformed', async () => {
+    const committed = JSON.parse(fs.readFileSync(path.join(REPO, 'desktop', 'package.json'), 'utf8'));
+    assert.deepEqual(committed.updates, { publicKeys: [], windowsPublisher: '' },
+      'no key is committed until one is generated, so today\'s build does not update itself');
+    const { generateKeyPairSync } = await import('node:crypto');
+    const x = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x;
+    const dir = fs.mkdtempSync(path.join(sandbox, 'keys-'));
+    const read = (updates) => {
+      fs.writeFileSync(path.join(dir, 'package.json'), typeof updates === 'string' ? updates : JSON.stringify({ updates }));
+      return main.readUpdateConfig(dir);
+    };
+    assert.deepEqual(read({ publicKeys: [x, 'nope', 42, `${x}=`], windowsPublisher: ' Example, Ltd ' }), { publicKeys: [x], windowsPublisher: 'Example, Ltd' });
+    assert.deepEqual(read({ publicKeys: x, windowsPublisher: 'Bad"Name' }), { publicKeys: [], windowsPublisher: '' });
+    assert.deepEqual(read({ windowsPublisher: 'CN=Injected' }), { publicKeys: [], windowsPublisher: '' });
+    assert.deepEqual(read('{broken'), { publicKeys: [], windowsPublisher: '' });
+  });
+
+  it('wires an unpackaged shell\'s updater off, so it contacts nobody', async () => {
+    const handler = recorded.ipcHandlers.get(main.UPDATE_STATE_CHANNEL);
+    assert.ok(handler, 'the update state channel is registered');
+    const board = recorded.windows[0].webContents;
+    const frame = { url: booted.zelos.url };
+    board.mainFrame = frame;
+    const answer = await handler({ sender: board, senderFrame: frame });
+    assert.equal(answer.ok, true);
+    assert.equal(answer.state.supported, false);
+    assert.match(answer.state.reason, /runs from source/);
+  });
+
+  it('answers the update channels for the board\'s own frame only, and takes one boolean at most', async () => {
+    const calls = [];
+    const fake = {
+      state: () => ({ status: 'idle' }),
+      checkNow: async () => { calls.push('check'); return { status: 'checking' }; },
+      download: async () => { calls.push('download'); return { status: 'downloading' }; },
+      setAuto: (value) => { calls.push(['auto', value]); return { status: 'idle', auto: value }; },
+    };
+    let restarts = 0;
+    let boardFrame = true;
+    const handlers = main.updateHandlers({
+      isBoard: () => boardFrame, getUpdater: () => fake, restart: async () => { restarts++; return { ok: true }; },
+    });
+    assert.deepEqual(await handlers.state({}), { ok: true, state: { status: 'idle' } });
+    assert.equal((await handlers.check({})).ok, true);
+    assert.equal((await handlers.download({})).ok, true);
+    assert.equal((await handlers.setAuto({}, false)).state.auto, false);
+    assert.equal((await handlers.restart({})).ok, true);
+    for (const bad of [[], ['false'], [0], [null], [true, true], [{ auto: true }]]) {
+      assert.equal((await handlers.setAuto({}, ...bad)).ok, false, JSON.stringify(bad));
+    }
+    for (const name of ['state', 'check', 'download', 'restart']) {
+      assert.equal((await handlers[name]({}, 'https://evil.example/installer.exe')).ok, false, `${name} takes no argument`);
+    }
+    boardFrame = false;
+    for (const name of ['state', 'check', 'download', 'restart']) assert.equal((await handlers[name]({})).ok, false);
+    assert.equal((await handlers.setAuto({}, true)).ok, false);
+    assert.deepEqual(calls, ['check', 'download', ['auto', false]]);
+    assert.equal(restarts, 1);
+    const empty = main.updateHandlers({ isBoard: () => true, getUpdater: () => null, restart: async () => ({ ok: true }) });
+    assert.match((await empty.state({})).error, /not ready/);
+  });
+
+  it('gives the page the updater through invoke calls whose channels the shell answers', async () => {
+    const calls = [];
+    let bridge;
+    vm.runInNewContext(fs.readFileSync(path.join(REPO, 'desktop', 'preload.js'), 'utf8'), {
+      require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } }, ipcRenderer: { invoke: (...args) => { calls.push(args); return Promise.resolve({ ok: true }); } } }),
+      process: { platform: 'win32', versions: {} }, console,
+    });
+    await bridge.updates.state('ignored');
+    await bridge.updates.check('ignored');
+    await bridge.updates.download('ignored');
+    await bridge.updates.setAuto('yes');
+    await bridge.updates.setAuto(true);
+    await bridge.updates.restart('ignored');
+    assert.deepEqual(calls, [
+      [main.UPDATE_STATE_CHANNEL], [main.UPDATE_CHECK_CHANNEL], [main.UPDATE_DOWNLOAD_CHANNEL],
+      [main.UPDATE_SET_AUTO_CHANNEL, false], [main.UPDATE_SET_AUTO_CHANNEL, true], [main.UPDATE_RESTART_CHANNEL],
+    ], 'the page cannot pass anything but the one boolean');
+    for (const channel of [main.UPDATE_STATE_CHANNEL, main.UPDATE_CHECK_CHANNEL, main.UPDATE_DOWNLOAD_CHANNEL, main.UPDATE_SET_AUTO_CHANNEL, main.UPDATE_RESTART_CHANNEL]) {
+      assert.ok(recorded.ipcHandlers.has(channel), `the shell answers ${channel}`);
+    }
+    const failing = [];
+    vm.runInNewContext(fs.readFileSync(path.join(REPO, 'desktop', 'preload.js'), 'utf8'), {
+      require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { failing.push(value); } }, ipcRenderer: { invoke: () => Promise.reject(new Error('gone')) } }),
+      process: { platform: 'win32', versions: {} }, console,
+    });
+    assert.equal((await failing[0].updates.state()).ok, false, 'a failed channel answers in the same shape');
   });
 
   function backupHarness({ cancel = false, confirm = 1, failFlush = false, failRestore = false } = {}) {

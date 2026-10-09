@@ -1,7 +1,13 @@
-/** Manual release checks. No account data, credentials or automatic requests. */
-const REPOSITORY = 'https://github.com/HoosAILLC/zelos';
+/**
+ * Release checks against the official GitHub repository. No account data or
+ * credentials are ever sent. The server's manual check (Settings → Updates in a
+ * browser) and the desktop shell's automatic updater both read the release
+ * through this file, so there is one definition of what counts as an official
+ * stable release and of where its files may be downloaded from.
+ */
+export const REPOSITORY = 'https://github.com/HoosAI-Platform/zelos';
 export const RELEASES_URL = `${REPOSITORY}/releases`;
-export const RELEASE_API = 'https://api.github.com/repos/HoosAILLC/zelos/releases/latest';
+export const RELEASE_API = 'https://api.github.com/repos/HoosAI-Platform/zelos/releases/latest';
 const MAX_RESPONSE_BYTES = 1_048_576;
 
 function versionParts(value) {
@@ -15,6 +21,18 @@ export function compareVersions(left, right) {
   if (!a || !b) throw new Error('The release has an unrecognised version number.');
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1;
   return 0;
+}
+
+/**
+ * One named file of a release, only when GitHub lists it exactly once, fully
+ * uploaded, with a positive size, at the one download address this repository
+ * gives that name. Anything else is treated as absent rather than trusted.
+ */
+export function releaseAsset(release, version, name) {
+  const matches = (Array.isArray(release?.assets) ? release.assets : []).filter(asset => asset?.name === name);
+  const url = `${REPOSITORY}/releases/download/v${version}/${name}`;
+  if (matches.length !== 1 || matches[0].state !== 'uploaded' || matches[0].browser_download_url !== url || !Number.isSafeInteger(matches[0].size) || matches[0].size <= 0) return null;
+  return { name, url, size: matches[0].size };
 }
 
 export function describeRelease(release, currentVersion, checkedAt) {
@@ -33,10 +51,8 @@ export function describeRelease(release, currentVersion, checkedAt) {
     [`Zelos-${latestVersion}-setup-arm64.exe`, 'Windows · Arm'],
   ];
   const downloads = wanted.flatMap(([name, label]) => {
-    const matches = (Array.isArray(release.assets) ? release.assets : []).filter(asset => asset?.name === name);
-    const url = `${REPOSITORY}/releases/download/v${latestVersion}/${name}`;
-    if (matches.length !== 1 || matches[0].state !== 'uploaded' || matches[0].browser_download_url !== url || !Number.isSafeInteger(matches[0].size) || matches[0].size <= 0) return [];
-    return [{ name, label, url }];
+    const asset = releaseAsset(release, latestVersion, name);
+    return asset ? [{ name, label, url: asset.url }] : [];
   });
   const compared = compareVersions(latestVersion, currentVersion);
   return {
@@ -73,6 +89,29 @@ async function readRelease(response) {
   }
 }
 
+/**
+ * The raw latest-release record. No redirect is followed: the API answers this
+ * address directly, and a redirect would mean the record came from somewhere
+ * else. The caller owns cancellation and validates what comes back.
+ */
+export async function fetchLatestRelease({ fetchImpl = globalThis.fetch, signal } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(RELEASE_API, {
+      signal, redirect: 'error',
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Zelos-update-check' },
+    });
+  } catch {
+    throw new Error('Could not reach GitHub. Check your connection and try again.');
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    if (response.status === 403 || response.status === 429) throw new Error('GitHub is limiting update checks. Please try again later.');
+    throw new Error('GitHub could not provide release details. Please try again later.');
+  }
+  return readRelease(response);
+}
+
 /** One checker per server: coalesce concurrent clicks and cache only success. */
 export function createUpdateChecker({ currentVersion, fetchImpl = globalThis.fetch, now = Date.now, timeoutMs = 8_000, cacheMs = 300_000 } = {}) {
   if (!versionParts(currentVersion)) throw new Error('The installed Zelos version is invalid.');
@@ -88,23 +127,7 @@ export function createUpdateChecker({ currentVersion, fetchImpl = globalThis.fet
         reject(new Error('The update check timed out. Try again when you are online.'));
       }, timeoutMs);
     });
-    const read = (async () => {
-      let response;
-      try {
-        response = await fetchImpl(RELEASE_API, {
-          signal: controller.signal, redirect: 'error',
-          headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Zelos-update-check' },
-        });
-      } catch {
-        throw new Error('Could not reach GitHub. Check your connection and try again.');
-      }
-      if (!response.ok) {
-        await response.body?.cancel().catch(() => {});
-        if (response.status === 403 || response.status === 429) throw new Error('GitHub is limiting update checks. Please try again later.');
-        throw new Error('GitHub could not provide release details. Please try again later.');
-      }
-      return describeRelease(await readRelease(response), currentVersion, new Date(now()).toISOString());
-    })();
+    const read = (async () => describeRelease(await fetchLatestRelease({ fetchImpl, signal: controller.signal }), currentVersion, new Date(now()).toISOString()))();
     inFlight = Promise.race([read, timeout]);
     try {
       const result = await inFlight;

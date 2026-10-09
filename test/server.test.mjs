@@ -1978,7 +1978,7 @@ test('/api/guides hands the guided cards their pages, every one https, and nothi
   const res = await call(ctx, 'GET', '/api/guides');
   assert.equal(res.status, 200);
   const g = res.json;
-  assert.match(g.microsoftSetup, /^https:\/\/github\.com\/HoosAILLC\/zelos\/blob\/main\/docs\/OAUTH\.md#microsoft/);
+  assert.match(g.microsoftSetup, /^https:\/\/github\.com\/HoosAI-Platform\/zelos\/blob\/main\/docs\/OAUTH\.md#microsoft/);
   assert.match(g.calendars.google.settings, /^https:\/\/calendar\.google\.com\//);
   assert.match(g.calendars.icloud.caldav, /^https:\/\/caldav\.icloud\.com\//);
   assert.match(g.calendars.icloud.appPasswords, /^https:\/\/account\.apple\.com\//);

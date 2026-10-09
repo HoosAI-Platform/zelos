@@ -509,7 +509,7 @@ test('the page loads no remote resources; its one fixed release link is navigati
       // This exact constant verifies an external link after a user-initiated
       // local API check. maintenance-ui.test proves render makes no request.
       if (file === path.join(UI, 'lib/updates.js')
-        && line.trim() === 'const official = `https://github.com/HoosAILLC/zelos/releases/tag/v${release.latestVersion}`;') continue;
+        && line.trim() === 'const OFFICIAL_RELEASE = (version) => `https://github.com/HoosAI-Platform/zelos/releases/tag/v${version}`;') continue;
       assert.ok(!remote.test(line), `${path.relative(ROOT, file)}:${i + 1} ${line.trim()}`);
     }
   }
@@ -3069,7 +3069,7 @@ test('the Microsoft registration form is hidden when the server ships the client
   // The page itself is the server's (GET /api/guides): ui/ names no remote host.
   assert.ok(!/github\.com|OAUTH\.md#/.test(src.replace(/^\s*(\*|\/\/).*$/gm, '')), 'the setup page is spelled out in ui/');
   const server = fs.readFileSync(path.join(ROOT, 'core/server.mjs'), 'utf8');
-  assert.match(server, /microsoftSetup: 'https:\/\/github\.com\/HoosAILLC\/zelos\/blob\/main\/docs\/OAUTH\.md#microsoft/, 'the server does not point at the OAuth doc\'s Microsoft section');
+  assert.match(server, /microsoftSetup: 'https:\/\/github\.com\/HoosAI-Platform\/zelos\/blob\/main\/docs\/OAUTH\.md#microsoft/, 'the server does not point at the OAuth doc\'s Microsoft section');
   assert.match(flow[0], /api\.beginMailOAuth\(\{\n\s+provider: 'microsoft',\n\s+keyRef,\n\s+\.\.\.\(chosen\.clientId \? \{ clientId: chosen\.clientId \} : \{\}\),/, 'the Microsoft flow does not name its provider, or sends an empty client id');
   assert.match(flow[0], /const oauth = \(\) => \(\{ provider: 'microsoft', clientId:/, 'a Microsoft account is saved without its provider');
   // And the simple form passes the server's word for it, and puts the setup
