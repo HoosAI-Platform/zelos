@@ -1,6 +1,6 @@
 {
   "name": "zelos-app",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "description": "A local-first second brain. Reads your mail and calendar, thinks with a model you choose, and gives you one page worth looking at.",
   "type": "module",
   "bin": {
