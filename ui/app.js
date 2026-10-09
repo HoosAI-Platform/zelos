@@ -27,6 +27,7 @@ import { BUCKET_LABEL, sweepSummary, sweepDetail, tokenLine } from './lib/format
 import { humanDelta, formatDay } from './lib/time.js';
 import { createCommandMenu, commandShortcut } from './lib/commands.js';
 import { parseConnectionTarget } from './lib/source-status.js';
+import { updateBanner } from './lib/update-banner.js';
 
 import { renderNow } from './views/now.js';
 import { renderToday } from './views/today.js';
@@ -300,6 +301,8 @@ function buildChrome() {
     ]),
     capture.panel,
     sweep.node,
+    // Built once with the rest of the chrome, so it outlives view changes.
+    updateBanner({ onError: (message) => notify(message, { tone: 'warn' }) }),
   ]);
   return {
     topbarNode,

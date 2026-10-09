@@ -1016,6 +1016,8 @@ describe('the shell, booted against a stub Electron', () => {
       checkNow: async () => { calls.push('check'); return { status: 'checking' }; },
       download: async () => { calls.push('download'); return { status: 'downloading' }; },
       setAuto: (value) => { calls.push(['auto', value]); return { status: 'idle', auto: value }; },
+      snoozeBanner: () => { calls.push('snooze'); return { banner: '' }; },
+      skipBanner: () => { calls.push('skip'); return { banner: '' }; },
     };
     let restarts = 0;
     let boardFrame = true;
@@ -1027,16 +1029,18 @@ describe('the shell, booted against a stub Electron', () => {
     assert.equal((await handlers.download({})).ok, true);
     assert.equal((await handlers.setAuto({}, false)).state.auto, false);
     assert.equal((await handlers.restart({})).ok, true);
+    assert.equal((await handlers.snooze({})).ok, true);
+    assert.equal((await handlers.skip({})).ok, true);
     for (const bad of [[], ['false'], [0], [null], [true, true], [{ auto: true }]]) {
       assert.equal((await handlers.setAuto({}, ...bad)).ok, false, JSON.stringify(bad));
     }
-    for (const name of ['state', 'check', 'download', 'restart']) {
+    for (const name of ['state', 'check', 'download', 'restart', 'snooze', 'skip']) {
       assert.equal((await handlers[name]({}, 'https://evil.example/installer.exe')).ok, false, `${name} takes no argument`);
     }
     boardFrame = false;
-    for (const name of ['state', 'check', 'download', 'restart']) assert.equal((await handlers[name]({})).ok, false);
+    for (const name of ['state', 'check', 'download', 'restart', 'snooze', 'skip']) assert.equal((await handlers[name]({})).ok, false);
     assert.equal((await handlers.setAuto({}, true)).ok, false);
-    assert.deepEqual(calls, ['check', 'download', ['auto', false]]);
+    assert.deepEqual(calls, ['check', 'download', ['auto', false], 'snooze', 'skip']);
     assert.equal(restarts, 1);
     const empty = main.updateHandlers({ isBoard: () => true, getUpdater: () => null, restart: async () => ({ ok: true }) });
     assert.match((await empty.state({})).error, /not ready/);
@@ -1055,11 +1059,15 @@ describe('the shell, booted against a stub Electron', () => {
     await bridge.updates.setAuto('yes');
     await bridge.updates.setAuto(true);
     await bridge.updates.restart('ignored');
+    await bridge.updates.snooze('ignored');
+    await bridge.updates.skip('ignored');
     assert.deepEqual(calls, [
       [main.UPDATE_STATE_CHANNEL], [main.UPDATE_CHECK_CHANNEL], [main.UPDATE_DOWNLOAD_CHANNEL],
       [main.UPDATE_SET_AUTO_CHANNEL, false], [main.UPDATE_SET_AUTO_CHANNEL, true], [main.UPDATE_RESTART_CHANNEL],
+      [main.UPDATE_SNOOZE_CHANNEL], [main.UPDATE_SKIP_CHANNEL],
     ], 'the page cannot pass anything but the one boolean');
-    for (const channel of [main.UPDATE_STATE_CHANNEL, main.UPDATE_CHECK_CHANNEL, main.UPDATE_DOWNLOAD_CHANNEL, main.UPDATE_SET_AUTO_CHANNEL, main.UPDATE_RESTART_CHANNEL]) {
+    for (const channel of [main.UPDATE_STATE_CHANNEL, main.UPDATE_CHECK_CHANNEL, main.UPDATE_DOWNLOAD_CHANNEL, main.UPDATE_SET_AUTO_CHANNEL,
+      main.UPDATE_RESTART_CHANNEL, main.UPDATE_SNOOZE_CHANNEL, main.UPDATE_SKIP_CHANNEL]) {
       assert.ok(recorded.ipcHandlers.has(channel), `the shell answers ${channel}`);
     }
     const failing = [];

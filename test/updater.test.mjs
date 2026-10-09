@@ -172,14 +172,18 @@ const macZip = (apps) => Buffer.from(JSON.stringify(apps));
 describe('update settings', () => {
   it('default to automatic, and survive a missing, broken or hostile file', () => {
     const file = path.join(sandbox, 'updates.json');
-    assert.deepEqual(readUpdateSettings(file), { auto: true });
+    assert.deepEqual(readUpdateSettings(file), { auto: true, skipped: '' });
     fs.writeFileSync(file, '{not json');
-    assert.deepEqual(readUpdateSettings(file), { auto: true });
+    assert.deepEqual(readUpdateSettings(file), { auto: true, skipped: '' });
     fs.writeFileSync(file, JSON.stringify({ auto: 'false', extra: 'ignored' }));
-    assert.deepEqual(readUpdateSettings(file), { auto: true }, 'only a real false turns updates off');
+    assert.deepEqual(readUpdateSettings(file), { auto: true, skipped: '' }, 'only a real false turns updates off');
     writeUpdateSettings(file, { auto: false, extra: 'dropped' });
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { auto: false });
-    assert.deepEqual(readUpdateSettings(file), { auto: false });
+    assert.deepEqual(readUpdateSettings(file), { auto: false, skipped: '' });
+    writeUpdateSettings(file, { auto: true, skipped: '1.9.2' });
+    assert.deepEqual(readUpdateSettings(file), { auto: true, skipped: '1.9.2' });
+    fs.writeFileSync(file, JSON.stringify({ auto: true, skipped: '../../etc' }));
+    assert.deepEqual(readUpdateSettings(file), { auto: true, skipped: '' }, 'only a real version can be skipped');
     if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   });
 });
@@ -531,6 +535,41 @@ describe('the Windows updater', () => {
     assert.match(failures[0], /changed before it could be installed/);
   });
 
+  it('offers the banner once an update is ready, until it is put off or skipped', async () => {
+    const h = windowsUpdater(fixture());
+    await h.updater.start();
+    assert.equal(h.updater.state().banner, '');
+    await h.updater.checkNow();
+    assert.equal(h.updater.state().banner, '', 'not while it is still downloading');
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    assert.equal(h.updater.state().banner, '1.9.0');
+
+    assert.equal(h.updater.snoozeBanner().banner, '', 'Remind me later hides it');
+    assert.equal(readUpdateSettings(path.join(sandbox, 'updates.json')).skipped, '', 'and is not saved');
+    const next = windowsUpdater(fixture());
+    await next.updater.start();
+    await next.updater.checkNow();
+    await until(() => next.updater.state().status === 'ready', 'the download after reopening');
+    assert.equal(next.updater.state().banner, '1.9.0', 'reopening Zelos brings a put-off banner back');
+
+    assert.equal(next.updater.skipBanner().banner, '', 'Skip this version hides it');
+    assert.equal(readUpdateSettings(path.join(sandbox, 'updates.json')).skipped, '1.9.0');
+    next.updater.setAuto(true);
+    assert.equal(readUpdateSettings(path.join(sandbox, 'updates.json')).skipped, '1.9.0', 'flipping the switch keeps the skip');
+    const later = windowsUpdater(fixture());
+    await later.updater.start();
+    await later.updater.checkNow();
+    await until(() => later.updater.state().status === 'ready', 'the download after reopening again');
+    assert.equal(later.updater.state().banner, '', 'a skipped version stays skipped across launches');
+    assert.equal(later.updater.state().status, 'ready', 'and can still be installed from Settings');
+
+    const newer = windowsUpdater(fixture('1.9.1'));
+    await newer.updater.start();
+    await newer.updater.checkNow();
+    await until(() => newer.updater.state().status === 'ready', 'the newer download');
+    assert.equal(newer.updater.state().banner, '1.9.1', 'a newer version gets its own banner');
+  });
+
   it('turning automatic updates off while the download is being checked drops it', async () => {
     let h;
     h = windowsUpdater(fixture(), { publisher: PUBLISHER, duringVerify: async () => { h.updater.setAuto(false); } });
@@ -588,7 +627,7 @@ describe('the Windows updater', () => {
     const h = windowsUpdater(fixture());
     await h.updater.start();
     h.updater.setAuto(false);
-    assert.deepEqual(readUpdateSettings(path.join(sandbox, 'updates.json')), { auto: false });
+    assert.deepEqual(readUpdateSettings(path.join(sandbox, 'updates.json')), { auto: false, skipped: '' });
     assert.equal((await h.updater.checkNow()).status, 'available');
     assert.equal(h.github.seen.length, 1);
     await h.updater.download();

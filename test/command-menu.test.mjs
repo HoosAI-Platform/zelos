@@ -79,7 +79,7 @@ test('the real shell menu reuses capture, navigation and explicit check actions 
   const chrome = source.match(/function buildChrome\(\) \{[\s\S]*?\n\}/)[0];
   const calls = [];
   const state = { sweep: { running: false } };
-  const context = vm.createContext({ el, button, focusQuietly, createCommandMenu, window: globalThis.window,
+  const context = vm.createContext({ el, button, focusQuietly, createCommandMenu, updateBanner: () => el('div'), window: globalThis.window,
     state, route: { view: 'now' }, VIEWS: [{ id: 'now', label: 'Now' }, { id: 'search', label: 'Search' }],
     api: { capture: async text => calls.push(['capture', text]) },
     navigate: hash => calls.push(['navigate', hash]), startSweep: mode => calls.push(['check', mode]), notify() {},

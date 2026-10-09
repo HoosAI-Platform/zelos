@@ -715,6 +715,8 @@ export const UPDATE_CHECK_CHANNEL = 'zelos:update-check';
 export const UPDATE_DOWNLOAD_CHANNEL = 'zelos:update-download';
 export const UPDATE_SET_AUTO_CHANNEL = 'zelos:update-set-auto';
 export const UPDATE_RESTART_CHANNEL = 'zelos:update-restart';
+export const UPDATE_SNOOZE_CHANNEL = 'zelos:update-snooze';
+export const UPDATE_SKIP_CHANNEL = 'zelos:update-skip';
 
 /**
  * The page's view of the updater. Every channel answers the board's own main
@@ -739,6 +741,8 @@ export function updateHandlers({ isBoard, getUpdater, restart }) {
     setAuto: guard((current, ...args) => (args.length === 1 && typeof args[0] === 'boolean'
       ? { ok: true, state: current.setAuto(args[0]) } : refused)),
     restart: noArgs(() => restart()),
+    snooze: noArgs((current) => ({ ok: true, state: current.snoozeBanner() })),
+    skip: noArgs((current) => ({ ok: true, state: current.skipBanner() })),
   };
 }
 
@@ -792,6 +796,8 @@ function installUpdates() {
   ipcMain.handle(UPDATE_DOWNLOAD_CHANNEL, handlers.download);
   ipcMain.handle(UPDATE_SET_AUTO_CHANNEL, handlers.setAuto);
   ipcMain.handle(UPDATE_RESTART_CHANNEL, handlers.restart);
+  ipcMain.handle(UPDATE_SNOOZE_CHANNEL, handlers.snooze);
+  ipcMain.handle(UPDATE_SKIP_CHANNEL, handlers.skip);
 }
 
 let menuKey = '';
