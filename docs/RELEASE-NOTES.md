@@ -1,9 +1,6 @@
-# Zelos 1.9.4
+# Zelos 1.9.5
 
-This release makes updates that are ready to install stay ready.
-
-- **Ready updates are remembered:** An update Zelos has downloaded is kept when you quit. The next time you open Zelos it is checked again and offered straight away, in the banner and in Settings → About, without downloading it a second time.
-- **Newer versions are still noticed:** While an update waits to be installed, Zelos keeps checking. If a newer version comes out, it replaces the waiting one.
+A maintenance release with no new features. It confirms that an update downloaded by Zelos 1.9.4 is still offered straight away after Zelos is quit and reopened.
 
 ## Install or update
 
