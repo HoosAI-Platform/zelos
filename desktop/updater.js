@@ -53,7 +53,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-import { describeRelease, fetchLatestRelease, releaseAsset, REPOSITORY } from '../core/updates.mjs';
+import { compareVersions, describeRelease, fetchLatestRelease, releaseAsset, REPOSITORY } from '../core/updates.mjs';
 
 /** How often a running Zelos looks for a new release. */
 export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -89,6 +89,9 @@ export const RESULT_FILE = 'update-result.txt';
 export const ATTEMPT_FILE = 'update-attempt.txt';
 /** Beside the installed app on macOS: the verified new copy, waiting to be renamed into place. */
 export const MAC_NEW_SUFFIX = '.zelos-new';
+
+/** Beside a download: the release notes it came with, so a remembered update can still show them. */
+const NOTES_NAME = 'release-notes.json';
 
 /** The signed manifest and its signature, as every release names them. */
 export const MANIFEST_NAME = 'release.json';
@@ -478,6 +481,7 @@ export function createUpdater({
   let first = null;
   let stopped = false;
   let installFailed = null;
+  let preparing = false;         // a Restart to update is checking or staging the ready update
   let installProblem = '';       // an update the last restart did not land; kept for the session
   let snoozed = '';              // a version whose banner waits for the next launch; never saved
 
@@ -667,6 +671,16 @@ export function createUpdater({
       removeDownloads();
       throw err;
     }
+    // The signed manifest and its signature are kept beside the download, so
+    // the next launch can verify it again and offer it at once rather than
+    // fetching the whole file a second time.
+    try {
+      fs.writeFileSync(path.join(downloadDir, MANIFEST_NAME), manifestBytes);
+      fs.writeFileSync(path.join(downloadDir, SIGNATURE_NAME), signatureBytes);
+      fs.writeFileSync(path.join(downloadDir, NOTES_NAME), JSON.stringify({ notes: typeof raw?.body === 'string' ? raw.body.slice(0, 6_000) : '' }));
+    } catch (err) {
+      log('warn', 'could not keep the update for the next launch', { error: err.message });
+    }
     ready = { version, file, sha256: expected.sha256 };
     controller = null;
     log('info', 'update downloaded and verified', { version });
@@ -703,9 +717,49 @@ export function createUpdater({
     return beside;
   }
 
+  /**
+   * An update downloaded in an earlier session, offered again at launch
+   * without a network request. Trusted only as far as it was the first time:
+   * the kept manifest must verify against the update key, name a version newer
+   * than this one, and list this computer's file at the size and SHA-256 the
+   * kept file really has. Anything else is deleted, and the next check
+   * downloads afresh.
+   */
+  async function restoreReady() {
+    const manifestPath = path.join(downloadDir, MANIFEST_NAME);
+    if (!fs.existsSync(manifestPath)) return;
+    try {
+      const bytes = fs.readFileSync(manifestPath);
+      const signature = fs.readFileSync(path.join(downloadDir, SIGNATURE_NAME), 'latin1');
+      let version = '';
+      try { version = JSON.parse(bytes.toString('utf8'))?.version; } catch { version = ''; }
+      if (compareVersions(version, currentVersion) <= 0) throw new Error('not newer');
+      const manifest = verifyReleaseManifest(bytes, signature, publicKeys, { version });
+      const name = updateAssetName(version, platform, arch);
+      const expected = manifestAsset(manifest, name);
+      const file = path.join(downloadDir, name);
+      if (!expected || fs.statSync(file).size !== expected.size || await sha256File(file) !== expected.sha256) throw new Error('changed');
+      if (platform === 'win32' && windowsPublisher) await verifyAuthenticode(file);
+      let kept = {};
+      try { kept = JSON.parse(fs.readFileSync(path.join(downloadDir, NOTES_NAME), 'utf8')); } catch { kept = {}; }
+      ready = { version, file, sha256: expected.sha256 };
+      set({
+        status: 'ready', error: '', progress: null, latestVersion: version,
+        releaseUrl: `${REPOSITORY}/releases/tag/v${version}`,
+        notes: typeof kept?.notes === 'string' ? kept.notes.slice(0, 6_000) : '',
+      });
+      log('info', 'an update downloaded earlier is ready', { version });
+    } catch {
+      ready = null;
+      removeDownloads();
+    }
+  }
+
   /* ----------------------------- checks ---------------------------- */
 
   const busy = () => ['checking', 'downloading', 'ready', 'installing'].includes(status);
+  /** Busy with the network or an install; a ready update still lets a check run. */
+  const working = () => preparing || ['checking', 'downloading', 'installing'].includes(status);
 
   /**
    * Look for a newer release and, when `download` is true, fetch it. Resolves
@@ -713,19 +767,30 @@ export function createUpdater({
    * reports through onChange.
    */
   async function check({ download: fetchIt }) {
-    if (!supported || stopped || busy()) return snapshot();
+    if (!supported || stopped || working()) return snapshot();
+    // A ready update stays ready through a check: it is replaced only by a
+    // newer release, dropped only if the release it came from is no longer
+    // newer than this app, and a failed check leaves it alone.
+    const kept = status === 'ready' && ready ? ready : null;
     controller = new AbortController();
     const own = controller;
     const timer = setTimer(() => own.abort(), METADATA_TIMEOUT_MS);
     timer?.unref?.();
-    set({ status: 'checking', error: '', progress: null });
+    if (!kept) set({ status: 'checking', error: '', progress: null });
     let raw, info;
     try {
       raw = await fetchLatestRelease({ fetchImpl, signal: own.signal });
       info = describeRelease(raw, currentVersion, new Date(now()).toISOString());
     } catch (err) {
       clearTimer(timer);
-      if (controller === own) fail(own.signal.aborted && !stopped ? new Error('The update check timed out.') : err);
+      if (controller !== own) return snapshot();
+      if (kept) {
+        controller = null;
+        nextAttemptAt = now() + RETRY_INTERVAL_MS;
+        log('warn', 'update check failed; the ready update is kept', { error: err?.message });
+        return snapshot();
+      }
+      fail(own.signal.aborted && !stopped ? new Error('The update check timed out.') : err);
       return snapshot();
     }
     clearTimer(timer);
@@ -733,6 +798,15 @@ export function createUpdater({
     checkedAt = now();
     nextAttemptAt = checkedAt + CHECK_INTERVAL_MS;
     const release = { latestVersion: info.latestVersion, releaseUrl: info.releaseUrl, notes: info.notes };
+    if (kept && info.latestVersion === kept.version) {
+      controller = null;
+      set(release);
+      return snapshot();
+    }
+    if (kept) {
+      ready = null;
+      removeDownloads();
+    }
     if (!info.updateAvailable) {
       controller = null;
       set({ status: 'current', ...release });
@@ -754,12 +828,40 @@ export function createUpdater({
     if (!supported || stopped) return;
     tick = setTimer(() => {
       tick = null;
-      if (settings.auto && !busy() && (nextAttemptAt === null || now() >= nextAttemptAt)) {
+      if (settings.auto && !working() && (nextAttemptAt === null || now() >= nextAttemptAt)) {
         check({ download: true }).catch((err) => log('warn', 'scheduled check failed', { error: err.message }));
       }
       schedule();
     }, TICK_MS);
     tick?.unref?.();
+  }
+
+  /** The checks and staging behind prepareInstall; see there. */
+  async function prepareReady(preparing) {
+    try {
+      if (await sha256File(preparing.file) !== preparing.sha256) throw new Error('The downloaded update changed since it was checked.');
+      if (platform === 'win32' && windowsPublisher) await verifyAuthenticode(preparing.file);
+      if (platform === 'darwin') {
+        // Another Zelos running from this app — usually the MCP server an AI
+        // app started — would lose its files mid-flight when the app moves.
+        if (typeof mac.otherInstances === 'function' && await mac.otherInstances() > 0) {
+          throw Object.assign(new Error('Another Zelos process is running from this app, usually one an AI app started. Quit those apps, then choose Restart to update again.'), { keepDownload: true });
+        }
+        preparing.staged = await stageMacApp();
+      }
+    } catch (err) {
+      if (err?.keepDownload) {
+        // Nothing is wrong with the update; the restart just has to wait.
+        set({ error: err.message });
+        return false;
+      }
+      if (ready === preparing) ready = null;
+      removeDownloads();
+      fail(err);
+      return false;
+    }
+    if (ready === preparing) set({ error: '' });
+    return ready === preparing;
   }
 
   /* ------------------------------ API ------------------------------ */
@@ -777,10 +879,11 @@ export function createUpdater({
       }
       readLastAttempt();
       removeMacCopy();
+      await restoreReady();
       nextAttemptAt = now() + FIRST_CHECK_DELAY_MS;
       first = setTimer(() => {
         first = null;
-        if (settings.auto && !busy()) check({ download: true }).catch(() => {});
+        if (settings.auto && !working()) check({ download: true }).catch(() => {});
       }, FIRST_CHECK_DELAY_MS);
       first?.unref?.();
       schedule();
@@ -825,33 +928,15 @@ export function createUpdater({
      * ahead.
      */
     async prepareInstall() {
-      if (status !== 'ready' || !ready) return false;
-      const preparing = ready;
+      if (status !== 'ready' || !ready || preparing) return false;
+      preparing = true;
       try {
-        if (await sha256File(preparing.file) !== preparing.sha256) throw new Error('The downloaded update changed since it was checked.');
-        if (platform === 'win32' && windowsPublisher) await verifyAuthenticode(preparing.file);
-        if (platform === 'darwin') {
-          // Another Zelos running from this app — usually the MCP server an AI
-          // app started — would lose its files mid-flight when the app moves.
-          if (typeof mac.otherInstances === 'function' && await mac.otherInstances() > 0) {
-            throw Object.assign(new Error('Another Zelos process is running from this app, usually one an AI app started. Quit those apps, then choose Restart to update again.'), { keepDownload: true });
-          }
-          preparing.staged = await stageMacApp();
-        }
-      } catch (err) {
-        if (err?.keepDownload) {
-          // Nothing is wrong with the update; the restart just has to wait.
-          set({ error: err.message });
-          return false;
-        }
-        if (ready === preparing) ready = null;
-        removeDownloads();
-        fail(err);
-        return false;
+        return await prepareReady(ready);
+      } finally {
+        preparing = false;
       }
-      if (ready === preparing) set({ error: '' });
-      return ready === preparing;
     },
+
 
     /** "Remind me later": hide the banner until Zelos is next opened. */
     snoozeBanner() {
