@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 process.env.ZELOS_LOG_LEVEL = 'silent';
 process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file'; // never the real keychain
@@ -213,7 +214,7 @@ test('no code reads a secret through config.model.keyRef', () => {
   // Every model key read goes through readModelKey(), for the address about to
   // be contacted. `model.keyRef` is written down for older versions only; a
   // read through it is how one service's key reached another.
-  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const files = ['zelos.mjs', ...fs.readdirSync(path.join(root, 'core'), { recursive: true }).filter((f) => f.endsWith('.mjs')).map((f) => path.join('core', f)),
     ...fs.readdirSync(path.join(root, 'desktop')).filter((f) => f.endsWith('.js')).map((f) => path.join('desktop', f))];
   const offenders = files.filter((file) => /(?:getSecret|secretFor)\([^)]*model\??\.keyRef/.test(fs.readFileSync(path.join(root, file), 'utf8')));
