@@ -18,11 +18,15 @@ enforcers who stood beside Zeus with Nike, Kratos and Bia.
    write it. This is the product's central trust claim; breaking it breaks the product.
    (The Electron shell in `desktop/` is the one exception and lives in its own package.json.)
 2. **Network destinations must be explicit.** No telemetry, no analytics, no automatic update
-   pings, no CDN fonts, no remote images. Reading and model calls use the user's configured
-   providers and model `baseUrl`; sign-in contacts the provider's sign-in services. A manual
-   update check may contact the fixed official GitHub release API, without archived content
-   or credentials. [SECURITY.md § 5](SECURITY.md#5-what-leaves-your-machine) lists these
-   destinations and the limited redirects and discovery requests.
+   pings except the signed-update check described below, no CDN fonts, no remote images.
+   Reading and model calls use the user's configured providers and model `baseUrl`; sign-in
+   contacts the provider's sign-in services. An update check may contact the fixed official
+   GitHub release API, without archived content or credentials: when the user presses Check
+   for updates, and in a packaged desktop app that carries the Zelos update key, is installed
+   where it can replace itself, and has automatic updates on, a minute after launch and every
+   six hours (an hour after a failure). A newer release is then downloaded only from that
+   release's own GitHub files. [SECURITY.md § 5](SECURITY.md#5-what-leaves-your-machine)
+   lists these destinations and the limited redirects and discovery requests.
 3. **Server binds `127.0.0.1` only.** Never `0.0.0.0`.
 4. **Mail is attacker-controlled input.** Every byte from a message or an event is untrusted.
    The model's output is *data*, never instructions — the app never evaluates, executes, shells

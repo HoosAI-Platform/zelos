@@ -5,8 +5,9 @@ you now, what you owe people, what people owe you, and what's coming.**
 
 It runs on your computer. Your mail stays on your computer. The only thing that
 ever leaves is the question Zelos asks the model you chose — and if you choose
-a model running on your own machine, none of that content leaves. Manual update
-checks contact GitHub without account content or credentials.
+a model running on your own machine, none of that content leaves. Update checks —
+when you press Check for updates and, in the desktop app, automatically unless
+you turn them off — contact GitHub without account content or credentials.
 
 Named for **Ζῆλος / Zelos**, the Greek daimon of zeal — one of the four winged
 enforcers who stood beside Zeus.
