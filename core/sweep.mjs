@@ -22,7 +22,8 @@
 
 import { loadConfig } from './config.mjs';
 import { complete as llmComplete, extractJSON, LLMError, isLocalAddress } from './llm.mjs';
-import { getSecret as realGetSecret } from './secrets.mjs';
+import { getSecret as realGetSecret, setSecret as realSetSecret, deleteSecret as realDeleteSecret } from './secrets.mjs';
+import { readModelKey, isModelKeyRef } from './model-key.mjs';
 import {
   enabledSources,
   get as connectorFor,
@@ -69,6 +70,23 @@ import { log } from './log.mjs';
 import { recordSourceResults } from './source-status.mjs';
 
 const slog = log.child('[sweep]');
+
+/*
+ * What core/model-key.mjs needs to read the key for the configured AI service.
+ * A pre-upgrade `model.default` key is moved only when the sweep reads the real
+ * secret store: a test's fake `getSecret` must never lead to a write in the
+ * real one.
+ */
+function modelKeyDeps(getSecret, config) {
+  const real = getSecret === realGetSecret;
+  return {
+    getSecret,
+    setSecret: real ? realSetSecret : null,
+    deleteSecret: real ? realDeleteSecret : null,
+    configuredBaseUrl: config?.model?.baseUrl ?? null,
+    log: slog,
+  };
+}
 
 /** A full run is forced after this long regardless of how quiet things were. */
 export const FULL_RUN_MAX_AGE_MS = 4 * 60 * 60 * 1000;
@@ -658,6 +676,12 @@ export async function runSweep({
        a secret for a source that has never had one — a lookup that does not
        happen today. core/config.mjs mints the default where the entry is
        created, which is the only place that can know it is new. */
+    // The AI key is read only for the AI's own address. A source configured
+    // with a `model.` ref is refused, not handed the key to send somewhere else.
+    if (isModelKeyRef(source.keyRef)) {
+      sources.push({ kind: connector.family, id: source.id, label, ok: false, count: 0, error: `${label} is set to use the AI service's key. Give it its own password in Settings.` });
+      return nothing;
+    }
     let secret = null;
     try {
       secret = source.keyRef ? await getSecret(source.keyRef) : null;
@@ -906,7 +930,7 @@ export async function runSweep({
 
   let apiKey = null;
   try {
-    apiKey = config?.model?.keyRef ? await getSecret(config.model.keyRef) : null;
+    apiKey = await readModelKey(config?.model?.baseUrl, modelKeyDeps(getSecret, config));
   } catch (err) {
     slog.debug('no API key available', { error: errorText(err) });
   }
@@ -1309,7 +1333,7 @@ async function modelNotReadyReason(config, getSecret) {
   if (isLocalAddress(model.baseUrl)) return null;
   let key = null;
   try {
-    key = model.keyRef ? await getSecret(model.keyRef) : null;
+    key = await readModelKey(model.baseUrl, modelKeyDeps(getSecret, config));
   } catch (err) {
     slog.debug('no API key available', { error: errorText(err) });
   }

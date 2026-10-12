@@ -30,7 +30,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { DEFAULTS, loadConfig, paths, validateConfig } from './config.mjs';
 import { SCHEMA_VERSION, hasFts5 } from './db.mjs';
-import { backend as secretBackend, getSecret as readSecret } from './secrets.mjs';
+import { backend as secretBackend, getSecret as readSecret, setSecret as writeSecret, deleteSecret as removeSecret } from './secrets.mjs';
+import { readModelKey, isModelKeyRef, LEGACY_MODEL_REF } from './model-key.mjs';
 import { isLocalAddress, listModels } from './llm.mjs';
 import { guessImapHost, testConnection as testImapConnection } from './sources/imap.mjs';
 import { testConnection as testCalDavConnection } from './sources/caldav.mjs';
@@ -472,24 +473,22 @@ async function checkModelKey(config, deps) {
       key: null,
     };
   }
-  if (!model.keyRef) {
-    return {
-      result: check(
-        'model.key', label, chosen ? 'fail' : 'warn',
-        `This AI service is not on this computer, so it needs a key, and Zelos has nowhere set up to keep one. For experts: ${address} has no keyRef.`,
-        'Open Settings → AI, pick your AI service again and save. That sets up where the key is stored.',
-      ),
-      key: null,
-    };
-  }
+  // The key saved for this address, and only that one (core/model-key.mjs). A
+  // pre-upgrade key is moved here only against the real store, never a fake.
+  const real = deps.getSecret === readSecret;
   let key = null;
   try {
-    key = await deps.getSecret(model.keyRef);
+    key = await readModelKey(model.baseUrl, {
+      getSecret: deps.getSecret,
+      setSecret: real ? writeSecret : null,
+      deleteSecret: real ? removeSecret : null,
+      configuredBaseUrl: model.baseUrl,
+    });
   } catch (err) {
     return {
       result: check(
         'model.key', label, 'fail',
-        `Zelos could not read the key it stored for ${model.keyRef}: ${errorText(err)}`,
+        `Zelos could not read the key it stored for ${address}: ${errorText(err)}`,
         'See the secret store line above — that is where this failed. Re-entering the key in Settings → AI usually settles it.',
       ),
       key: null,
@@ -507,8 +506,22 @@ async function checkModelKey(config, deps) {
       key: null,
     };
   }
+  // A key from before keys were kept per service that could not be matched to
+  // this one stays in the store, unused. Worth knowing; nothing is broken.
+  let leftover = null;
+  try { leftover = await deps.getSecret(LEGACY_MODEL_REF); } catch { /* the secret store line reports this */ }
+  if (leftover && leftover !== key) {
+    return {
+      result: check(
+        'model.key', label, 'warn',
+        `A key is saved for this AI service (${address}). An older AI key, saved before Zelos kept one key per service, is also still stored and is no longer used.`,
+        'Open Settings → AI and choose Forget the stored key to remove both, then paste your current key again.',
+      ),
+      key,
+    };
+  }
   return {
-    result: check('model.key', label, 'pass', `A key is saved for this AI service. For experts: ${address}, under ${model.keyRef}.`),
+    result: check('model.key', label, 'pass', `A key is saved for this AI service. For experts: ${address}.`),
     key,
   };
 }
@@ -1154,6 +1167,10 @@ export async function diagnose(options = {}) {
 async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, deps = {} } = {}, homeCheck) {
   const startedMs = Date.now();
   const d = { ...DEFAULT_DEPS, ...deps };
+  // Mail, calendars and sources read their own secrets through this; the AI key
+  // is read only by checkModelKey, for the AI's own address. A `model.` ref in
+  // their config gets nothing, rather than the key to try against their host.
+  const own = { ...d, getSecret: async (ref) => (isModelKeyRef(ref) ? null : d.getSecret(ref)) };
   const checks = [];
 
   // Before anything resolves paths(): that call creates and chmods the folder.
@@ -1197,7 +1214,7 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
       // One at a time: several TLS logins to the same provider at once is how a
       // diagnostic gets itself rate-limited.
       for (const account of mail) {
-        checks.push(await checkMailAccount(account, d, { timeoutMs }));
+        checks.push(await checkMailAccount(account, own, { timeoutMs }));
       }
     }
 
@@ -1218,7 +1235,7 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
       ));
     } else {
       for (const calendar of calendars) {
-        checks.push(await checkCalendar(calendar, d, { timeoutMs, signal, timezone }));
+        checks.push(await checkCalendar(calendar, own, { timeoutMs, signal, timezone }));
       }
     }
 
@@ -1230,7 +1247,7 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
        connector are checked; the ones that do not are the report below. */
     for (const source of (Array.isArray(cfg.sources) ? cfg.sources : [])) {
       if (!source?.enabled || !connectorFor(source.type)) continue;
-      checks.push(await checkSource(source, d, { timeoutMs, signal, timezone }));
+      checks.push(await checkSource(source, own, { timeoutMs, signal, timezone }));
     }
 
     const unknown = checkUnknownSources(cfg);

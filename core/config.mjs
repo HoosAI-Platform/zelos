@@ -19,6 +19,7 @@ import crypto from 'node:crypto';
 
 import { localTimezone } from './time.mjs';
 import { log } from './log.mjs';
+import { modelKeyRef, isModelKeyRef } from './model-key.mjs';
 
 /**
  * Keys whose value is a credential. Never written to config.json.
@@ -175,7 +176,7 @@ export const DEFAULTS = deepFreeze({
     label: 'Claude',
     baseUrl: 'https://api.anthropic.com',
     model: '',
-    keyRef: 'model.default',
+    keyRef: null,
     maxTokens: 8192,
     temperature: 0,
   },
@@ -407,6 +408,10 @@ function normalizeAccounts(cfg) {
       if (!src.keyRef && src.type) src.keyRef = `${src.type}.${src.id}`;
       return src;
     });
+  /* The model's keyRef is the ref core/model-key.mjs derives from its address,
+     written down so a version from before keys were kept per address can still
+     find the key. Nothing in this version reads a key through it. */
+  if (isPlainObject(cfg.model)) cfg.model.keyRef = modelKeyRef(cfg.model.baseUrl);
   return cfg;
 }
 
@@ -649,13 +654,17 @@ function checkMailOAuth(errors, at, account, { method, enabled }) {
   }
 }
 
-function checkRef(errors, at, value, { allowNull = false } = {}) {
+function checkRef(errors, at, value, { allowNull = false, notModel = false } = {}) {
   if (value === null || value === undefined || value === '') {
     if (!allowNull) errors.push({ path: at, message: 'is required' });
     return;
   }
   if (!isValidRef(value)) {
-    errors.push({ path: at, message: 'must be a short ref like "model.default" (letters, digits, . _ -)' });
+    errors.push({ path: at, message: 'must be a short ref like "mail.m_9f3a1c" (letters, digits, . _ -)' });
+  } else if (notModel && isModelKeyRef(value)) {
+    // The `model.` namespace holds AI keys, each read only for the address it
+    // was saved for. Anything else naming one would send it to its own host.
+    errors.push({ path: at, message: 'must not name an AI key (refs starting "model.")' });
   }
 }
 
@@ -798,7 +807,7 @@ export function validateConfig(cfg) {
         errors.push({ path: `${at}.auth`, message: `must be one of ${MAIL_AUTH_METHODS.join(', ')}` });
       }
       checkMailOAuth(errors, at, a, { method, enabled: a.enabled === true });
-      checkRef(errors, `${at}.keyRef`, a.keyRef, { allowNull: !a.enabled });
+      checkRef(errors, `${at}.keyRef`, a.keyRef, { allowNull: !a.enabled, notModel: true });
       if (!Array.isArray(a.mailboxes) || a.mailboxes.length === 0 || !a.mailboxes.every(isStr)) errors.push({ path: `${at}.mailboxes`, message: 'must be a non-empty array of mailbox names' });
       if (!isStr(a.sentMailbox)) errors.push({ path: `${at}.sentMailbox`, message: 'must be a string' });
       if (!isInt(a.lookbackDays, 1, 365)) errors.push({ path: `${at}.lookbackDays`, message: 'must be an integer between 1 and 365' });
@@ -827,7 +836,7 @@ export function validateConfig(cfg) {
         checkUrl(errors, `${at}.url`, c.url, { schemes: ['http:', 'https:', 'webcal:'], required: !!c.enabled });
       }
       if (!isStr(c.user)) errors.push({ path: `${at}.user`, message: 'must be a string' });
-      checkRef(errors, `${at}.keyRef`, c.keyRef, { allowNull: true });
+      checkRef(errors, `${at}.keyRef`, c.keyRef, { allowNull: true, notModel: true });
     });
   }
 
@@ -857,7 +866,7 @@ export function validateConfig(cfg) {
         if (!isBool(src.enabled)) errors.push({ path: `${at}.enabled`, message: 'must be a boolean' });
         if (!isStr(src.label)) errors.push({ path: `${at}.label`, message: 'must be a string' });
         if (!isStr(src.type) || !src.type.trim()) errors.push({ path: `${at}.type`, message: 'is required' });
-        checkRef(errors, `${at}.keyRef`, src.keyRef, { allowNull: true });
+        checkRef(errors, `${at}.keyRef`, src.keyRef, { allowNull: true, notModel: true });
         if (!isPlainObject(src.settings)) errors.push({ path: `${at}.settings`, message: 'must be an object' });
       });
     }

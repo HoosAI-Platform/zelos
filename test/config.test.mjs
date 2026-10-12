@@ -12,6 +12,7 @@ process.env.ZELOS_HOME = path.join(HOME_ROOT, 'home');
 
 const { DEFAULTS, MAIL_ACCOUNT_DEFAULTS, paths, loadConfig, saveConfig, validateConfig, newId, isValidRef } =
   await import('../core/config.mjs');
+const { modelKeyRef } = await import('../core/model-key.mjs');
 
 const mode = (p) => fs.statSync(p).mode & 0o777;
 
@@ -146,7 +147,8 @@ test('loadConfig() returns the full default shape with a resolved timezone', () 
 
   assert.equal(cfg.version, 1);
   assert.equal(cfg.model.protocol, 'anthropic');
-  assert.equal(cfg.model.keyRef, 'model.default');
+  // The model's keyRef is derived from its address (core/model-key.mjs).
+  assert.equal(cfg.model.keyRef, modelKeyRef('https://api.anthropic.com'));
   assert.deepEqual(cfg.mail, []);
   assert.deepEqual(cfg.calendars, []);
   assert.deepEqual(cfg.sweep, { intervalMinutes: 30, activeHours: [6, 23], auto: true });

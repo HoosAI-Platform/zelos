@@ -2380,7 +2380,7 @@ test('REGRESSION: Test and List store the key in the field first, and Save refus
   // the field, clear it, then call.
   const helper = /async function storeTypedKey\(\)[\s\S]*?\n {4}\}/m.exec(panel[0]);
   assert.ok(helper, 'storeTypedKey is missing');
-  assert.match(helper[0], /api\.setSecret\(draft\.keyRef, key\)/);
+  assert.match(helper[0], /api\.setModelKey\(draft\.baseUrl, key\)/);
   assert.match(helper[0], /keyInput\.value = ''/, 'a stored key must leave the field, as it does on Save');
 
   const testFn = /async function test\(\)[\s\S]*?\n {4}\}/m.exec(panel[0]);
@@ -2406,13 +2406,17 @@ test('REGRESSION: Test and List store the key in the field first, and Save refus
   assert.ok(refuse, 'save() still writes a hosted model with no key');
   assert.ok(saveFn[0].indexOf(refuse[0]) < saveFn[0].indexOf('saveConfig('), 'the refusal comes after the save');
 
-  // The trap in the fix: `state.secretRefs` is refreshed by a config save,
-  // not by POST /api/secrets, so a key stored on the way into Test would
-  // still read as missing when Save is pressed a moment later — and be
-  // refused by the guard above, for a key the server already holds.
-  assert.match(panel[0], /const keyStored = \(\) => state\.secretRefs\.includes\(draft\.keyRef\) \|\| storedHere\.has\(draft\.keyRef\)/,
+  // The trap in the fix: the config is refreshed by a config save, not by
+  // storing a key, so a key stored on the way into Test would still read as
+  // missing when Save is pressed a moment later — and be refused by the guard
+  // above, for a key the server already holds.
+  assert.match(panel[0], /const keyStored = \(\) => keyKnown\.get\(draft\.baseUrl\) === true/,
     'keyStored() does not know about a key this panel stored itself');
-  assert.match(helper[0], /storedHere\.add\(draft\.keyRef\)/);
+  assert.match(helper[0], /keyKnown\.set\(draft\.baseUrl, true\)/);
+
+  // TT-3417: the key is filed per address, and nothing in the panel names a
+  // slot. One shared `draft.keyRef` is how a Claude key went to OpenAI.
+  assert.doesNotMatch(panel[0], /keyRef/, 'the model panel names a key slot again');
 });
 
 test('REGRESSION: a failed sweep on an unconfigured home still offers "Choose a model", and the banner agrees', () => {
@@ -3301,6 +3305,8 @@ const connectorManifests = async () => JSON.parse(JSON.stringify((await import(f
 function plainFetch({ probe = [], guesses = {}, presets, manifests, guides = GUIDES, calls = [] } = {}) {
   const ok = (body, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
   let config = { identity: { name: '', email: '' }, model: {}, mail: [], calendars: [], sources: [], sweep: { intervalMinutes: 30, activeHours: [6, 23], auto: true }, privacy: { sendBodies: true, bodyChars: 4000, maxItemsPerSweep: 150 } };
+  // AI keys by address, as the server files them. Never a value.
+  const modelKeys = new Set();
   return async (reqPath, init = {}) => {
     const body = init.body ? JSON.parse(init.body) : null;
     calls.push({ method: init.method || 'GET', path: reqPath, body });
@@ -3315,10 +3321,16 @@ function plainFetch({ probe = [], guesses = {}, presets, manifests, guides = GUI
       return found ? ok(found) : ok({ error: 'no guess' }, 400);
     }
     if (reqPath === '/api/secrets') return ok({ ok: true });
+    if (reqPath.startsWith('/api/model/key')) {
+      const address = body?.baseUrl ?? new URLSearchParams(reqPath.split('?')[1] || '').get('baseUrl');
+      if (init.method === 'POST') modelKeys.add(address);
+      if (init.method === 'DELETE') modelKeys.delete(address);
+      return ok(init.method ? { ok: true } : { stored: modelKeys.has(address) });
+    }
     if (reqPath === '/api/model/test') return ok({ ok: true, ms: 12, sample: 'Hello.' });
     if (reqPath === '/api/config') {
       if ((init.method || 'GET') === 'PUT') config = { ...config, ...body };
-      return ok({ config, errors: [], secretRefs: [] });
+      return ok({ config, errors: [], secretRefs: [], modelKeyStored: modelKeys.has(config.model?.baseUrl) });
     }
     if (reqPath === '/api/health') return ok({ model: { configured: false }, home: '/tmp/zelos-home', backend: { name: 'encrypted-file', writable: true, note: 'This does NOT protect against a process already running as this user.' } });
     if (reqPath === '/api/state') return ok({ items: [], events: [], notes: [], counts: {}, runs: {} });
@@ -4498,13 +4510,13 @@ test('the guided AI card stores the key, tests, picks the model itself, saves an
   // POST /api/help for its message on each paint; that is a read with a body,
   // not a write, and it is the other test's business.
   const wire = calls.filter((c) => c.method !== 'GET' && c.path !== '/api/help').map((c) => `${c.method} ${c.path}`);
-  assert.deepEqual(wire, ['POST /api/secrets', 'POST /api/model/test', 'PUT /api/config'], `the wire was ${wire.join(', ')}`);
-  assert.deepEqual(calls.find((c) => c.path === '/api/secrets').body, { ref: 'model.default', value: 'sk-ant-not-a-real-key' });
+  assert.deepEqual(wire, ['POST /api/model/key', 'POST /api/model/test', 'PUT /api/config'], `the wire was ${wire.join(', ')}`);
+  assert.deepEqual(calls.find((c) => c.path === '/api/model/key' && c.method === 'POST').body, { baseUrl: anthropic.baseUrl, value: 'sk-ant-not-a-real-key' });
   const tested = calls.find((c) => c.path === '/api/model/test').body;
   assert.equal(tested.model, 'claude-sonnet-5', 'the test did not carry the model the card picked');
   assert.equal(tested.baseUrl, anthropic.baseUrl);
   const saved = calls.find((c) => c.path === '/api/config').body.model;
-  assert.deepEqual(saved, { protocol: 'anthropic', label: 'Anthropic', baseUrl: anthropic.baseUrl, model: 'claude-sonnet-5', keyRef: 'model.default' });
+  assert.deepEqual(saved, { protocol: 'anthropic', label: 'Anthropic', baseUrl: anthropic.baseUrl, model: 'claude-sonnet-5' });
   assert.equal(key.value, '', 'the key is still in the box after it was stored');
   assert.match(onScreen(panel), /Working\. Zelos will use Claude\./);
   assert.equal(done, 1, 'onDone did not fire, so onboarding would not advance');
@@ -4589,7 +4601,52 @@ test('the guided AI setup keeps a refused key recoverable and advances only afte
   await settle();
   assert.match(onScreen(panel), /Working\. Zelos will use Claude/);
   assert.equal(advances, 1);
-  assert.deepEqual(calls.filter(c => c.path === '/api/secrets').map(c => c.body.value), ['refused-test-key', 'replacement-test-key']);
+  assert.deepEqual(calls.filter(c => c.path === '/api/model/key' && c.method === 'POST').map(c => c.body.value), ['refused-test-key', 'replacement-test-key']);
+});
+
+test('TT-3417: a key saved on one AI card is not sent when another service is chosen', async (t) => {
+  withPlainDom(t);
+  const calls = [];
+  const presets = await llmPresets();
+  globalThis.fetch = plainFetch({ presets, calls });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [] };
+  store.state.health = { model: { configured: false }, backend: { name: 'encrypted-file' } };
+  store.state.secretRefs = [];
+  store.state.modelKeyStored = false;
+  const anthropic = presets.find((p) => p.id === 'anthropic');
+  const openai = presets.find((p) => p.id === 'openai');
+
+  const panel = settings.modelPanel({ compact: true });
+  await settle();
+  findButtons(panel, /^Claude, by Anthropic/)[0].fire('click');
+  await settle();
+  findInput(panel, (n) => n.attributes.type === 'password').value = 'sk-ant-not-a-real-key';
+  findButton(panel, 'Check it works').fire('click');
+  await settle();
+  await settle();
+  assert.match(onScreen(panel), /Working\. Zelos will use Claude\./);
+
+  // The repro: choose OpenAI and press Check it works with the box empty.
+  calls.length = 0;
+  findButtons(panel, /^OpenAI, who make ChatGPT/)[0].fire('click');
+  await settle();
+  const key = findInput(panel, (n) => n.attributes.type === 'password');
+  assert.equal(key.attributes.placeholder, 'paste the key here', 'the OpenAI card claims a key is saved');
+  findButton(panel, 'Check it works').fire('click');
+  await settle();
+  await settle();
+  assert.equal(calls.some((c) => c.path === '/api/model/test'), false, 'Check it works went out for OpenAI with no OpenAI key');
+  assert.match(onScreen(panel), /Paste the key first/);
+
+  // And back on Claude, its own key is still there.
+  findButtons(panel, /^Claude, by Anthropic/)[0].fire('click');
+  await settle();
+  assert.equal(findInput(panel, (n) => n.attributes.type === 'password').attributes.placeholder, 'a key is saved — paste a new one to replace it');
+  assert.ok(calls.every((c) => c.body?.baseUrl !== openai.baseUrl || c.path !== '/api/model/key' || c.method !== 'POST'), 'a key was filed for OpenAI');
+  assert.ok(anthropic.baseUrl !== openai.baseUrl);
 });
 
 test('email setup can retry a refused connection with a replacement password and the same address', async (t) => {

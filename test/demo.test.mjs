@@ -192,11 +192,11 @@ test('demo setup status and exact-account recovery reflect configuration without
   findButton(target, 'Edit').click(); await settle();
   assert.ok(walk(panel).some(node => node.tag === 'input' && node.value === 'new@example.invalid'));
   assert.equal((await api.state()).runs.last.id, state.board.runs.last.id, 'opening recovery and Edit must not start a check');
-  await api.saveConfig({ model: { baseUrl: 'https://model.example.invalid/v1', model: 'sample-model', keyRef: 'model.new' } });
+  await api.saveConfig({ model: { baseUrl: 'https://model.example.invalid/v1', model: 'sample-model' } });
   state.health = await api.health();
   assert.equal(state.health.model.local, false); assert.equal(state.health.model.configured, false);
   assert.match(text(setupStatus(() => {})), /Choose an AI/);
-  await api.setSecret('model.new', 'unused demo field');
+  await api.setModelKey('https://model.example.invalid/v1', 'unused demo field');
   assert.equal((await api.health()).model.configured, true, 'a saved field is configuration, never a verified result');
   await api.saveConfig({ model: { model: '' } });
   assert.equal((await api.health()).model.configured, false);

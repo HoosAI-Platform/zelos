@@ -141,12 +141,16 @@ export const api = {
   capture: (text) => request('/api/capture', { method: 'POST', body: { text } }),
   setSecret: (ref, value) => request('/api/secrets', { method: 'POST', body: { ref, value } }),
   deleteSecret: (ref) => request(`/api/secrets/${encodeURIComponent(ref)}`, { method: 'DELETE' }),
+  // An AI key is filed by the address it is for; the server derives where it
+  // lives, and a key saved for one address is never sent to another.
+  modelKeyStored: (baseUrl) => request(`/api/model/key?${new URLSearchParams({ baseUrl })}`),
+  setModelKey: (baseUrl, value) => request('/api/model/key', { method: 'POST', body: { baseUrl, value } }),
+  deleteModelKey: (baseUrl) => request(`/api/model/key?${new URLSearchParams({ baseUrl })}`, { method: 'DELETE' }),
   testModel: (spec) => request('/api/model/test', { method: 'POST', body: spec }),
-  listModels: ({ protocol, baseUrl, keyRef }) => {
+  listModels: ({ protocol, baseUrl }) => {
     const q = new URLSearchParams();
     if (protocol) q.set('protocol', protocol);
     if (baseUrl) q.set('baseUrl', baseUrl);
-    if (keyRef) q.set('keyRef', keyRef);
     return request(`/api/model/list?${q.toString()}`);
   },
   presets: () => request('/api/model/presets'),

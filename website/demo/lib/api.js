@@ -246,6 +246,9 @@ function makeAccessRow(spec, index) {
 const db = {
   config: clone(demo.config),
   secretRefs: clone(demo.secretRefs),
+  // AI keys by the address they were saved for, as the real server files them.
+  // Like secretRefs, only that one exists — never a value.
+  modelKeys: new Set(demo.secretRefs.includes(demo.config.model?.keyRef) ? [modelAddress(demo.config.model.baseUrl)] : []),
   access: demo.aiAccess.map(makeAccessRow),
   items: demo.items.map(makeItem),
   events: demo.events.map(makeEvent),
@@ -286,13 +289,17 @@ function sourceStatus() {
   })));
 }
 
+function modelAddress(baseUrl) {
+  return String(baseUrl || '').trim().replace(/\/+$/, '');
+}
+
 function modelHealth() {
   const model = db.config.model || {};
   // Match the Settings local-runtime affordance. This is configuration only:
   // the demo never probes a runtime, reads a key or verifies a hosted account.
   const local = /^https?:\/\/(127\.0\.0\.1|localhost|\[?::1\]?)(:|\/|$)/i.test(model.baseUrl || '');
   return {
-    configured: Boolean(model.baseUrl && model.model && (local || db.secretRefs.includes(model.keyRef))),
+    configured: Boolean(model.baseUrl && model.model && (local || db.modelKeys.has(modelAddress(model.baseUrl)))),
     label: model.label || model.model || '', protocol: model.protocol, local,
   };
 }
@@ -785,7 +792,10 @@ function merge(base, patch) {
 const ACCENT_RE = /^#[0-9a-fA-F]{6}$/;
 
 function configResponse() {
-  return { config: clone(db.config), errors: [], secretRefs: clone(db.secretRefs) };
+  return {
+    config: clone(db.config), errors: [], secretRefs: clone(db.secretRefs),
+    modelKeyStored: db.modelKeys.has(modelAddress(db.config.model?.baseUrl)),
+  };
 }
 
 /* ------------------------------------------------------ microsoft sign-in */
@@ -1038,6 +1048,19 @@ const ROUTES = [
 
   ['DELETE', /^\/api\/secrets\/([^/]+)$/, (url, body, [ref]) => {
     db.secretRefs = db.secretRefs.filter((r) => r !== ref);
+    return { ok: true };
+  }],
+
+  ['GET', /^\/api\/model\/key$/, (url) => ({ stored: db.modelKeys.has(modelAddress(url.searchParams.get('baseUrl'))) })],
+
+  ['POST', /^\/api\/model\/key$/, (url, body) => {
+    // The value is deliberately not read, as for /api/secrets above.
+    db.modelKeys.add(modelAddress(body?.baseUrl));
+    return { ok: true };
+  }],
+
+  ['DELETE', /^\/api\/model\/key$/, (url) => {
+    db.modelKeys.delete(modelAddress(url.searchParams.get('baseUrl')));
     return { ok: true };
   }],
 
@@ -1440,12 +1463,14 @@ export const api = {
   capture: (text) => request('/api/capture', { method: 'POST', body: { text } }),
   setSecret: (ref, value) => request('/api/secrets', { method: 'POST', body: { ref, value } }),
   deleteSecret: (ref) => request(`/api/secrets/${encodeURIComponent(ref)}`, { method: 'DELETE' }),
+  modelKeyStored: (baseUrl) => request(`/api/model/key?${new URLSearchParams({ baseUrl })}`),
+  setModelKey: (baseUrl, value) => request('/api/model/key', { method: 'POST', body: { baseUrl, value } }),
+  deleteModelKey: (baseUrl) => request(`/api/model/key?${new URLSearchParams({ baseUrl })}`, { method: 'DELETE' }),
   testModel: (spec) => request('/api/model/test', { method: 'POST', body: spec }),
-  listModels: ({ protocol, baseUrl, keyRef }) => {
+  listModels: ({ protocol, baseUrl }) => {
     const q = new URLSearchParams();
     if (protocol) q.set('protocol', protocol);
     if (baseUrl) q.set('baseUrl', baseUrl);
-    if (keyRef) q.set('keyRef', keyRef);
     return request(`/api/model/list?${q.toString()}`);
   },
   presets: () => request('/api/model/presets'),
