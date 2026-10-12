@@ -30,7 +30,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { DEFAULTS, loadConfig, paths, validateConfig } from './config.mjs';
 import { SCHEMA_VERSION, hasFts5 } from './db.mjs';
-import { backend as secretBackend, getSecret as readSecret } from './secrets.mjs';
+import { backend as secretBackend, getSecret as readSecret, setSecret as writeSecret, deleteSecret as removeSecret } from './secrets.mjs';
+import { readModelKey, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
 import { isLocalAddress, listModels } from './llm.mjs';
 import { guessImapHost, testConnection as testImapConnection } from './sources/imap.mjs';
 import { testConnection as testCalDavConnection } from './sources/caldav.mjs';
@@ -454,6 +455,22 @@ async function checkSecrets(deps, home) {
   );
 }
 
+/*
+ * A key from before keys were kept per service that is not this service's —
+ * still in `model.default`, or set aside because no address could take it —
+ * stays in the store, unused. Worth knowing either way; nothing is broken.
+ */
+async function olderKeyNote(deps, key) {
+  for (const ref of [LEGACY_MODEL_REF, UNPLACED_MODEL_REF]) {
+    let value = null;
+    try { value = await deps.getSecret(ref); } catch { /* the secret store line reports this */ }
+    if (value && value !== key) {
+      return ' An older AI key, saved before Zelos kept one key per service, is also still stored; it could not be matched to this service, so it is not used.';
+    }
+  }
+  return '';
+}
+
 async function checkModelKey(config, deps) {
   const label = 'AI key';
   const model = config?.model ?? {};
@@ -467,48 +484,61 @@ async function checkModelKey(config, deps) {
     return { result: check('model.key', label, 'skip', 'No AI service has been chosen yet, so there is no key to check.'), key: null };
   }
   if (isLocalAddress(address)) {
+    const older = await olderKeyNote(deps, null);
     return {
-      result: check('model.key', label, 'pass', `${address} runs on this machine — no API key needed.`),
+      result: older
+        ? check('model.key', label, 'warn', `${address} runs on this machine — no API key needed.${older}`,
+          'Open Settings → AI → Advanced and choose Forget the stored key to remove it.')
+        : check('model.key', label, 'pass', `${address} runs on this machine — no API key needed.`),
       key: null,
     };
   }
-  if (!model.keyRef) {
-    return {
-      result: check(
-        'model.key', label, chosen ? 'fail' : 'warn',
-        `This AI service is not on this computer, so it needs a key, and Zelos has nowhere set up to keep one. For experts: ${address} has no keyRef.`,
-        'Open Settings → AI, pick your AI service again and save. That sets up where the key is stored.',
-      ),
-      key: null,
-    };
-  }
+  // The key saved for this address, and only that one (core/model-key.mjs). A
+  // pre-upgrade key is moved here only against the real store, never a fake.
+  const real = deps.getSecret === readSecret;
   let key = null;
   try {
-    key = await deps.getSecret(model.keyRef);
+    key = await readModelKey(model.baseUrl, {
+      getSecret: deps.getSecret,
+      setSecret: real ? writeSecret : null,
+      deleteSecret: real ? removeSecret : null,
+      configuredBaseUrl: model.baseUrl,
+    });
   } catch (err) {
     return {
       result: check(
         'model.key', label, 'fail',
-        `Zelos could not read the key it stored for ${model.keyRef}: ${errorText(err)}`,
+        `Zelos could not read the key it stored for ${address}: ${errorText(err)}`,
         'See the secret store line above — that is where this failed. Re-entering the key in Settings → AI usually settles it.',
       ),
       key: null,
     };
   }
+  const older = await olderKeyNote(deps, key);
   if (!key) {
     return {
       result: check(
         'model.key', label, chosen ? 'fail' : 'warn',
         chosen
-          ? `No key has been saved for this AI service, so every check will fail before it starts. For experts: the service is ${address}.`
-          : `No AI has been chosen yet, and no key has been saved for the AI service. For experts: the service is ${address}.`,
+          ? `No key has been saved for this AI service, so every check will fail before it starts. For experts: the service is ${address}.${older}`
+          : `No AI has been chosen yet, and no key has been saved for the AI service. For experts: the service is ${address}.${older}`,
         'Open Settings → AI and paste the key your AI service gave you. Zelos keeps it in this computer’s own password store — it is never written into the settings file, and it never appears in a log. If you would rather nothing left this computer at all, run Ollama or LM Studio and pick that instead; an AI on this computer needs no key.',
       ),
       key: null,
     };
   }
+  if (older) {
+    return {
+      result: check(
+        'model.key', label, 'warn',
+        `A key is saved for this AI service (${address}).${older}`,
+        'Open Settings → AI → Advanced and choose Forget the stored key to remove both, then paste your current key again.',
+      ),
+      key,
+    };
+  }
   return {
-    result: check('model.key', label, 'pass', `A key is saved for this AI service. For experts: ${address}, under ${model.keyRef}.`),
+    result: check('model.key', label, 'pass', `A key is saved for this AI service. For experts: ${address}.`),
     key,
   };
 }
@@ -1154,6 +1184,10 @@ export async function diagnose(options = {}) {
 async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, deps = {} } = {}, homeCheck) {
   const startedMs = Date.now();
   const d = { ...DEFAULT_DEPS, ...deps };
+  // Mail, calendars and sources read their own secrets through this; the AI key
+  // is read only by checkModelKey, for the AI's own address. A `model.` ref in
+  // their config gets nothing, rather than the key to try against their host.
+  const own = { ...d, getSecret: async (ref) => (isModelKeyRef(ref) ? null : d.getSecret(ref)) };
   const checks = [];
 
   // Before anything resolves paths(): that call creates and chmods the folder.
@@ -1197,7 +1231,7 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
       // One at a time: several TLS logins to the same provider at once is how a
       // diagnostic gets itself rate-limited.
       for (const account of mail) {
-        checks.push(await checkMailAccount(account, d, { timeoutMs }));
+        checks.push(await checkMailAccount(account, own, { timeoutMs }));
       }
     }
 
@@ -1218,7 +1252,7 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
       ));
     } else {
       for (const calendar of calendars) {
-        checks.push(await checkCalendar(calendar, d, { timeoutMs, signal, timezone }));
+        checks.push(await checkCalendar(calendar, own, { timeoutMs, signal, timezone }));
       }
     }
 
@@ -1230,7 +1264,7 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
        connector are checked; the ones that do not are the report below. */
     for (const source of (Array.isArray(cfg.sources) ? cfg.sources : [])) {
       if (!source?.enabled || !connectorFor(source.type)) continue;
-      checks.push(await checkSource(source, d, { timeoutMs, signal, timezone }));
+      checks.push(await checkSource(source, own, { timeoutMs, signal, timezone }));
     }
 
     const unknown = checkUnknownSources(cfg);

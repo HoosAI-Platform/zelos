@@ -738,7 +738,6 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     label: cfg.label || '',
     baseUrl: cfg.baseUrl || '',
     model: cfg.model || '',
-    keyRef: cfg.keyRef || 'model.default',
     // The guided card to show, or null for the expert form alone. Set by
     // choose(); restored from the saved config once the presets arrive.
     guide: null,
@@ -757,21 +756,54 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
   // message Claude gets is about Anthropic's key page and not both.
   const helpSlot = el('div');
 
-  // Refs this panel has stored itself since it was drawn. `state.secretRefs`
-  // is refreshed by a config save, not by POST /api/secrets, so a key stored
-  // on the way into "Test the connection" would otherwise still read as
-  // missing when Save is pressed a moment later — and be refused.
-  const storedHere = new Set();
-  const keyStored = () => state.secretRefs.includes(draft.keyRef) || storedHere.has(draft.keyRef);
+  /* Whether a key is saved, per address. A key belongs to the address it was
+     saved for — the server files it there and will send it nowhere else — so
+     choosing another service shows an empty key box, not the last service's
+     key. It used to be one slot, `model.default`, and Check it works sent a
+     Claude key to whichever service was chosen next. Seeded for the saved
+     address by GET /api/config, asked of the server for any other, and set
+     here when this panel stores or forgets one. The server is what enforces
+     this; a stale answer here can only make the panel ask for a key. */
+  const keyKnown = new Map([[cfg.baseUrl || '', state.modelKeyStored === true]]);
+  const keyStored = () => keyKnown.get(draft.baseUrl) === true;
+  // True when this call is what found a saved key — the one case the form,
+  // drawn as if there were none, needs redrawing for. An answer that arrives
+  // after the panel stored or forgot a key itself is older than that, and lost.
+  async function learnKeyStored() {
+    const address = draft.baseUrl;
+    if (!address || keyKnown.has(address)) return false;
+    try {
+      const { stored } = await api.modelKeyStored(address);
+      if (keyKnown.has(address)) return false;
+      keyKnown.set(address, stored === true);
+      return stored === true;
+    } catch {
+      // Unknown reads as "no key": the panel asks for one, and sends nothing.
+      return false;
+    }
+  }
   const isLocal = () => /^https?:\/\/(127\.0\.0\.1|localhost|\[?::1\]?)(:|\/|$)/i.test(draft.baseUrl || '');
   const friendly = () => draft.guide?.friendly || draft.label || 'this service';
 
-  function drawForm() {
+  // The key box currently on screen, so a redraw that is not a change of
+  // service keeps what was typed in it — after learning whether the address
+  // has a key, or after the Base URL was edited in the same form. Choosing
+  // another service's card never carries it over: a key typed for one service
+  // must not be stored for the next.
+  let liveKeyInput = null;
+
+  function drawForm({ keepKey = false } = {}) {
+    const typed = keepKey ? (liveKeyInput?.value || '') : '';
     const modelInput = input({ value: draft.model, placeholder: 'model id, e.g. llama3.1:8b', list: 'zelos-models' });
     modelInput.addEventListener('input', () => { draft.model = modelInput.value.trim(); });
 
     const baseInput = input({ value: draft.baseUrl, placeholder: 'https://…' });
     baseInput.addEventListener('input', () => { draft.baseUrl = baseInput.value.trim(); });
+    // A new address may have a key of its own, or none: redraw once it is known.
+    baseInput.addEventListener('change', async () => {
+      const address = draft.baseUrl;
+      if (await learnKeyStored() && draft.baseUrl === address) drawForm({ keepKey: true });
+    });
 
     // One key box. It sits in the guided card when there is one and in the
     // Advanced form otherwise; the helpers below read it wherever it is.
@@ -782,6 +814,8 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       spellcheck: 'false',
       placeholder: keyStored() ? 'a key is saved — paste a new one to replace it' : 'paste the key here',
     });
+    keyInput.value = typed;
+    liveKeyInput = keyInput;
 
     const datalist = el('datalist', { id: 'zelos-models' });
     const suggestions = el('div', { class: 'suggestions' });
@@ -797,9 +831,15 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
      */
     async function storeTypedKey() {
       const key = keyInput.value.trim();
-      if (!key) return;
-      await api.setSecret(draft.keyRef, key);
-      storedHere.add(draft.keyRef);
+      if (!key) {
+        await learnKeyStored();
+        return;
+      }
+      // The address is read once: another card chosen while this is in flight
+      // must not be marked as having the key.
+      const address = draft.baseUrl;
+      await api.setModelKey(address, key);
+      keyKnown.set(address, true);
       keyInput.value = '';
     }
 
@@ -824,7 +864,6 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
         const models = await api.listModels({
           protocol: draft.protocol,
           baseUrl: draft.baseUrl,
-          keyRef: draft.keyRef,
         });
         datalist.replaceChildren(...models.map((m) => el('option', { value: m.id })));
         suggestions.replaceChildren(
@@ -847,6 +886,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       // Refused rather than saved: a hosted model with no key is a model every
       // sweep fails on, and this save used to go through silently — and, in
       // onboarding, advance to the next step on the strength of it.
+      if (!keyInput.value.trim()) await learnKeyStored();
       if (!isLocal() && !keyStored() && !keyInput.value.trim()) {
         status.bad(`${friendly()} needs a key. Paste one above, or pick an AI program on this computer.`);
         return false;
@@ -860,7 +900,6 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
             label: draft.label || draft.model,
             baseUrl: draft.baseUrl,
             model: draft.model,
-            keyRef: draft.keyRef,
           },
         });
         status.good('Saved.');
@@ -888,7 +927,6 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
           protocol: draft.protocol,
           baseUrl: draft.baseUrl,
           model: draft.model,
-          keyRef: draft.keyRef,
         });
         if (result.ok) status.good(`Answered in ${result.ms}ms: “${result.sample}”`);
         else status.bad(result.error || `${friendly()} refused the call.`);
@@ -926,7 +964,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       : plainSecretNotes(state.health?.backend?.name).field;
     const keyField = field(draft.guide ? 'Your key' : 'API key', keyInput, {
       hint: draft.guide ? keyHint : (keyStored()
-        ? 'A key is already stored for this slot. Zelos cannot show it back to you — there is no route that reads a secret.'
+        ? 'A key is already stored for this address. Zelos cannot show it back to you — there is no route that reads a secret.'
         : secretStoreNotes(state.health?.backend?.name).field),
     });
 
@@ -1002,8 +1040,9 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
             class: 'btn quiet',
             onClick: async () => {
               try {
-                await api.deleteSecret(draft.keyRef);
-                storedHere.delete(draft.keyRef);
+                const address = draft.baseUrl;
+                await api.deleteModelKey(address);
+                keyKnown.set(address, false);
                 await saveConfig({});
                 status.good('Key deleted.');
                 drawForm();
@@ -1029,6 +1068,11 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     Object.assign(draft, next);
     drawForm();
     if (scroll) (draft.guide ? guidedWrap : formWrap).scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    // The chosen service's own key, if one was saved for it before.
+    const address = draft.baseUrl;
+    if (address && !keyKnown.has(address)) {
+      learnKeyStored().then((found) => { if (found && draft.baseUrl === address) drawForm({ keepKey: true }); });
+    }
   }
 
   /** The guided card for a hosted preset, or for a runtime the probe found. */

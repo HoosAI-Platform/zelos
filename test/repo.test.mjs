@@ -863,7 +863,7 @@ describe('a first launch with nothing configured', () => {
     const cfg = JSON.parse(raw);
     assert.equal(cfg.version, 1);
     assert.equal(cfg.identity.name, 'Nemo Hale');
-    assert.equal(cfg.model.keyRef, 'model.default', 'the config stores a reference, never a key');
+    assert.match(cfg.model.keyRef, /^model\.o_[0-9a-f]{32}$/, 'the config stores a reference, never a key');
   });
 
   test('nothing on disk records the session token', () => {

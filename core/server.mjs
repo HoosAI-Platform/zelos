@@ -61,6 +61,7 @@ import { describe as describeConnectors, typesFor } from './connectors/index.mjs
 import { readSourceStatus } from './source-status.mjs';
 import { createUpdateChecker } from './updates.mjs';
 import { getSecret, setSecret, deleteSecret, listRefs, backend } from './secrets.mjs';
+import { readModelKey, modelKeyRef, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
 import {
   listBoard, bucketCounts, listEvents, listDrafts, updateDraft, lastRun,
   setItemState, insertCapture, search, getKV, getItem, resolveRef,
@@ -789,8 +790,14 @@ function stripSecretShaped(value) {
   return out;
 }
 
+/*
+ * A secret by the ref a caller names — a mail password, a calendar password, a
+ * client secret. Never a model key: those live in the `model.` namespace and are
+ * read only by modelKeyFor(), for the address they were saved for. Before that,
+ * a calendar test naming the AI key's ref sent it to any address in the body.
+ */
 async function secretFor(ref) {
-  if (!ref || !isValidRef(ref)) return null;
+  if (!ref || !isValidRef(ref) || isModelKeyRef(ref)) return null;
   try {
     return await getSecret(ref);
   } catch (err) {
@@ -799,15 +806,27 @@ async function secretFor(ref) {
   }
 }
 
+/**
+ * The key saved for the AI service at `baseUrl`, or null — the only way this
+ * file reads a model key. The ref comes from the address the request is about
+ * to go to (core/model-key.mjs), never from a caller, so a key saved for one
+ * service cannot be sent to another. `cfg` names the configured address, the
+ * one a pre-upgrade `model.default` key is moved to on first read.
+ */
+async function modelKeyFor(baseUrl, cfg) {
+  try {
+    return await readModelKey(baseUrl, { getSecret, setSecret, deleteSecret, configuredBaseUrl: cfg?.model?.baseUrl ?? null, log });
+  } catch (err) {
+    log.warn('server: could not read the model key', { error: err.message });
+    return null;
+  }
+}
+
 /** True when there is enough model configuration to make a call at all. */
 async function modelIsConfigured(model) {
   if (!model || !model.baseUrl || !model.model) return false;
   if (isLocalAddress(model.baseUrl)) return true; // keyless local runtimes are normal
-  try {
-    return (await listRefs()).includes(model.keyRef);
-  } catch {
-    return false;
-  }
+  return Boolean(await modelKeyFor(model.baseUrl, { model }));
 }
 
 function requireString(body, field, { max = 500, required = true } = {}) {
@@ -1122,6 +1141,10 @@ async function configResponse(res, status, config, errors) {
     // Which refs HAVE a stored secret — never which value. The UI needs this to
     // show "key saved" without a read route existing.
     secretRefs: await listRefs().catch(() => []),
+    // Whether a key is saved for the configured AI service, so Settings → AI
+    // draws its key box right the first time. Model refs are per address and
+    // hashed; the UI never names one.
+    modelKeyStored: Boolean(await modelKeyFor(config?.model?.baseUrl, config)),
   });
 }
 
@@ -1176,13 +1199,21 @@ async function handleConfigPut(ctx) {
   await configResponse(ctx.res, 200, saved, validateConfig(saved).errors);
 }
 
-async function handleSecretSet(ctx) {
-  const body = await readJSON(ctx.req);
-  const ref = requireString(body, 'ref', { max: 64 });
-  if (!isValidRef(ref)) throw new HttpError(400, 'ref must look like "model.default" (letters, digits, . _ -)');
+function requireSecretValue(body) {
   const value = body.value;
   if (typeof value !== 'string' || !value) throw new HttpError(400, 'value must be a non-empty string');
   if (value.length > 8_192) throw new HttpError(400, 'value is too long to be a credential');
+  return value;
+}
+
+async function handleSecretSet(ctx) {
+  const body = await readJSON(ctx.req);
+  const ref = requireString(body, 'ref', { max: 64 });
+  if (!isValidRef(ref)) throw new HttpError(400, 'ref must look like "mail.m_9f3a1c" (letters, digits, . _ -)');
+  // A model key is filed by the address it is for, through /api/model/key. A
+  // ref named here could plant a key under another address's slot.
+  if (isModelKeyRef(ref)) throw new HttpError(400, 'AI keys are saved with POST /api/model/key, for the address they belong to');
+  const value = requireSecretValue(body);
   try {
     const result = await setSecret(ref, value);
     // `ref` is a handle, not a credential; the value is never echoed or logged.
@@ -1202,14 +1233,59 @@ async function handleSecretDelete(ctx, [ref]) {
   }
 }
 
+/*
+ * The key saved for an AI service's address. The address is the whole
+ * identity: a `keyRef` in the body or query is ignored, by every model route,
+ * so nothing a caller sends can aim one service's key at another.
+ */
+function modelAddressFrom(value) {
+  const baseUrl = typeof value === 'string' ? value.trim() : '';
+  if (!modelKeyRef(baseUrl)) throw new HttpError(400, 'baseUrl must be an http or https address');
+  return baseUrl;
+}
+
+async function handleModelKeyGet(ctx) {
+  const baseUrl = modelAddressFrom(ctx.url.searchParams.get('baseUrl'));
+  sendJSON(ctx.res, 200, { stored: Boolean(await modelKeyFor(baseUrl, ctx.config())) });
+}
+
+async function handleModelKeySet(ctx) {
+  const body = await readJSON(ctx.req);
+  const baseUrl = modelAddressFrom(body.baseUrl);
+  const value = requireSecretValue(body);
+  try {
+    const result = await setSecret(modelKeyRef(baseUrl), value);
+    sendJSON(ctx.res, 200, { ok: true, backend: result.backend });
+  } catch (err) {
+    throw new HttpError(500, err.message);
+  }
+}
+
+async function handleModelKeyDelete(ctx) {
+  const baseUrl = modelAddressFrom(ctx.url.searchParams.get('baseUrl'));
+  try {
+    const result = await deleteSecret(modelKeyRef(baseUrl));
+    /* Forgetting the configured service's key forgets a pre-upgrade one too —
+       left behind, it would be moved straight back on the next read — and one
+       set aside because no address could take it, which doctor points here. */
+    const configured = ctx.config()?.model?.baseUrl;
+    if (configured && modelKeyRef(configured) === modelKeyRef(baseUrl)) {
+      await deleteSecret(LEGACY_MODEL_REF);
+      await deleteSecret(UNPLACED_MODEL_REF);
+    }
+    sendJSON(ctx.res, 200, { ok: true, deleted: result.deleted });
+  } catch (err) {
+    throw new HttpError(500, err.message);
+  }
+}
+
 async function handleModelTest(ctx) {
   const body = await readJSON(ctx.req);
   const cfg = ctx.config();
   const protocol = body.protocol || cfg.model.protocol;
   const baseUrl = body.baseUrl || cfg.model.baseUrl;
   const model = body.model || cfg.model.model;
-  const keyRef = body.keyRef === undefined ? cfg.model.keyRef : body.keyRef;
-  const apiKey = await secretFor(keyRef);
+  const apiKey = await modelKeyFor(baseUrl, cfg);
 
   const startedAt = Date.now();
   try {
@@ -1243,9 +1319,8 @@ async function handleModelList(ctx) {
   const cfg = ctx.config();
   const protocol = ctx.url.searchParams.get('protocol') || cfg.model.protocol;
   const baseUrl = ctx.url.searchParams.get('baseUrl') || cfg.model.baseUrl;
-  const keyRef = ctx.url.searchParams.get('keyRef') ?? cfg.model.keyRef;
   try {
-    sendJSON(ctx.res, 200, await listModels({ protocol, baseUrl, apiKey: await secretFor(keyRef) }));
+    sendJSON(ctx.res, 200, await listModels({ protocol, baseUrl, apiKey: await modelKeyFor(baseUrl, cfg) }));
   } catch (err) {
     throw new HttpError(502, err.message);
   }
@@ -1456,6 +1531,7 @@ async function handleMailTest(ctx) {
   const host = requireString(body, 'host', { max: 255 });
   const user = requireString(body, 'user', { max: 320 });
   const keyRef = requireString(body, 'keyRef', { max: 64 });
+  if (isModelKeyRef(keyRef)) throw new HttpError(400, 'keyRef must name a mail account, like mail.m_9f3a1c');
   const port = Number(body.port ?? 993);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, 'port must be a port number');
   const requireTls = requireTlsFrom(body);
@@ -2137,6 +2213,7 @@ async function handleCalendarTest(ctx) {
      handler — in a file that knows nothing about calendars. */
   const kinds = typesFor('calendars');
   if (!kinds.includes(kind)) throw new HttpError(400, `kind must be ${orList(kinds)}`);
+  if (isModelKeyRef(body.keyRef)) throw new HttpError(400, 'keyRef must name a calendar, like calendar.c_9f3a1c');
 
   if (kind === 'caldav') {
     const url = requireString(body, 'url', { max: 2_048 });
@@ -2365,7 +2442,7 @@ async function handleAsk(ctx) {
   }
 
   const { sources, context } = askContext(ctx.db, question, cfg.privacy);
-  const apiKey = await secretFor(cfg.model.keyRef);
+  const apiKey = await modelKeyFor(cfg.model.baseUrl, cfg);
 
   // Headers go out only once we know the request itself is good, so a setup
   // mistake is an honest 4xx rather than an error smuggled inside a 200 stream.
@@ -2947,6 +3024,9 @@ const ROUTES = [
   ['POST', /^\/api\/model\/test$/, handleModelTest],
   ['GET', /^\/api\/model\/list$/, handleModelList],
   ['GET', /^\/api\/model\/presets$/, handlePresets],
+  ['GET', /^\/api\/model\/key$/, handleModelKeyGet],
+  ['POST', /^\/api\/model\/key$/, handleModelKeySet],
+  ['DELETE', /^\/api\/model\/key$/, handleModelKeyDelete],
   ['GET', /^\/api\/guides$/, handleGuides],
   ['POST', /^\/api\/help$/, handleHelp],
   ['GET', /^\/api\/local\/probe$/, handleLocalProbe],

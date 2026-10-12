@@ -82,7 +82,7 @@ anywhere.
     "label": "Claude",
     "baseUrl": "https://api.anthropic.com",
     "model": "",
-    "keyRef": "model.default",        // secrets ref; NEVER the key itself
+    "keyRef": "model.o_…",            // derived from baseUrl (core/model-key.mjs); informational — keys are read by address
     "maxTokens": 8192,
     "temperature": 0
   },
@@ -119,7 +119,8 @@ export function newId(prefix)              // e.g. newId('m') -> 'm_9f3a1c'
 ```
 
 ```js
-// core/secrets.mjs   — refs are short opaque strings like "model.default", "mail.m_9f3a1c"
+// core/secrets.mjs   — refs are short opaque strings like "mail.m_9f3a1c"; model keys live under
+//                      "model.o_<hash of the address>", derived by core/model-key.mjs and never named by a caller
 export async function backend()            // {name, writable, note}  name: macos-keychain|windows-dpapi|libsecret|encrypted-file
 export async function setSecret(ref, value)
 export async function getSecret(ref)       // string | null
@@ -491,11 +492,14 @@ Routes (JSON in/out unless noted):
 | GET | `/api/sweep/stream` | | **SSE** progress events |
 | POST | `/api/items/:id/state` | `{state}` | updated item |
 | POST | `/api/capture` | `{text}` | `{id}` |
-| GET/PUT | `/api/config` | config patch | `{config, errors}` — **never returns secrets** |
-| POST | `/api/secrets` | `{ref, value}` | `{ok}` — write-only, no read route exists |
+| GET/PUT | `/api/config` | config patch | `{config, errors, secretRefs, modelKeyStored}` — **never returns secrets** |
+| POST | `/api/secrets` | `{ref, value}` | `{ok}` — write-only, no read route exists; refuses `model.` refs |
 | DELETE | `/api/secrets/:ref` | | `{ok}` |
-| POST | `/api/model/test` | `{protocol,baseUrl,model,keyRef}` | `{ok, sample, ms, error}` |
-| GET | `/api/model/list` | `?protocol&baseUrl&keyRef` | `[{id,label}]` |
+| POST | `/api/model/test` | `{protocol,baseUrl,model}` — uses the key saved for `baseUrl`; a `keyRef` is ignored | `{ok, sample, ms, error}` |
+| GET | `/api/model/list` | `?protocol&baseUrl` | `[{id,label}]` |
+| GET | `/api/model/key` | `?baseUrl` | `{stored}` |
+| POST | `/api/model/key` | `{baseUrl, value}` | `{ok}` — write-only, filed for that address |
+| DELETE | `/api/model/key` | `?baseUrl` | `{ok}` |
 | GET | `/api/model/presets` | | `PRESETS` |
 | GET | `/api/local/probe` | | detected local runtimes |
 | POST | `/api/help` | `{step, provider?, signIn?, clientReady?}` — `step` is `install`, `ai`, `email`, `calendar`, `first-check` or `general`; `provider` is what the app calls it (the mail guess's label, a calendar guide, an AI card) and is normalised to a closed list, never echoed; the platform is the server's own `process.platform`, never the body's | `{step, platform, title, prompt, claude, chatgpt}` — the message core/help.mjs writes for that screen, and `https://claude.ai/new?q=…` / `https://chatgpt.com/?q=…` with it url-encoded. The message may name the step, the provider's name, the platform and Zelos's own public pages; never an address, a key, a password, a home path or anything read from mail (test/help.test.mjs) |

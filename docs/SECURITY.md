@@ -290,6 +290,27 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    at Ollama, LM Studio, llama.cpp, vLLM or LocalAI on `127.0.0.1`, then
    **nothing Zelos read leaves the machine at all**, and Zelos still works
    with no API key.
+
+   **A model key goes only to the address it was saved for.** Each key is
+   stored under a ref derived from its destination — scheme, host, port and
+   path, canonicalised as `fetch` would, then hashed (`core/model-key.mjs`) —
+   and every read of a model key derives that ref from the address about to be
+   contacted. No caller names it: the model routes ignore a `keyRef`,
+   `POST /api/secrets` refuses any `model.` ref, and mail, calendars, sources
+   and the Google client secret may not be configured with one. Choosing another AI service shows
+   an empty key box rather than sending the last service's key; choosing the
+   first one again finds its key. The path counts because an AI gateway can
+   send `…/anthropic` and `…/openai` on one host to two different companies.
+   A key saved by Zelos 1.9.5 or earlier, under the single `model.default`
+   slot, is moved to the configured address the first time it is read — the
+   address 1.9.5 was already sending it to — with two exceptions decided by
+   its prefix. A key that names another provider while a different preset is
+   chosen goes back to that provider (an `sk-ant-` key with OpenAI or Ollama
+   chosen goes to Anthropic). A key no address can be trusted with — one
+   lacking the chosen preset's own prefix, or any unnamed key with a keyless
+   runtime chosen — is set aside under `model.unplaced`, which nothing sends
+   and nothing moves on; `zelos doctor` reports it, and Forget the stored key
+   removes it.
 4. **One host per source you add** — `api.github.com` for GitHub, the feed's
    own host for a feed, and so on. Each connector names the host it may reach
    in its manifest (`origins` in `core/connectors/*.mjs`), and the only thing
@@ -805,7 +826,7 @@ right for so long.)
 | all of the above | Which one this home committed to is recorded in `secrets.backend.json` (mode `0600`) and is what later launches use — see below. |
 
 Independently created homes use separate OS credential names, even when both
-configurations use a ref such as `model.default`. `secrets.namespace.json` holds
+configurations use a ref such as `mail.m_9f3a1c`. `secrets.namespace.json` holds
 that home's random identifier and the refs recorded before upgrading; it holds
 no values. Keep it, `secrets.index.json`, and `secrets.migrated/` with the home
 when moving or restoring a backup. Copying an entire home also copies its
@@ -885,10 +906,11 @@ table, are where a sign-in *creates* one:
 
 | Route | What it does with a stored secret |
 | --- | --- |
-| `POST /api/model/test`, `GET /api/model/list` | sends the model key to the `baseUrl` **in the request** |
+| `POST /api/model/test`, `GET /api/model/list` | sends the model key saved **for** the `baseUrl` in the request — and only that one. Naming another address gets that address's key, or none |
+| `POST /api/model/key`, `DELETE /api/model/key`, `GET /api/model/key` | files, forgets or reports (`{stored}`) the key for a `baseUrl`; the server derives the ref and never echoes the value |
 | `POST /api/mail/guess` | nothing — it names a provider from the address’s domain and reads no secret. For a domain its table does not list it may send the **domain** of the address (never the address) to the system DNS resolver, for its MX and then its SRV record, and nothing else |
-| `POST /api/mail/test` | sends the mail password to the `host`/`port` **in the request** |
-| `POST /api/calendar/test` | sends the calendar password to the `url` **in the request** |
+| `POST /api/mail/test` | sends the mail password to the `host`/`port` **in the request**; a `model.` ref is refused |
+| `POST /api/calendar/test` | sends the calendar password to the `url` **in the request**; a `model.` ref is refused |
 | `POST /api/mail/oauth` | starts a sign-in and reads no stored secret. **Microsoft** (`provider: 'microsoft'`): asks `login.microsoftonline.com` for a device code and, when you finish in your browser, stores the refresh token under the account's `keyRef`; the device code stays in this process and the page sees only the user code. **Google** (`provider: 'google'`): mints a PKCE verifier and a `state`, answers with the `accounts.google.com` URL for the page to open, and stores nothing until the callback below lands. A `clientSecret` in the body is written to the store under `oauth.google.clientSecret` before it is used and is never echoed; `GET /api/mail/oauth/:id` answers with the state of the flow and nothing credential-shaped |
 | `GET /oauth/callback` | the one route that takes no session token (section 6). Reads no stored secret; **writes** one — it trades the `code` and the PKCE verifier at `oauth2.googleapis.com` (with the client id, and the client secret when the client has one) and files the refresh token under the flow's `keyRef`. Refuses anything not from `127.0.0.1` or whose `state` does not match a pending flow, with one generic `400`. The page it returns contains no token and no address |
 

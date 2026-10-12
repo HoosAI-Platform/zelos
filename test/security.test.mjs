@@ -43,6 +43,7 @@ const { createServer, listen } = await import('../core/server.mjs');
 const db = await import('../core/db.mjs');
 const { loadConfig, paths } = await import('../core/config.mjs');
 const secrets = await import('../core/secrets.mjs');
+const { modelKeyRef } = await import('../core/model-key.mjs');
 const { safeUrl, screenContent, validateSweep, wrapUntrusted, scrubForPrompt } = await import('../core/safety.mjs');
 const { buildSweepPrompt, mergeSweep } = await import('../core/triage.mjs');
 const { createLogger } = await import('../core/log.mjs');
@@ -818,11 +819,12 @@ test('no route hands back a stored secret, and none of them has a read route', a
   cfg.model = { ...cfg.model, protocol: 'openai', baseUrl: `${provider.base}/v1`, model: 'mock', keyRef: 'model.default' };
   const ctx = await startServer(t, { config: cfg });
 
-  for (const [ref, value] of [['model.default', MODEL_KEY], ['mail.m_probe', MAIL_PASS], ['cal.c_probe', CAL_PASS]]) {
+  assert.equal((await call(ctx, 'POST', '/api/model/key', { body: { baseUrl: cfg.model.baseUrl, value: MODEL_KEY } })).status, 200);
+  for (const [ref, value] of [['mail.m_probe', MAIL_PASS], ['cal.c_probe', CAL_PASS]]) {
     assert.equal((await call(ctx, 'POST', '/api/secrets', { body: { ref, value } })).status, 200);
   }
   t.after(async () => {
-    for (const ref of ['model.default', 'mail.m_probe', 'cal.c_probe']) await secrets.deleteSecret(ref);
+    for (const ref of [modelKeyRef(cfg.model.baseUrl), 'mail.m_probe', 'cal.c_probe']) await secrets.deleteSecret(ref);
   });
 
   // There is no read route. Not "it 403s" — it does not exist.
@@ -834,6 +836,7 @@ test('no route hands back a stored secret, and none of them has a read route', a
     ['GET', '/api/health'], ['GET', '/api/state'], ['GET', '/api/config'],
     ['PUT', '/api/config', { model: { keyRef: 'model.default', apiKey: MODEL_KEY }, password: MAIL_PASS }],
     ['GET', '/api/search?q=probe'], ['POST', '/api/model/test', {}],
+    ['GET', `/api/model/key?baseUrl=${encodeURIComponent(cfg.model.baseUrl)}`],
     ['GET', '/api/model/presets'], ['GET', '/api/local/probe'],
   ]) {
     transcript.push((await call(ctx, method, route, { body })).text);
@@ -846,7 +849,8 @@ test('no route hands back a stored secret, and none of them has a read route', a
   // The UI is told which refs exist, and nothing more than that.
   const config = JSON.parse((await call(ctx, 'GET', '/api/config')).text);
   assert.ok(Array.isArray(config.secretRefs));
-  assert.ok(config.secretRefs.includes('model.default'));
+  assert.ok(config.secretRefs.includes(modelKeyRef(cfg.model.baseUrl)));
+  assert.equal(JSON.parse((await call(ctx, 'GET', `/api/model/key?baseUrl=${encodeURIComponent(cfg.model.baseUrl)}`)).text).stored, true);
   assert.ok(!JSON.stringify(config.config).includes('apiKey'));
   // And a credential offered to config.json is refused, not stored.
   assert.ok(!fs.readFileSync(paths().configFile, 'utf8').includes(MODEL_KEY));

@@ -74,6 +74,8 @@ export const state = {
   config: null,
   configErrors: [],
   secretRefs: [],
+  // Whether a key is saved for the configured AI service's address.
+  modelKeyStored: false,
   board: EMPTY_BOARD,
   boardAt: 0,
   sweep: { running: false, phase: '', message: '', done: 0, total: 0, error: null, lastResult: null },
@@ -221,6 +223,7 @@ export async function loadConfig() {
   state.config = res.config;
   state.configErrors = res.errors || [];
   state.secretRefs = res.secretRefs || [];
+  state.modelKeyStored = res.modelKeyStored === true;
   state.rev += 1;
   return state.config;
 }
@@ -250,6 +253,7 @@ export async function saveConfig(patch) {
   state.config = res.config;
   state.configErrors = res.errors || [];
   state.secretRefs = res.secretRefs || [];
+  state.modelKeyStored = res.modelKeyStored === true;
   // The health document is where `model.configured` lives, and every screen
   // that gates on a model — the onboarding's "Sweep now", its "Missing: a
   // model" note, the rail foot, the Now view's empty state — reads it from
