@@ -31,7 +31,7 @@
   "build": {
     "appId": "app.zelos.desktop",
     "productName": "Zelos",
-    "copyright": "MIT licensed. Local-first: reading and AI use the services you configure; update checks are manual.",
+    "copyright": "MIT licensed. Local-first: reading and AI use the services you configure; update checks contact GitHub without your data, and automatic updates can be turned off in Settings.",
     "asar": false,
     "npmRebuild": false,
     "forceCodeSigning": false,

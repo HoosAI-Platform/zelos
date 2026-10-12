@@ -14,8 +14,8 @@ below say what to click. The rest of this page is for people who type commands.
 ## Updating from an earlier version
 
 Quit Zelos, then copy the data folder shown in Settings to a safe location before
-installing the update. The usual folder is `~/.zelos`. Install the new app over
-the old one; it retains your data and upgrades the database on first launch.
+installing the update. The usual folder is `~/.zelos`. If your app does not
+update itself (see **Automatic updates** below), install the new app over the old one; it retains your data and upgrades the database on first launch.
 Keep the copy if you may need to return to an older version. A board snapshot
 is not a complete backup, and credentials in your operating system's keychain
 may need reconnecting on another computer.
@@ -47,9 +47,10 @@ the tray). **Install updates automatically** in Settings → About turns this
 off. On a Mac, Zelos must be in a folder you can change (normally
 Applications), and macOS may ask whether Zelos may update apps, possibly at
 each update. On Windows it works for an installation just for you; one for all
-users is updated from the release page. Current
-builds do not carry the key yet, so they check only when you ask and you
-install new versions yourself, as described above.
+users is updated from the release page. Desktop builds carry the key from
+1.9.0 onward. The command-line/browser app, the desktop app run from source
+with `npm start`, and an installation that cannot replace itself check only
+when you ask, and you install new versions yourself.
 
 ## Path 1 — Command-line usage
 
@@ -197,11 +198,15 @@ Press `Ctrl-C` in the terminal to stop it.
 
 ### What it does not add
 
-- No Zelos account, no automatic update check, no telemetry. Pressing **Check
-  for updates** asks the official GitHub release API for public release details;
-  it sends no archived content or credentials. The shell blocks every
-  outbound request from the window that is not the local board — **including
-  WebSockets**, which is the class it silently missed until the guard's match
+- No Zelos account, no telemetry. Pressing **Check for updates** asks the
+  official GitHub release API for public release details; it sends no archived
+  content or credentials. With **Install updates automatically** on (the
+  default; Settings → About turns it off), an app installed where it can
+  update itself makes the same request shortly after it opens and every six
+  hours — see *Automatic updates* under
+  [Updating from an earlier version](#updating-from-an-earlier-version). The
+  shell blocks every outbound request from the window that is not the local
+  board — **including WebSockets**, which is the class it silently missed until the guard's match
   pattern was widened from `*://*/*` to `<all_urls>` (`*` in a scheme position
   means http and https and nothing else, so `new WebSocket('wss://…')` used to
   sail past). It denies every browser permission except the one the "copy draft"
@@ -500,9 +505,16 @@ directly.
   byte for byte the ones in this repository. An app whose entire claim is "you
   can check what it does" should not hide its own code. Diff them against a
   clone if you want to be sure.
-- **No auto-update, at all.** The app never contacts a server to ask whether it
-  is old. Check back here yourself when you want a newer version, and install it
-  the same way.
+- **Automatic updates, with your say on the restart.** From 1.9.0, an app
+  installed where it can replace itself (see *Automatic updates* under
+  [Updating from an earlier version](#updating-from-an-earlier-version)) asks
+  the official GitHub release whether it is old shortly after it opens and
+  every six hours,
+  downloads a newer release in the background, accepts it only if it matches a
+  manifest signed with the Zelos update key, and installs it only when you
+  choose **Restart to update**. The request carries no mail, calendar data or
+  credentials. Switch off **Install updates automatically** in Settings → About
+  to check only when you press **Check for updates**.
 - **One copy at a time, and it tells you rather than stopping you.** Launching
   the app while the app is already running brings the existing window forward.
   The other pairing — a `zelos` running in a terminal and the app in the tray,

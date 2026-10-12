@@ -162,7 +162,7 @@ const PLATFORM_LINE = {
 };
 
 const WHAT_ZELOS_IS =
-  'You are helping someone set up Zelos, a free program on their computer that reads email and calendars with an AI they choose. Its archive stays on their computer; source and AI requests use configured services, and manual update checks contact GitHub. It never sends, moves or deletes mail. You are helping them through its setup screens.';
+  'You are helping someone set up Zelos, a free program on their computer that reads email and calendars with an AI they choose. Its archive stays on their computer; source and AI requests use configured services, and update checks contact GitHub without their data. It never sends, moves or deletes mail. You are helping them through its setup screens.';
 
 /* The Welcome screen, ui/views/onboarding.js startScreen(). */
 function generalPrompt() {

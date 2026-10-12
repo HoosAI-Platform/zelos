@@ -3282,7 +3282,7 @@ function aboutPanel() {
       section('Where Zelos stands', {}, [
         el('ul', { class: 'plain-list' }, [
           el('li', { text: 'The server binds 127.0.0.1 and nothing else. Every API call carries a session token minted at launch; no CORS header is ever sent, so a page in another tab cannot read one. The one exception is /api/mcp, the read-only channel an AI client uses: it is off until you switch it on under Share with another AI, and it carries the separate AI token you mint there rather than the session token — that one is meant to outlive a restart, and it lasts until you turn sharing off or revoke it.' }),
-          el('li', { text: 'Reading and AI checks contact the services you configured. Pressing Check for updates also contacts the official Zelos releases on GitHub; it sends no account content or credentials.' }),
+          el('li', { text: 'Reading and AI checks contact the services you configured. Update checks also contact the official Zelos releases on GitHub, when you press Check for updates and, in the desktop app with automatic updates on, when it opens and every six hours; they send no account content or credentials.' }),
           el('li', { text: 'Mail is untrusted input, and so is anything the model writes after reading it. Zelos never executes, shells out to, or navigates to anything derived from either. It renders them, and you click.' }),
           el('li', { text: 'Drafts are drafts. Zelos has no send path at all — not a disabled button, no code.' }),
           el('li', { text: 'Prompt-injection defences here are mitigation, not proof. The guarantee is the one above: nothing acts on model output but you.' }),

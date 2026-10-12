@@ -97,7 +97,9 @@ credentials: when you press **Check for updates**, and in a desktop app that car
 key with automatic updates on (the default; Settings → About turns it off), when the app opens and
 every six hours. A newer release is then downloaded from that release's own files on GitHub, accepted
 only if it matches a manifest signed with the Zelos update key, and installed only when you choose
-**Restart to update**. Builds without the key — which today is all of them — check only when you
+**Restart to update**. Desktop builds carry the key from 1.9.0 onward. The command-line/browser
+app, the desktop app run from source with `npm start`, and an install that cannot replace itself
+(see [Automatic updates](docs/INSTALL.md#updating-from-an-earlier-version)) check only when you
 ask. No telemetry, analytics or crash reports.
 
 Your keys live in your operating system's keychain — **when there is one**. With no keychain
