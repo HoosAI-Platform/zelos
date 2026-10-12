@@ -27,7 +27,7 @@
 
 import crypto from 'node:crypto';
 
-import { PRESETS } from './llm.mjs';
+import { PRESETS, isLocalAddress } from './llm.mjs';
 
 /** The ref every model key lived under before keys were bound to addresses. */
 export const LEGACY_MODEL_REF = 'model.default';
@@ -49,7 +49,10 @@ export function modelKeyDestination(baseUrl) {
   try { url = new URL(baseUrl.trim()); } catch { return null; }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (!url.hostname) return null;
-  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}`;
+  // `api.openai.com.` is the same host to DNS; its trailing dot is not a
+  // different destination.
+  const host = url.host.replace(/\.(?=(?::\d+)?$)/, '');
+  return `${url.protocol}//${host}${url.pathname.replace(/\/+$/, '')}`;
 }
 
 /** The ref the key for this address is stored under, or null for no address. */
@@ -60,13 +63,12 @@ export function modelKeyRef(baseUrl) {
 }
 
 /*
- * Key prefixes distinctive enough to name their company. A pre-upgrade key is
- * moved to the configured address unless that address is ANOTHER provider's
- * preset and the key plainly belongs to one of these — the people this bug
- * already caught (a Claude key with OpenAI chosen). A custom address keeps the
- * key whatever it looks like: a gateway in front of Anthropic is given a Claude
- * key on purpose. OpenAI's `sk-` is shared with half the industry, so it is not
- * here.
+ * Key prefixes distinctive enough to name their company. They decide where a
+ * pre-upgrade key goes when the configured address cannot be what it was for —
+ * the people this bug already caught (a Claude key with OpenAI chosen). A
+ * custom hosted address keeps the key whatever it looks like: a gateway in
+ * front of Anthropic is given a Claude key on purpose. OpenAI's `sk-` is shared
+ * with half the industry, so it is not here.
  */
 const KEY_PREFIXES = [
   ['sk-ant-', 'anthropic'],
@@ -81,13 +83,27 @@ function presetFor(baseUrl) {
   return destination ? PRESETS.find((p) => modelKeyDestination(p.baseUrl) === destination) || null : null;
 }
 
-/** The address a legacy key should be bound to: normally the configured one. */
+/**
+ * The address a pre-upgrade key should be bound to — normally the configured
+ * one — or null to leave it where it is, unused, for doctor to report.
+ *
+ *  - A key whose prefix names a provider goes to that provider when the
+ *    configured address is another provider's preset, or a program on this
+ *    computer or network (an `sk-ant-` key has no business at Ollama).
+ *  - A key without the configured provider's own prefix is not given to it
+ *    (an `sk-proj-` key with Anthropic chosen).
+ *  - A keyless runtime on this computer is not given a key nobody can place.
+ *  - Anything else — a custom hosted address — keeps it, as 1.9.5 sent it.
+ */
 function legacyHome(key, configuredBaseUrl) {
   const configured = presetFor(configuredBaseUrl);
-  if (!configured) return configuredBaseUrl;
-  const owner = KEY_PREFIXES.find(([prefix]) => key.startsWith(prefix))?.[1];
-  if (!owner || owner === configured.id) return configuredBaseUrl;
-  return PRESETS.find((p) => p.id === owner)?.baseUrl || configuredBaseUrl;
+  const owner = KEY_PREFIXES.find(([prefix]) => key.startsWith(prefix))?.[1] ?? null;
+  const ownerHome = owner ? PRESETS.find((p) => p.id === owner)?.baseUrl ?? null : null;
+  if (configured?.id === owner) return configuredBaseUrl;
+  if (ownerHome && (configured || isLocalAddress(configuredBaseUrl))) return ownerHome;
+  if (configured && KEY_PREFIXES.some(([, id]) => id === configured.id)) return null;
+  if (configured?.keyless) return null;
+  return configuredBaseUrl;
 }
 
 /**
@@ -121,6 +137,7 @@ export async function readModelKey(baseUrl, { getSecret, setSecret = null, delet
   if (typeof legacy !== 'string' || !legacy) return null;
 
   const home = modelKeyRef(legacyHome(legacy, configuredBaseUrl));
+  if (!home) return null;
   try {
     const existing = await getSecret(home);
     if (!existing) await setSecret(home, legacy);

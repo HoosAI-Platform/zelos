@@ -218,3 +218,30 @@ test('no code reads a secret through config.model.keyRef', () => {
   const offenders = files.filter((file) => /(?:getSecret|secretFor)\([^)]*model\??\.keyRef/.test(fs.readFileSync(path.join(root, file), 'utf8')));
   assert.deepEqual(offenders, []);
 });
+
+test('a pre-upgrade key is not handed to an address it plainly is not for', async () => {
+  const anthropic = 'https://api.anthropic.com';
+  // An OpenAI-style key with Anthropic chosen: Anthropic keys all say sk-ant-.
+  const wrongKind = memoryStore({ [LEGACY_MODEL_REF]: 'sk-proj-openai' });
+  assert.equal(await readModelKey(anthropic, { ...wrongKind, configuredBaseUrl: anthropic }), null);
+  assert.equal(wrongKind.values.get(LEGACY_MODEL_REF), 'sk-proj-openai', 'left where it is, for doctor to report');
+  assert.equal(wrongKind.values.size, 1);
+
+  // A Claude key with a program on the network chosen goes back to Anthropic.
+  const lan = 'http://192.168.1.9:11434/v1';
+  const claudeOnLan = memoryStore({ [LEGACY_MODEL_REF]: 'sk-ant-claude' });
+  assert.equal(await readModelKey(lan, { ...claudeOnLan, configuredBaseUrl: lan }), null);
+  assert.equal(claudeOnLan.values.get(modelKeyRef(anthropic)), 'sk-ant-claude');
+
+  // A keyless runtime on this computer is not given a key nobody can place.
+  const ollama = 'http://127.0.0.1:11434/v1';
+  const unplaced = memoryStore({ [LEGACY_MODEL_REF]: 'sk-proj-openai' });
+  assert.equal(await readModelKey(ollama, { ...unplaced, configuredBaseUrl: ollama }), null);
+  assert.equal(unplaced.values.get(LEGACY_MODEL_REF), 'sk-proj-openai');
+  assert.equal(unplaced.values.has(modelKeyRef(ollama)), false);
+});
+
+test('a trailing dot on the host is the same destination', () => {
+  assert.equal(modelKeyRef('https://api.openai.com./v1'), modelKeyRef('https://api.openai.com/v1'));
+  assert.equal(modelKeyRef('https://api.openai.com.:8443/v1'), modelKeyRef('https://api.openai.com:8443/v1'));
+});

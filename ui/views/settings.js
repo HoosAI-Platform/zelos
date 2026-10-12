@@ -785,9 +785,11 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
   const isLocal = () => /^https?:\/\/(127\.0\.0\.1|localhost|\[?::1\]?)(:|\/|$)/i.test(draft.baseUrl || '');
   const friendly = () => draft.guide?.friendly || draft.label || 'this service';
 
-  // The key box currently on screen, so a redraw for the SAME address keeps
-  // what was typed in it. A redraw for another service never carries it over:
-  // a key typed for one service must not be stored for the next.
+  // The key box currently on screen, so a redraw that is not a change of
+  // service keeps what was typed in it — after learning whether the address
+  // has a key, or after the Base URL was edited in the same form. Choosing
+  // another service's card never carries it over: a key typed for one service
+  // must not be stored for the next.
   let liveKeyInput = null;
 
   function drawForm({ keepKey = false } = {}) {
@@ -833,8 +835,11 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
         await learnKeyStored();
         return;
       }
-      await api.setModelKey(draft.baseUrl, key);
-      keyKnown.set(draft.baseUrl, true);
+      // The address is read once: another card chosen while this is in flight
+      // must not be marked as having the key.
+      const address = draft.baseUrl;
+      await api.setModelKey(address, key);
+      keyKnown.set(address, true);
       keyInput.value = '';
     }
 
@@ -1035,8 +1040,9 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
             class: 'btn quiet',
             onClick: async () => {
               try {
-                await api.deleteModelKey(draft.baseUrl);
-                keyKnown.set(draft.baseUrl, false);
+                const address = draft.baseUrl;
+                await api.deleteModelKey(address);
+                keyKnown.set(address, false);
                 await saveConfig({});
                 status.good('Key deleted.');
                 drawForm();

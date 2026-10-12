@@ -30,7 +30,7 @@ process.env.ZELOS_LOG_LEVEL = 'silent';
 
 const { createServer, listen } = await import('../core/server.mjs');
 const db = await import('../core/db.mjs');
-const { loadConfig } = await import('../core/config.mjs');
+const { loadConfig, validateConfig } = await import('../core/config.mjs');
 const { getSecret, setSecret, deleteSecret } = await import('../core/secrets.mjs');
 const { modelKeyRef, LEGACY_MODEL_REF } = await import('../core/model-key.mjs');
 const { googleSecretRefFor, oauthClient } = await import('../core/sources/oauth.mjs');
@@ -544,9 +544,8 @@ test('a model key saved for one AI service is never sent to the next one chosen'
     config: baseConfig({ model: { protocol: 'openai', baseUrl: first.baseUrl, model: 'mock-model' } }),
   });
   t.after(async () => { await deleteSecret(modelKeyRef(first.baseUrl)).catch(() => {}); });
-
-  const saved = await call(ctx, 'POST', '/api/model/key', { body: { baseUrl: first.baseUrl, value: MODEL_KEY } });
-  assert.equal(saved.status, 200);
+  // Seeded in the store directly, so what is under test is where the key goes.
+  await setSecret(modelKeyRef(first.baseUrl), MODEL_KEY);
 
   // The service it was saved for gets it.
   const own = await call(ctx, 'POST', '/api/model/test', { body: { protocol: 'openai', baseUrl: first.baseUrl, model: 'mock-model' } });
@@ -593,11 +592,13 @@ test('a model key cannot be filed or borrowed by name', async (t) => {
   }
   assert.equal(upstream.received.length, before, 'no calendar request was made with the AI key');
 
-  // Nor configured as one: validation names it.
-  const put = await call(ctx, 'PUT', '/api/config', {
-    body: { calendars: [{ id: 'c_borrow', kind: 'ics', url: `${upstream.baseUrl}/calendar.ics`, user: 'x', keyRef: ref, enabled: true }] },
+  // Nor configured as one: validation names it. (Validated directly: a PUT
+  // would leave the calendar in this suite's config.)
+  const { errors } = validateConfig({
+    ...loadConfig(),
+    calendars: [{ id: 'c_borrow', kind: 'ics', url: `${upstream.baseUrl}/calendar.ics`, user: 'x', keyRef: ref, enabled: true }],
   });
-  assert.ok(put.json.errors.some((e) => e.path === 'calendars[0].keyRef'), JSON.stringify(put.json.errors));
+  assert.ok(errors.some((e) => e.path === 'calendars[0].keyRef'), JSON.stringify(errors));
 });
 
 test('a key saved before keys were kept per service moves to the configured address on first read', async (t) => {
@@ -635,7 +636,29 @@ test('the model key routes refuse anything that is not an http address', async (
   for (const baseUrl of ['', 'localhost:1234', 'file:///etc/passwd', 'ftp://example.com']) {
     assert.equal((await call(ctx, 'POST', '/api/model/key', { body: { baseUrl, value: 'k' } })).status, 400, baseUrl);
     assert.equal((await call(ctx, 'GET', `/api/model/key?baseUrl=${encodeURIComponent(baseUrl)}`)).status, 400, baseUrl);
+    assert.equal((await call(ctx, 'DELETE', `/api/model/key?baseUrl=${encodeURIComponent(baseUrl)}`)).status, 400, baseUrl);
   }
+});
+
+test('forgetting another service\'s key leaves a pre-upgrade key for the configured one alone', async (t) => {
+  const upstream = await startMockUpstream(t);
+  const ctx = await startServer(t, {
+    config: baseConfig({ model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' } }),
+  });
+  await setSecret(LEGACY_MODEL_REF, MODEL_KEY);
+  t.after(async () => { await deleteSecret(LEGACY_MODEL_REF).catch(() => {}); });
+  const forgot = await call(ctx, 'DELETE', `/api/model/key?baseUrl=${encodeURIComponent('https://api.openai.com/v1')}`);
+  assert.equal(forgot.status, 200);
+  assert.equal(await getSecret(LEGACY_MODEL_REF), MODEL_KEY);
+});
+
+test('a model key cannot be borrowed as the Google client secret', () => {
+  const ref = modelKeyRef('https://api.openai.com/v1');
+  // Validated directly: a PUT would leave the client in this suite's config.
+  const { errors } = validateConfig({ ...loadConfig(), oauth: { clients: { google: { clientId: 'x.apps.googleusercontent.com', clientSecretRef: ref } } } });
+  assert.ok(errors.some((e) => e.path.endsWith('clientSecretRef')), JSON.stringify(errors));
+  // And even configured by hand, the client never names the AI key's slot.
+  assert.equal(oauthClient({ oauth: { clients: { google: { clientSecretRef: ref } } } }, 'google').clientSecretRef, 'oauth.google.clientSecret');
 });
 
 test('a credential-shaped field never reaches config.json or a response', async (t) => {

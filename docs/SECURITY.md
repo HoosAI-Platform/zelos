@@ -296,8 +296,8 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    path, canonicalised as `fetch` would, then hashed (`core/model-key.mjs`) —
    and every read of a model key derives that ref from the address about to be
    contacted. No caller names it: the model routes ignore a `keyRef`,
-   `POST /api/secrets` refuses any `model.` ref, and mail, calendars and
-   sources may not be configured with one. Choosing another AI service shows
+   `POST /api/secrets` refuses any `model.` ref, and mail, calendars,
+   sources and the Google client secret may not be configured with one. Choosing another AI service shows
    an empty key box rather than sending the last service's key; choosing the
    first one again finds its key. The path counts because an AI gateway can
    send `…/anthropic` and `…/openai` on one host to two different companies.

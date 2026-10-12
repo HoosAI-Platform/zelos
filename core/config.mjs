@@ -718,7 +718,7 @@ function checkOAuthClients(errors, block) {
       }
     }
     if (provider === 'google') {
-      checkRef(errors, `${at}.clientSecretRef`, entry.clientSecretRef, { allowNull: true });
+      checkRef(errors, `${at}.clientSecretRef`, entry.clientSecretRef, { allowNull: true, notModel: true });
     }
   }
 }

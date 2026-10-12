@@ -33,6 +33,7 @@ import tls from 'node:tls';
 import { imapDate, instant } from '../time.mjs';
 import { log as defaultLog } from '../log.mjs';
 import { getSecret, setSecret, deleteSecret } from '../secrets.mjs';
+import { isModelKeyRef } from '../model-key.mjs';
 /* The one provider table. Google's authorization and token endpoints are
    read from it rather than restated here, so the calendar plumbing and the
    mail sign-in can never disagree about where a Google token comes from. */
@@ -2207,7 +2208,8 @@ export async function refreshGoogleAccessToken({
 
 /** The secret a Google client may carry, or '' when nothing is filed under the ref. */
 async function clientSecretUnder(ref) {
-  if (!ref) return '';
+  // An AI key is read only for its own address, never posted to Google.
+  if (!ref || isModelKeyRef(ref)) return '';
   try {
     return (await getSecret(ref)) || '';
   } catch {

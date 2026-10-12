@@ -2380,7 +2380,7 @@ test('REGRESSION: Test and List store the key in the field first, and Save refus
   // the field, clear it, then call.
   const helper = /async function storeTypedKey\(\)[\s\S]*?\n {4}\}/m.exec(panel[0]);
   assert.ok(helper, 'storeTypedKey is missing');
-  assert.match(helper[0], /api\.setModelKey\(draft\.baseUrl, key\)/);
+  assert.match(helper[0], /const address = draft\.baseUrl;\s*await api\.setModelKey\(address, key\)/);
   assert.match(helper[0], /keyInput\.value = ''/, 'a stored key must leave the field, as it does on Save');
 
   const testFn = /async function test\(\)[\s\S]*?\n {4}\}/m.exec(panel[0]);
@@ -2412,7 +2412,7 @@ test('REGRESSION: Test and List store the key in the field first, and Save refus
   // above, for a key the server already holds.
   assert.match(panel[0], /const keyStored = \(\) => keyKnown\.get\(draft\.baseUrl\) === true/,
     'keyStored() does not know about a key this panel stored itself');
-  assert.match(helper[0], /keyKnown\.set\(draft\.baseUrl, true\)/);
+  assert.match(helper[0], /keyKnown\.set\(address, true\)/);
 
   // TT-3417: the key is filed per address, and nothing in the panel names a
   // slot. One shared `draft.keyRef` is how a Claude key went to OpenAI.
@@ -4616,7 +4616,6 @@ test('TT-3417: a key saved on one AI card is not sent when another service is ch
   store.state.health = { model: { configured: false }, backend: { name: 'encrypted-file' } };
   store.state.secretRefs = [];
   store.state.modelKeyStored = false;
-  const anthropic = presets.find((p) => p.id === 'anthropic');
   const openai = presets.find((p) => p.id === 'openai');
 
   const panel = settings.modelPanel({ compact: true });
@@ -4646,7 +4645,7 @@ test('TT-3417: a key saved on one AI card is not sent when another service is ch
   await settle();
   assert.equal(findInput(panel, (n) => n.attributes.type === 'password').attributes.placeholder, 'a key is saved — paste a new one to replace it');
   assert.ok(calls.every((c) => c.body?.baseUrl !== openai.baseUrl || c.path !== '/api/model/key' || c.method !== 'POST'), 'a key was filed for OpenAI');
-  assert.ok(anthropic.baseUrl !== openai.baseUrl);
+  assert.ok(calls.some((c) => c.path.startsWith('/api/model/key?') && c.path.includes(encodeURIComponent(openai.baseUrl))), 'the OpenAI card never asked whether it had a key');
 });
 
 test('email setup can retry a refused connection with a replacement password and the same address', async (t) => {

@@ -43,6 +43,7 @@ import http from 'node:http';
 
 import { log } from '../log.mjs';
 import { getSecret, setSecret, deleteSecret } from '../secrets.mjs';
+import { isModelKeyRef } from '../model-key.mjs';
 
 /* ------------------------------------------------------------------ *
  * Errors
@@ -322,7 +323,9 @@ export function oauthClient(config, providerId) {
   }
   if (p.id === 'google') {
     const ref = typeof own.clientSecretRef === 'string' ? own.clientSecretRef.trim() : '';
-    out.clientSecretRef = ref || GOOGLE_CLIENT_SECRET_REF;
+    // Never an AI key's slot: the client secret is posted to Google, and a
+    // sign-in that brings one stores it here (core/model-key.mjs).
+    out.clientSecretRef = ref && !isModelKeyRef(ref) ? ref : GOOGLE_CLIENT_SECRET_REF;
   }
   return out;
 }

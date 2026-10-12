@@ -494,28 +494,31 @@ async function checkModelKey(config, deps) {
       key: null,
     };
   }
+  // A key from before keys were kept per service that could not be matched to
+  // this one stays in the store, unused. Worth knowing either way.
+  let leftover = null;
+  try { leftover = await deps.getSecret(LEGACY_MODEL_REF); } catch { /* the secret store line reports this */ }
+  const older = leftover && leftover !== key
+    ? ' An older AI key, saved before Zelos kept one key per service, is also still stored; it could not be matched to this service, so it is not used.'
+    : '';
   if (!key) {
     return {
       result: check(
         'model.key', label, chosen ? 'fail' : 'warn',
         chosen
-          ? `No key has been saved for this AI service, so every check will fail before it starts. For experts: the service is ${address}.`
-          : `No AI has been chosen yet, and no key has been saved for the AI service. For experts: the service is ${address}.`,
+          ? `No key has been saved for this AI service, so every check will fail before it starts. For experts: the service is ${address}.${older}`
+          : `No AI has been chosen yet, and no key has been saved for the AI service. For experts: the service is ${address}.${older}`,
         'Open Settings → AI and paste the key your AI service gave you. Zelos keeps it in this computer’s own password store — it is never written into the settings file, and it never appears in a log. If you would rather nothing left this computer at all, run Ollama or LM Studio and pick that instead; an AI on this computer needs no key.',
       ),
       key: null,
     };
   }
-  // A key from before keys were kept per service that could not be matched to
-  // this one stays in the store, unused. Worth knowing; nothing is broken.
-  let leftover = null;
-  try { leftover = await deps.getSecret(LEGACY_MODEL_REF); } catch { /* the secret store line reports this */ }
-  if (leftover && leftover !== key) {
+  if (older) {
     return {
       result: check(
         'model.key', label, 'warn',
-        `A key is saved for this AI service (${address}). An older AI key, saved before Zelos kept one key per service, is also still stored and is no longer used.`,
-        'Open Settings → AI and choose Forget the stored key to remove both, then paste your current key again.',
+        `A key is saved for this AI service (${address}).${older}`,
+        'Open Settings → AI → Advanced and choose Forget the stored key to remove both, then paste your current key again.',
       ),
       key,
     };
