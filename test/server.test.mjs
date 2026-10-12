@@ -32,7 +32,7 @@ const { createServer, listen } = await import('../core/server.mjs');
 const db = await import('../core/db.mjs');
 const { loadConfig, validateConfig } = await import('../core/config.mjs');
 const { getSecret, setSecret, deleteSecret } = await import('../core/secrets.mjs');
-const { modelKeyRef, LEGACY_MODEL_REF } = await import('../core/model-key.mjs');
+const { modelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } = await import('../core/model-key.mjs');
 const { googleSecretRefFor, oauthClient } = await import('../core/sources/oauth.mjs');
 const { todayKey, addDaysToKey, instant, localTimezone, offsetFor, wallClock } =
   await import('../core/time.mjs');
@@ -623,12 +623,15 @@ test('a key saved before keys were kept per service moves to the configured addr
   assert.equal(await getSecret(modelKeyRef(upstream.baseUrl)), MODEL_KEY);
   assert.equal(await getSecret(LEGACY_MODEL_REF), null, 'the old slot is emptied, so it cannot follow the next service');
 
-  // Forgetting the configured service's key forgets a restored old one too.
+  // Forgetting the configured service's key forgets a restored old one too,
+  // and one set aside because no address could take it.
   await setSecret(LEGACY_MODEL_REF, 'restored-from-a-backup');
+  await setSecret(UNPLACED_MODEL_REF, 'set-aside');
   const forgot = await call(ctx, 'DELETE', `/api/model/key?baseUrl=${encodeURIComponent(upstream.baseUrl)}`);
   assert.equal(forgot.status, 200);
   assert.equal(await getSecret(modelKeyRef(upstream.baseUrl)), null);
   assert.equal(await getSecret(LEGACY_MODEL_REF), null);
+  assert.equal(await getSecret(UNPLACED_MODEL_REF), null);
 });
 
 test('the model key routes refuse anything that is not an http address', async (t) => {

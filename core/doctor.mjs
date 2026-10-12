@@ -31,7 +31,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { DEFAULTS, loadConfig, paths, validateConfig } from './config.mjs';
 import { SCHEMA_VERSION, hasFts5 } from './db.mjs';
 import { backend as secretBackend, getSecret as readSecret, setSecret as writeSecret, deleteSecret as removeSecret } from './secrets.mjs';
-import { readModelKey, isModelKeyRef, LEGACY_MODEL_REF } from './model-key.mjs';
+import { readModelKey, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
 import { isLocalAddress, listModels } from './llm.mjs';
 import { guessImapHost, testConnection as testImapConnection } from './sources/imap.mjs';
 import { testConnection as testCalDavConnection } from './sources/caldav.mjs';
@@ -455,6 +455,22 @@ async function checkSecrets(deps, home) {
   );
 }
 
+/*
+ * A key from before keys were kept per service that is not this service's —
+ * still in `model.default`, or set aside because no address could take it —
+ * stays in the store, unused. Worth knowing either way; nothing is broken.
+ */
+async function olderKeyNote(deps, key) {
+  for (const ref of [LEGACY_MODEL_REF, UNPLACED_MODEL_REF]) {
+    let value = null;
+    try { value = await deps.getSecret(ref); } catch { /* the secret store line reports this */ }
+    if (value && value !== key) {
+      return ' An older AI key, saved before Zelos kept one key per service, is also still stored; it could not be matched to this service, so it is not used.';
+    }
+  }
+  return '';
+}
+
 async function checkModelKey(config, deps) {
   const label = 'AI key';
   const model = config?.model ?? {};
@@ -468,8 +484,12 @@ async function checkModelKey(config, deps) {
     return { result: check('model.key', label, 'skip', 'No AI service has been chosen yet, so there is no key to check.'), key: null };
   }
   if (isLocalAddress(address)) {
+    const older = await olderKeyNote(deps, null);
     return {
-      result: check('model.key', label, 'pass', `${address} runs on this machine — no API key needed.`),
+      result: older
+        ? check('model.key', label, 'warn', `${address} runs on this machine — no API key needed.${older}`,
+          'Open Settings → AI → Advanced and choose Forget the stored key to remove it.')
+        : check('model.key', label, 'pass', `${address} runs on this machine — no API key needed.`),
       key: null,
     };
   }
@@ -494,13 +514,7 @@ async function checkModelKey(config, deps) {
       key: null,
     };
   }
-  // A key from before keys were kept per service that could not be matched to
-  // this one stays in the store, unused. Worth knowing either way.
-  let leftover = null;
-  try { leftover = await deps.getSecret(LEGACY_MODEL_REF); } catch { /* the secret store line reports this */ }
-  const older = leftover && leftover !== key
-    ? ' An older AI key, saved before Zelos kept one key per service, is also still stored; it could not be matched to this service, so it is not used.'
-    : '';
+  const older = await olderKeyNote(deps, key);
   if (!key) {
     return {
       result: check(

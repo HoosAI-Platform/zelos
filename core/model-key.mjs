@@ -27,10 +27,18 @@
 
 import crypto from 'node:crypto';
 
-import { PRESETS, isLocalAddress } from './llm.mjs';
+import { PRESETS } from './llm.mjs';
 
 /** The ref every model key lived under before keys were bound to addresses. */
 export const LEGACY_MODEL_REF = 'model.default';
+
+/**
+ * Where a pre-upgrade key goes when no address can be trusted with it. Nothing
+ * reads it for a request and nothing moves it on; doctor reports it, and
+ * forgetting the configured service's key removes it. Left in `model.default`
+ * instead, it would be handed to the next service chosen — this bug again.
+ */
+export const UNPLACED_MODEL_REF = 'model.unplaced';
 
 /** True for any ref in the model namespace, which only the model may read. */
 export function isModelKeyRef(ref) {
@@ -48,10 +56,11 @@ export function modelKeyDestination(baseUrl) {
   let url;
   try { url = new URL(baseUrl.trim()); } catch { return null; }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-  if (!url.hostname) return null;
+  if (!url.hostname || /^\.+$/.test(url.hostname)) return null;
   // `api.openai.com.` is the same host to DNS; its trailing dot is not a
-  // different destination.
-  const host = url.host.replace(/\.(?=(?::\d+)?$)/, '');
+  // different destination. A single label keeps it: `gateway.` and `gateway`
+  // can be two machines once a search domain is applied.
+  const host = /\..*\.(?::\d+)?$/.test(url.host) ? url.host.replace(/\.(?=(?::\d+)?$)/, '') : url.host;
   return `${url.protocol}//${host}${url.pathname.replace(/\/+$/, '')}`;
 }
 
@@ -85,22 +94,25 @@ function presetFor(baseUrl) {
 
 /**
  * The address a pre-upgrade key should be bound to — normally the configured
- * one — or null to leave it where it is, unused, for doctor to report.
+ * one — or null when no address can be trusted with it (it is then set aside
+ * under UNPLACED_MODEL_REF).
  *
  *  - A key whose prefix names a provider goes to that provider when the
- *    configured address is another provider's preset, or a program on this
- *    computer or network (an `sk-ant-` key has no business at Ollama).
+ *    configured address is another provider's preset, keyless runtimes
+ *    included (an `sk-ant-` key has no business at OpenAI or Ollama).
  *  - A key without the configured provider's own prefix is not given to it
  *    (an `sk-proj-` key with Anthropic chosen).
- *  - A keyless runtime on this computer is not given a key nobody can place.
- *  - Anything else — a custom hosted address — keeps it, as 1.9.5 sent it.
+ *  - A keyless runtime is not given a key nobody can place.
+ *  - Anything else — a custom address, a proxy on this network included —
+ *    keeps it, as 1.9.5 sent it there: a proxy in front of Anthropic is given
+ *    a Claude key on purpose.
  */
 function legacyHome(key, configuredBaseUrl) {
   const configured = presetFor(configuredBaseUrl);
   const owner = KEY_PREFIXES.find(([prefix]) => key.startsWith(prefix))?.[1] ?? null;
   const ownerHome = owner ? PRESETS.find((p) => p.id === owner)?.baseUrl ?? null : null;
   if (configured?.id === owner) return configuredBaseUrl;
-  if (ownerHome && (configured || isLocalAddress(configuredBaseUrl))) return ownerHome;
+  if (ownerHome && configured) return ownerHome;
   if (configured && KEY_PREFIXES.some(([, id]) => id === configured.id)) return null;
   if (configured?.keyless) return null;
   return configuredBaseUrl;
@@ -137,13 +149,18 @@ export async function readModelKey(baseUrl, { getSecret, setSecret = null, delet
   if (typeof legacy !== 'string' || !legacy) return null;
 
   const home = modelKeyRef(legacyHome(legacy, configuredBaseUrl));
-  if (!home) return null;
   try {
-    const existing = await getSecret(home);
-    if (!existing) await setSecret(home, legacy);
-    // A different key already saved for that address wins; the old slot is then
-    // left alone rather than thrown away, and doctor reports it.
-    if (existing && existing !== legacy) return null;
+    const existing = home ? await getSecret(home) : null;
+    if (home && !existing) await setSecret(home, legacy);
+    // No address can take it, or a different key is already saved for its
+    // address and wins: it is set aside, not thrown away and not left where
+    // the next service chosen would be handed it.
+    if (!home || (existing && existing !== legacy)) {
+      await setSecret(UNPLACED_MODEL_REF, legacy);
+      await deleteSecret(LEGACY_MODEL_REF);
+      log?.info?.('model key: set aside a saved key no address could take');
+      return null;
+    }
     await deleteSecret(LEGACY_MODEL_REF);
     log?.info?.('model key: moved the saved key to the address it is for', { ref: home });
   } catch (err) {

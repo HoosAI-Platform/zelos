@@ -61,7 +61,7 @@ import { describe as describeConnectors, typesFor } from './connectors/index.mjs
 import { readSourceStatus } from './source-status.mjs';
 import { createUpdateChecker } from './updates.mjs';
 import { getSecret, setSecret, deleteSecret, listRefs, backend } from './secrets.mjs';
-import { readModelKey, modelKeyRef, isModelKeyRef, LEGACY_MODEL_REF } from './model-key.mjs';
+import { readModelKey, modelKeyRef, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
 import {
   listBoard, bucketCounts, listEvents, listDrafts, updateDraft, lastRun,
   setItemState, insertCapture, search, getKV, getItem, resolveRef,
@@ -1265,10 +1265,14 @@ async function handleModelKeyDelete(ctx) {
   const baseUrl = modelAddressFrom(ctx.url.searchParams.get('baseUrl'));
   try {
     const result = await deleteSecret(modelKeyRef(baseUrl));
-    /* Forgetting the configured service's key forgets a pre-upgrade one too:
-       left behind, it would be moved straight back on the next read. */
+    /* Forgetting the configured service's key forgets a pre-upgrade one too —
+       left behind, it would be moved straight back on the next read — and one
+       set aside because no address could take it, which doctor points here. */
     const configured = ctx.config()?.model?.baseUrl;
-    if (configured && modelKeyRef(configured) === modelKeyRef(baseUrl)) await deleteSecret(LEGACY_MODEL_REF);
+    if (configured && modelKeyRef(configured) === modelKeyRef(baseUrl)) {
+      await deleteSecret(LEGACY_MODEL_REF);
+      await deleteSecret(UNPLACED_MODEL_REF);
+    }
     sendJSON(ctx.res, 200, { ok: true, deleted: result.deleted });
   } catch (err) {
     throw new HttpError(500, err.message);

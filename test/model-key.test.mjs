@@ -18,7 +18,7 @@ process.env.ZELOS_LOG_LEVEL = 'silent';
 process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file'; // never the real keychain
 process.env.ZELOS_HOME = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-model-key-')), 'home');
 
-const { modelKeyRef, modelKeyDestination, readModelKey, isModelKeyRef, LEGACY_MODEL_REF } = await import('../core/model-key.mjs');
+const { modelKeyRef, modelKeyDestination, readModelKey, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } = await import('../core/model-key.mjs');
 const { isValidRef } = await import('../core/config.mjs');
 const { runSweep } = await import('../core/sweep.mjs');
 const db = await import('../core/db.mjs');
@@ -141,13 +141,14 @@ test('a move that copied and then failed to delete is finished on the next read'
   assert.equal(store.values.has(LEGACY_MODEL_REF), false);
 });
 
-test('a different key already saved for the address wins, and the old one is left, not thrown away', async () => {
+test('a different key already saved for the address wins, and the old one is set aside, not thrown away', async () => {
   const anthropic = 'https://api.anthropic.com';
   const openai = 'https://api.openai.com/v1';
   const store = memoryStore({ [LEGACY_MODEL_REF]: 'sk-ant-old', [modelKeyRef(anthropic)]: 'sk-ant-new' });
   assert.equal(await readModelKey(openai, { ...store, configuredBaseUrl: openai }), null);
   assert.equal(store.values.get(modelKeyRef(anthropic)), 'sk-ant-new');
-  assert.equal(store.values.get(LEGACY_MODEL_REF), 'sk-ant-old');
+  assert.equal(store.values.get(UNPLACED_MODEL_REF), 'sk-ant-old');
+  assert.equal(store.values.has(LEGACY_MODEL_REF), false);
 });
 
 test('without write access to the store, a pre-upgrade key is neither moved nor returned', async () => {
@@ -219,29 +220,42 @@ test('no code reads a secret through config.model.keyRef', () => {
   assert.deepEqual(offenders, []);
 });
 
-test('a pre-upgrade key is not handed to an address it plainly is not for', async () => {
+test('a pre-upgrade key is not handed to an address it plainly is not for — then or later', async () => {
   const anthropic = 'https://api.anthropic.com';
-  // An OpenAI-style key with Anthropic chosen: Anthropic keys all say sk-ant-.
-  const wrongKind = memoryStore({ [LEGACY_MODEL_REF]: 'sk-proj-openai' });
-  assert.equal(await readModelKey(anthropic, { ...wrongKind, configuredBaseUrl: anthropic }), null);
-  assert.equal(wrongKind.values.get(LEGACY_MODEL_REF), 'sk-proj-openai', 'left where it is, for doctor to report');
-  assert.equal(wrongKind.values.size, 1);
-
-  // A Claude key with a program on the network chosen goes back to Anthropic.
-  const lan = 'http://192.168.1.9:11434/v1';
-  const claudeOnLan = memoryStore({ [LEGACY_MODEL_REF]: 'sk-ant-claude' });
-  assert.equal(await readModelKey(lan, { ...claudeOnLan, configuredBaseUrl: lan }), null);
-  assert.equal(claudeOnLan.values.get(modelKeyRef(anthropic)), 'sk-ant-claude');
-
-  // A keyless runtime on this computer is not given a key nobody can place.
   const ollama = 'http://127.0.0.1:11434/v1';
-  const unplaced = memoryStore({ [LEGACY_MODEL_REF]: 'sk-proj-openai' });
-  assert.equal(await readModelKey(ollama, { ...unplaced, configuredBaseUrl: ollama }), null);
-  assert.equal(unplaced.values.get(LEGACY_MODEL_REF), 'sk-proj-openai');
-  assert.equal(unplaced.values.has(modelKeyRef(ollama)), false);
+  for (const configured of [anthropic, ollama]) {
+    // An OpenAI-style key with Anthropic chosen (Anthropic keys all say
+    // sk-ant-), or with a keyless runtime chosen: no address can take it.
+    const store = memoryStore({ [LEGACY_MODEL_REF]: 'sk-proj-openai' });
+    assert.equal(await readModelKey(configured, { ...store, configuredBaseUrl: configured }), null);
+    assert.equal(store.values.get(UNPLACED_MODEL_REF), 'sk-proj-openai', 'set aside, for doctor to report');
+    assert.equal(store.values.has(LEGACY_MODEL_REF), false);
+    assert.equal(store.values.has(modelKeyRef(configured)), false);
+
+    // And the next service chosen — custom, on the network, or another preset
+    // — is not handed it either. Left in model.default, it would have been.
+    for (const next of ['https://gw.thirdparty.example/v1', 'http://192.168.1.20:8000/v1', 'https://api.deepseek.com/v1']) {
+      assert.equal(await readModelKey(next, { ...store, configuredBaseUrl: next }), null, `${configured} then ${next}`);
+    }
+    assert.equal(store.values.get(UNPLACED_MODEL_REF), 'sk-proj-openai');
+  }
+
+  // A Claude key with a keyless runtime chosen goes back to Anthropic.
+  const claudeAtOllama = memoryStore({ [LEGACY_MODEL_REF]: 'sk-ant-claude' });
+  assert.equal(await readModelKey(ollama, { ...claudeAtOllama, configuredBaseUrl: ollama }), null);
+  assert.equal(claudeAtOllama.values.get(modelKeyRef(anthropic)), 'sk-ant-claude');
+
+  // A proxy on the network keeps the key 1.9.5 sent it — even a Claude key,
+  // which a LiteLLM in front of Anthropic is given on purpose.
+  const proxy = 'http://192.168.1.9:4000/v1';
+  const viaProxy = memoryStore({ [LEGACY_MODEL_REF]: 'sk-ant-claude' });
+  assert.equal(await readModelKey(proxy, { ...viaProxy, configuredBaseUrl: proxy }), 'sk-ant-claude');
 });
 
-test('a trailing dot on the host is the same destination', () => {
+test('a trailing dot on a dotted host is the same destination, and on a single label is not', () => {
   assert.equal(modelKeyRef('https://api.openai.com./v1'), modelKeyRef('https://api.openai.com/v1'));
   assert.equal(modelKeyRef('https://api.openai.com.:8443/v1'), modelKeyRef('https://api.openai.com:8443/v1'));
+  // `gateway` may be gateway.corp.example once a search domain is applied.
+  assert.notEqual(modelKeyRef('http://gateway./v1'), modelKeyRef('http://gateway/v1'));
+  assert.equal(modelKeyRef('http://./x'), null);
 });

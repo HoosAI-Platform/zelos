@@ -296,15 +296,21 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    path, canonicalised as `fetch` would, then hashed (`core/model-key.mjs`) —
    and every read of a model key derives that ref from the address about to be
    contacted. No caller names it: the model routes ignore a `keyRef`,
-   `POST /api/secrets` refuses any `model.` ref, and mail, calendars,
-   sources and the Google client secret may not be configured with one. Choosing another AI service shows
+   `POST /api/secrets` refuses any `model.` ref, and mail, calendars, sources
+   and the Google client secret may not be configured with one. Choosing another AI service shows
    an empty key box rather than sending the last service's key; choosing the
    first one again finds its key. The path counts because an AI gateway can
    send `…/anthropic` and `…/openai` on one host to two different companies.
    A key saved by Zelos 1.9.5 or earlier, under the single `model.default`
-   slot, is moved to the configured address the first time it is read, unless
-   it plainly belongs to another provider's preset (an `sk-ant-` key with
-   OpenAI chosen goes back to Anthropic).
+   slot, is moved to the configured address the first time it is read — the
+   address 1.9.5 was already sending it to — with two exceptions decided by
+   its prefix. A key that names another provider while a different preset is
+   chosen goes back to that provider (an `sk-ant-` key with OpenAI or Ollama
+   chosen goes to Anthropic). A key no address can be trusted with — one
+   lacking the chosen preset's own prefix, or any unnamed key with a keyless
+   runtime chosen — is set aside under `model.unplaced`, which nothing sends
+   and nothing moves on; `zelos doctor` reports it, and Forget the stored key
+   removes it.
 4. **One host per source you add** — `api.github.com` for GitHub, the feed's
    own host for a feed, and so on. Each connector names the host it may reach
    in its manifest (`origins` in `core/connectors/*.mjs`), and the only thing
