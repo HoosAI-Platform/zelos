@@ -2332,6 +2332,30 @@ describe('the shell as a stdio MCP server', () => {
     // server read its config from the home the flags named.
     assert.deepEqual(replies[1].result.tools, []);
   });
+
+  it('reads requests from file descriptor 0 on Windows, where Electron\'s stdin is an empty stream', () => {
+    /* Electron's main process on Windows gets a process.stdin that ends at
+       once, whatever the client connected, so `Zelos mcp` exited before the
+       first request (TT-3420). The client's pipe is still fd 0. */
+    const stdin = new PassThrough();
+    const opened = [];
+    const fd0 = new PassThrough();
+    const openFd0 = () => { opened.push('fd0'); return fd0; };
+
+    assert.equal(main.mcpInput({ platform: 'darwin', stdin, openFd0 }), stdin);
+    assert.equal(main.mcpInput({ platform: 'linux', stdin, openFd0 }), stdin);
+    assert.deepEqual(opened, [], 'macOS and Linux keep process.stdin, which works there');
+
+    const input = main.mcpInput({ platform: 'win32', stdin, openFd0 });
+    assert.equal(input, fd0);
+    assert.deepEqual(opened, ['fd0']);
+
+    // A pipe error closes the stream — ending the server — instead of throwing.
+    let closed = false;
+    input.on('close', () => { closed = true; });
+    assert.doesNotThrow(() => input.emit('error', Object.assign(new Error('pipe broke'), { code: 'EPIPE' })));
+    return new Promise((resolve) => setImmediate(() => { assert.equal(closed, true); resolve(); }));
+  });
 });
 
 describe('the window\'s network lock (desktop/session.js)', () => {

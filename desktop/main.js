@@ -39,6 +39,7 @@
  */
 
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1070,7 +1071,7 @@ function beginShutdown() {
  * closes stdin, exactly as the CLI's `commandMcp` does.
  *
  * `io` exists for the tests, which own both streams; a real spawn passes
- * nothing and serveStdio takes the process's own.
+ * nothing and reads the request stream from mcpInput().
  */
 export async function serveMcp(flags, io = {}) {
   if (flags.home) process.env.ZELOS_HOME = path.resolve(flags.home);
@@ -1078,7 +1079,7 @@ export async function serveMcp(flags, io = {}) {
   const load = (rel) => import(pathToFileURL(path.join(ROOT, 'core', rel)).href);
   try {
     const [{ serveStdio }, { log }] = await Promise.all([load('mcp.mjs'), load('log.mjs')]);
-    await serveStdio({ logger: log, ...io });
+    await serveStdio({ logger: log, input: io.input ?? mcpInput(), ...io });
     app.exit?.(0);
     return { ok: true, mcp: true };
   } catch (err) {
@@ -1086,6 +1087,29 @@ export async function serveMcp(flags, io = {}) {
     app.exit?.(1);
     return { ok: false, mcp: true, error: err };
   }
+}
+
+/**
+ * The stream an MCP client's requests arrive on.
+ *
+ * On Windows, Electron is a GUI-subsystem program and gives its main process a
+ * `process.stdin` that is an empty stream which ends at once — whatever the
+ * parent connected. `Zelos mcp` read it, saw the end of input before the first
+ * request, and exited without a word, so no client could use it (QA,
+ * 2026-10-10, TT-3420). The pipe the client passed is still there as file
+ * descriptor 0, and a socket opened on it reads it: measured on a Windows
+ * runner against the pinned Electron, where it carried a request through and
+ * closed with the client. macOS and Linux keep `process.stdin`, which works
+ * there — and where the same socket fails with EAGAIN on a non-blocking pipe.
+ *
+ * A pipe error (a client killed mid-message) closes the stream, which ends the
+ * server as a closed stdin does, instead of crashing it.
+ */
+export function mcpInput({ platform = process.platform, stdin = process.stdin, openFd0 = () => new net.Socket({ fd: 0, readable: true, writable: false }) } = {}) {
+  if (platform !== 'win32') return stdin;
+  const socket = openFd0();
+  socket.on('error', () => socket.destroy());
+  return socket;
 }
 
 /* ------------------------------------------------------------------ *
