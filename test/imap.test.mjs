@@ -2292,6 +2292,34 @@ test('REGRESSION: a server that echoes the SASL blob does not get to hand the be
   );
 });
 
+test('a NO the server calls temporary is not "sign in again"; a refused credential is (TT-3436)', async () => {
+  /* The sweep rests an account for six hours on `reconnect`, so it must mean
+     the sign-in was turned down — not a backend that said UNAVAILABLE. */
+  const token = 'EwBwA8l6BAAUs5-token-for-the-transient-check';
+  const answering = (reply) => ({ tag, verb, send }) => {
+    if (verb === 'CAPABILITY') { send(`* CAPABILITY IMAP4rev1 AUTH=XOAUTH2\r\n${tag} OK done\r\n`); return; }
+    if (verb === 'AUTHENTICATE') { send(`${tag} ${reply}\r\n`); return; }
+    if (verb === 'LOGOUT') { send(`* BYE\r\n${tag} OK bye\r\n`); return; }
+    send(`${tag} BAD unexpected\r\n`);
+  };
+  const cases = [
+    ['NO [UNAVAILABLE] Temporary authentication failure', false],
+    ['NO [THROTTLED 30] Slow down', false],
+    ['NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)', true],
+    ['NO AUTHENTICATE failed.', true],
+  ];
+  for (const [reply, reconnect] of cases) {
+    await withServer({ greeting: '* OK Zelos mock ready', onCommand: answering(reply) }, async ({ port }) => {
+      const result = await testConnection({ host: '127.0.0.1', port, secure: false, user: 'nemo@gmail.com', auth: 'xoauth2', accessToken: token, timeoutMs: 5000 });
+      assert.equal(result.ok, false, reply);
+      assert.equal(result.reconnect, reconnect, reply);
+      if (reconnect) assert.match(result.error, /^This account's sign-in is no longer accepted\. Sign in again/, reply);
+      else assert.doesNotMatch(result.error, /Sign in again/, reply);
+      assert.ok(!result.error.includes(token), 'the token was echoed');
+    });
+  }
+});
+
 test('a server with no AUTH=XOAUTH2 is refused before the token is offered to it', async () => {
   await withServer(
     {

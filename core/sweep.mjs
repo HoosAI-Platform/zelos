@@ -818,7 +818,13 @@ export async function runSweep({
          around. A refused credential and a stated rate limit are different —
          retrying either costs the user something and buys nothing. */
       if (err instanceof AuthError) {
-        record({ authBlockedUntil: startedMs + AUTH_BLOCK_MS, secretHash: secretHash(secret) });
+        /* Hashed as it is now, not as it was read at the start: an OAuth mail
+           account refreshes its token during the sweep and saves the new grant
+           under the same ref, and a rest keyed to the old one lifted itself on
+           the very next sweep. */
+        let current = secret;
+        try { current = source.keyRef ? await getSecret(source.keyRef) : secret; } catch { /* keep the one we read */ }
+        record({ authBlockedUntil: startedMs + AUTH_BLOCK_MS, secretHash: secretHash(current) });
       } else if (err instanceof RateLimitError) {
         record({ notBefore: startedMs + (err.retryAfterMs || 0) });
       } else {

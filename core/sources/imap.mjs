@@ -943,8 +943,11 @@ export class ImapClient {
     // credential is a bearer token: retrying with the same one cannot work, and
     // neither can retrying with a password there is no longer any such thing as.
     // Settings reads this to say "connect this account again" instead of "check
-    // your password", which is the only sentence that helps here.
-    if (failure.status === 'NO') failure.reconnect = true;
+    // your password", which is the only sentence that helps here — and the sweep
+    // rests the account on it, so a NO the server itself calls temporary
+    // (RFC 5530 UNAVAILABLE, a busy or broken backend) is not one of these.
+    const transient = TRANSIENT_AUTH_CODES.has(String(failure.code || '').trim().split(/\s+/)[0].toUpperCase());
+    if (failure.status === 'NO' && !transient) failure.reconnect = true;
 
     const note = describeXOAuth2Challenge(challenge);
     // `failure.status` is only set when the server ACTUALLY answered NO or BAD.
@@ -962,7 +965,7 @@ export class ImapClient {
     );
     err.status = failure.status;
     err.code = failure.code;
-    err.reconnect = true;
+    err.reconnect = !transient;
     err.cause = failure;
     throw err;
   }
@@ -2630,14 +2633,13 @@ function stripAngles(value) {
  * ================================================================== */
 
 /**
- * Connect, authenticate, list. Never throws — the UI wants the reason, not a stack.
- *
- * The OAuth account is tested the same way it is swept, which is the point:
- * minting the token is where most of these accounts fail, so a "Test the
- * connection" that skipped it would report success on an account the 07:00 sweep
- * cannot open. `reconnect` comes back alongside `error` so the button can say
- * "connect this account again" instead of "check your password".
+ * Response codes (RFC 5530, plus THROTTLED) a server uses to say a refused
+ * AUTHENTICATE is its own temporary trouble, not the credential's. Anything
+ * else — AUTHENTICATIONFAILED, EXPIRED, or Microsoft's bare `NO AUTHENTICATE
+ * failed.` — means the sign-in itself was turned down.
  */
+const TRANSIENT_AUTH_CODES = new Set(['UNAVAILABLE', 'INUSE', 'SERVERBUG', 'LIMIT', 'THROTTLED']);
+
 /**
  * What a sign-in the server will no longer accept should say: the one action
  * that fixes it first, then the server's own words for whoever wants them.
@@ -2652,6 +2654,15 @@ export function reconnectMessage(err) {
   return `This account's sign-in is no longer accepted. Sign in again in Settings → Email.${said}`;
 }
 
+/**
+ * Connect, authenticate, list. Never throws — the UI wants the reason, not a stack.
+ *
+ * The OAuth account is tested the same way it is swept, which is the point:
+ * minting the token is where most of these accounts fail, so a "Test the
+ * connection" that skipped it would report success on an account the 07:00 sweep
+ * cannot open. `reconnect` comes back alongside `error` so the button can say
+ * "connect this account again" instead of "check your password".
+ */
 export async function testConnection({
   host, port, secure, user, pass, auth = null, oauth = null, accessToken = '',
   requireTls = null, timeoutMs, logger,
