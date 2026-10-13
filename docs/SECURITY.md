@@ -210,6 +210,12 @@ demotion and drop — a non-empty `errors` is normal traffic, not a failure.
 
 This is a blocklist. Blocklists lose. Here is exactly where the line is.
 
+It is applied to every untrusted field that reaches a model: each field of the
+sweep prompt (`core/triage.mjs`), and every line of Ask's grounding
+(`askContext` in `core/server.mjs`) — headings included. A subject or an event
+title is whatever its sender typed, no less hostile than a body. Ask's headings
+went unscrubbed until 1.9.5; a test now holds them to it.
+
 ### It removes, reliably
 
 - **Invisible characters**: zero-width spaces and joiners, bidi embedding and
