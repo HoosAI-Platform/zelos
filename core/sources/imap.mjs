@@ -14,7 +14,10 @@
  *  2. Reads never mutate the mailbox. `EXAMINE` instead of `SELECT`, and
  *     `BODY.PEEK[...]` instead of `BODY[...]` — a `BODY[` fetch sets \Seen, and
  *     silently marking somebody's mail as read is not a bug you get to ship.
- *     `fetch()` refuses to send one.
+ *     `fetch()` refuses to send one, and every command passes
+ *     `assertReadOnlyCommand` on its way to the socket:
+ *     nine read verbs and nothing else, so STORE, COPY, MOVE, APPEND, EXPUNGE
+ *     and their kind cannot be put on the wire by any caller.
  *  3. UIDs only. Sequence numbers are renumbered by any expunge, including one
  *     that happens between two of our own commands.
  *
@@ -996,13 +999,14 @@ export class ImapClient {
   }
 
   /**
-   * Open a mailbox. Read-only by default: EXAMINE cannot set \Seen or expunge,
-   * which makes "Zelos never changes your mail" true at the protocol level
-   * rather than by our own good behaviour.
+   * Open a mailbox, read-only: EXAMINE cannot set \Seen or expunge, which makes
+   * "Zelos never changes your mail" true at the protocol level rather than by
+   * our own good behaviour. There is no SELECT: nothing here needs a writable
+   * mailbox, and assertReadOnlyCommand would refuse one.
    */
-  async select(mailbox, { readOnly = true } = {}) {
+  async select(mailbox) {
     const name = String(mailbox ?? 'INBOX');
-    const result = await this.#exec(`${readOnly ? 'EXAMINE' : 'SELECT'} ${quoted(encodeModifiedUTF7(name))}`);
+    const result = await this.#exec(`EXAMINE ${quoted(encodeModifiedUTF7(name))}`);
 
     let exists = 0;
     let uidValidity = null;
@@ -1021,7 +1025,7 @@ export class ImapClient {
     }
 
     this.mailbox = name;
-    return { mailbox: name, exists, uidValidity, uidNext, flags, readOnly };
+    return { mailbox: name, exists, uidValidity, uidNext, flags, readOnly: true };
   }
 
   /** `search(['SINCE','01-Aug-2026'])` -> [uid]. Always UID SEARCH. */
@@ -1098,6 +1102,14 @@ export class ImapClient {
    */
   #exec(command, { onContinuation = null } = {}) {
     return new Promise((resolve, reject) => {
+      // First, before any state: a command that could change the mailbox is a
+      // bug in this file, and it must not reach the socket however it got here.
+      try {
+        assertReadOnlyCommand(command);
+      } catch (err) {
+        reject(err);
+        return;
+      }
       // Ahead of the `#dead` check, because cancelling sets both and "cancelled"
       // is the answer the caller can act on — "not connected" reads like a bug.
       if (this.#cancelled) {
@@ -1171,7 +1183,14 @@ export class ImapClient {
       }
       const reply = job.onContinuation(raw.text.slice(1).trim());
       this.log.debug('C: <continuation payload withheld>');
-      this.#socket.write(`${reply == null ? '' : reply}${CRLF}`);
+      // A continuation is a SASL payload: base64, an empty line, or `*` to
+      // abort. Anything else could carry a command, and is refused like one.
+      const line = reply == null ? '' : String(reply);
+      if (!/^[A-Za-z0-9+/=]*$|^\*$/.test(line)) {
+        this.#fail(this.#error('refusing to send a continuation that is not a SASL payload'));
+        return;
+      }
+      this.#socket.write(`${line}${CRLF}`);
       return;
     }
 
@@ -1340,12 +1359,52 @@ function normalizeSection(spec) {
 
 /**
  * The one thing this client must never do. `BODY[...]` sets \Seen on the
- * server; refuse to put one on the wire even if a caller asks for it.
+ * server, and so do `BINARY[...]` (RFC 3516), `RFC822` and `RFC822.TEXT`;
+ * refuse to put one on the wire
+ * even if a caller asks for it. (`RFC822.HEADER` and `RFC822.SIZE` do not.)
  */
 function assertPeekOnly(spec) {
-  if (/\bBODY\s*\[/i.test(spec)) {
-    throw new Error('refusing to send BODY[...] — it would mark the message as read; use BODY.PEEK[...]');
+  if (/\b(?:BODY|BINARY)\s*\[/i.test(spec)) {
+    throw new Error('refusing to send BODY[...] or BINARY[...] — it would mark the message as read; use BODY.PEEK[...]');
   }
+  if (/\bRFC822(?:\.TEXT)?(?![.\w])/i.test(spec)) {
+    throw new Error('refusing to send RFC822 or RFC822.TEXT — it would mark the message as read; use BODY.PEEK[...]');
+  }
+}
+
+/**
+ * Every command this client may send, by verb: connect and authenticate, list
+ * and open a mailbox read-only, search and fetch by UID, leave. Nothing on this
+ * list can change a mailbox, and nothing off it is ever written to the socket —
+ * STORE, COPY, MOVE, APPEND, EXPUNGE, SELECT, CREATE, DELETE, RENAME and every
+ * verb not yet invented included. docs/VERIFICATION.md tells Google's reviewers
+ * that the client never issues a write; this is what makes that a property of
+ * the code rather than of its current callers, and test/imap.test.mjs holds it
+ * to it, on the wire and over every command the file can issue.
+ */
+export const READ_ONLY_COMMANDS = Object.freeze([
+  'CAPABILITY', 'STARTTLS', 'LOGIN', 'AUTHENTICATE', 'LIST', 'EXAMINE', 'UID SEARCH', 'UID FETCH', 'LOGOUT',
+]);
+
+/**
+ * Throws unless `command` is one of READ_ONLY_COMMANDS — and a fetch, a peek.
+ * One command, one line: a line break inside an allowed command would put a
+ * second command of anyone's choosing on the wire behind it, so CR, LF and
+ * NUL are refused anywhere in it (`quoted()` already keeps them out of every
+ * argument it builds; this is the gate that does not depend on that).
+ */
+export function assertReadOnlyCommand(command) {
+  if (/[\r\n\0]/.test(String(command ?? ''))) {
+    throw new Error('refusing to send a command containing a line break — this client sends one command per line');
+  }
+  const words = String(command ?? '').trimStart().split(/\s+/);
+  const verb = (words[0] || '').toUpperCase() === 'UID'
+    ? `UID ${(words[1] || '').toUpperCase()}`
+    : (words[0] || '').toUpperCase();
+  if (!READ_ONLY_COMMANDS.includes(verb)) {
+    throw new Error(`refusing to send ${verb || 'an empty command'} — this client only reads (${READ_ONLY_COMMANDS.join(', ')})`);
+  }
+  if (verb === 'UID FETCH') assertPeekOnly(command);
 }
 
 /** The command name alone — arguments never reach an error message or a log. */

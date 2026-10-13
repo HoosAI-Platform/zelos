@@ -27,12 +27,21 @@ bracketed line at the end is the one to edit.
 >
 > **What the scope is used for.** Zelos connects to `imap.gmail.com` over TLS and authenticates
 > with `AUTHENTICATE XOAUTH2` using the access token this scope grants. Over that connection it
-> does exactly one thing: it fetches recent messages from `INBOX` (by default the last 14 days, at
-> most 400) and, if the user turns it on, from the Sent folder, using `BODY.PEEK` so that no
-> message is marked read. It never issues `STORE`, `COPY`, `MOVE`, `APPEND` or `EXPUNGE`; it never
-> sends mail (there is no SMTP client in the program); it never deletes, labels, moves or modifies
-> anything. The IMAP client is in `core/sources/imap.mjs`, and the absence of every write command
-> is checked by the test suite, which is larger than the program.
+> only reads: it fetches recent messages from `INBOX` (by default the last 14 days, at most 400)
+> and, if the user turns it on, from the Sent folder, using `BODY.PEEK` so that no message is
+> marked read; and when the user presses "Test the connection" in Settings, it lists the account's
+> folders. It never issues `STORE`, `COPY`, `MOVE`, `APPEND` or `EXPUNGE`; it never sends mail
+> (there is no SMTP client in the program); it never deletes, labels, moves or modifies anything.
+> The IMAP client is in `core/sources/imap.mjs`. Before anything reaches the socket it refuses
+> every command outside a fixed list of nine read verbs (`CAPABILITY`, `STARTTLS`, `LOGIN`,
+> `AUTHENTICATE`, `LIST`, `EXAMINE`, `UID SEARCH`, `UID FETCH`, `LOGOUT`), any command containing a
+> line break (so a second command cannot ride inside an allowed one), and any fetch that would mark
+> a message read (`BODY[…]`, `BINARY[…]`, `RFC822`, `RFC822.TEXT`). The test suite
+> (`test/imap.test.mjs`) checks this three ways: it records every line sent to a mock server on
+> each path the program reads by and finds only those verbs; it checks that the client refuses
+> write commands such as `STORE`, `COPY`, `MOVE`, `APPEND` and `EXPUNGE`, any verb not on the
+> list, and an attempt to smuggle one behind an allowed command; and it checks that every command
+> in the client's source is one of the nine, and that nothing else writes to the socket.
 >
 > **Why `https://mail.google.com/` and not a narrower scope.** Zelos reads mail over IMAP, not
 > over the Gmail REST API, and Google's own documentation states that "the scope for IMAP, POP,

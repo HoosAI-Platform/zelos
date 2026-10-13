@@ -5,6 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /* The environment has to be set before the modules that read it are evaluated,
    which is why the imports below are dynamic and these three lines are not.
@@ -63,6 +64,8 @@ const {
   testConnection,
   tlsRequiredByDefault,
   xoauth2Payload,
+  READ_ONLY_COMMANDS,
+  assertReadOnlyCommand,
 } = await import('../core/sources/imap.mjs');
 
 const { getSecret, setSecret, deleteSecret } = await import('../core/secrets.mjs');
@@ -708,6 +711,155 @@ test('fetch() refuses to put a \\Seen-setting BODY[...] on the wire', async () =
     assert.ok(!received.some((line) => /\bBODY\s*\[/i.test(line)), 'nothing was sent');
     await client.close();
   });
+});
+
+/* ------------------------------------------------------------------ *
+ * No write command, ever (TT-3432). docs/VERIFICATION.md tells Google's
+ * reviewers that the client never issues STORE, COPY, MOVE, APPEND or EXPUNGE
+ * and that the test suite checks it. These three are that check: on the wire
+ * for every way the program reads, at the gate every command passes, and over
+ * every command the file can issue.
+ * ------------------------------------------------------------------ */
+
+const WRITE_VERBS = ['STORE', 'COPY', 'MOVE', 'APPEND', 'EXPUNGE', 'SELECT', 'CREATE', 'DELETE', 'RENAME', 'SUBSCRIBE', 'UNSUBSCRIBE', 'SETACL', 'DELETEACL', 'SETQUOTA', 'SETMETADATA'];
+
+/** The verb of every tagged command on the wire (continuation lines are data). */
+function verbsOnTheWire(received) {
+  return received
+    .filter((line) => /^A\d{4} /.test(line))
+    .map((line) => {
+      const words = line.split(' ');
+      return words[1].toUpperCase() === 'UID' ? `UID ${words[2].toUpperCase()}` : words[1].toUpperCase();
+    });
+}
+
+function assertOnlyReads(received, label) {
+  // Whatever its tag: a line smuggled behind another command need not use ours.
+  for (const line of received) {
+    assert.doesNotMatch(line, new RegExp(`^\\S+ (?:UID )?(?:${WRITE_VERBS.join('|')})\\b`, 'i'), `${label}: a write command went on the wire: ${line}`);
+  }
+  const verbs = verbsOnTheWire(received);
+  assert.ok(verbs.length > 0, `${label}: nothing was sent, so this proves nothing`);
+  for (const verb of verbs) {
+    assert.ok(READ_ONLY_COMMANDS.includes(verb), `${label}: ${verb} went on the wire`);
+    assert.ok(!WRITE_VERBS.includes(verb.replace(/^UID /, '')), `${label}: a write command, ${verb}, went on the wire`);
+  }
+  for (const line of received.filter((l) => / UID FETCH /i.test(l))) {
+    assert.doesNotMatch(line, /\bBODY\s*\[|\bRFC822(?:\.TEXT)?(?![.\w])/i, `${label}: a fetch that sets \\Seen: ${line}`);
+  }
+  return verbs;
+}
+
+test('no write command reaches the wire on any path the program reads by', async () => {
+  const messages = [101, 102, 103].map((uid) => ({
+    uid,
+    internalDate: '08-Aug-2026 09:15:00 -0400',
+    structure: PLAIN_TEXT_STRUCTURE,
+    headers: `Subject: m${uid}\r\nFrom: a@b.example\r\nDate: Fri, 08 Aug 2026 09:15:00 -0400\r\n\r\n`,
+    parts: { 1: `body ${uid}\r\n` },
+  }));
+  const seen = new Set();
+
+  // A sweep's read of the inbox and of Sent, by password.
+  for (const mailboxName of ['INBOX', 'Sent']) {
+    await withServer({ onCommand: session({ extra: mailbox(messages) }) }, async ({ port, received }) => {
+      const rows = await fetchRecent({ host: '127.0.0.1', port, secure: false, user: 'nemo', pass: 'pw', mailbox: mailboxName, timeoutMs: 5000 });
+      assert.equal(rows.length, 3, 'the read did not complete, so its commands are not all here');
+      for (const verb of assertOnlyReads(received, `fetchRecent ${mailboxName}`)) seen.add(verb);
+    });
+  }
+
+  // The same read signed in with XOAUTH2, as a Google or Microsoft account is.
+  const token = 'EwBwA8l6BAAUs5-access-token-for-the-read-only-check';
+  await withServer({
+    greeting: '* OK Zelos mock ready',
+    onCommand: xoauth2Session({ user: 'nemo@gmail.com', token, extra: session({ extra: mailbox(messages) }) }),
+  }, async ({ port, received }) => {
+    const rows = await fetchRecent({ host: '127.0.0.1', port, secure: false, user: 'nemo@gmail.com', auth: 'xoauth2', accessToken: token, timeoutMs: 5000 });
+    assert.equal(rows.length, 3);
+    for (const verb of assertOnlyReads(received, 'fetchRecent xoauth2')) seen.add(verb);
+  });
+
+  // Settings' "Test the connection", which also lists the folders.
+  await withServer({
+    onCommand: session({
+      extra: ({ tag, verb, send }) => {
+        if (verb !== 'LIST') return false;
+        send(`* LIST (\\HasNoChildren) "/" "INBOX"\r\n* LIST (\\HasNoChildren \\Sent) "/" "Sent"\r\n${tag} OK LIST completed\r\n`);
+        return true;
+      },
+    }),
+  }, async ({ port, received }) => {
+    const result = await testConnection({ host: '127.0.0.1', port, secure: false, user: 'nemo', pass: 'pw', timeoutMs: 5000 });
+    assert.equal(result.ok, true, result.error);
+    for (const verb of assertOnlyReads(received, 'testConnection')) seen.add(verb);
+  });
+
+  // The paths between them used the read verbs they are meant to.
+  for (const verb of ['LOGIN', 'AUTHENTICATE', 'LIST', 'EXAMINE', 'UID SEARCH', 'UID FETCH']) {
+    assert.ok(seen.has(verb), `${verb} was never exercised: ${[...seen].join(', ')}`);
+  }
+});
+
+test('the client refuses to send any command that is not a read, before it reaches the socket', async () => {
+  for (const verb of WRITE_VERBS) {
+    assert.throws(() => assertReadOnlyCommand(`${verb} "INBOX"`), /this client only reads/, verb);
+    if (['STORE', 'COPY', 'MOVE', 'EXPUNGE'].includes(verb)) {
+      assert.throws(() => assertReadOnlyCommand(`UID ${verb} 1:* +FLAGS (\\Deleted)`), /this client only reads/, `UID ${verb}`);
+    }
+  }
+  // Read verbs this client does not use are refused too: the list is closed.
+  for (const command of ['NOOP', 'IDLE', 'SEARCH ALL', 'FETCH 1 (FLAGS)', 'STATUS "INBOX" (MESSAGES)', 'ENABLE QRESYNC', '', '   ']) {
+    assert.throws(() => assertReadOnlyCommand(command), /refusing to send/, JSON.stringify(command));
+  }
+  for (const spec of ['UID BODY[]', 'UID BODY[TEXT]', 'UID BINARY[1]', 'UID RFC822', 'UID FLAGS RFC822.TEXT']) {
+    assert.throws(() => assertReadOnlyCommand(`UID FETCH 1 (${spec})`), /mark the message as read/, spec);
+  }
+  for (const command of ['CAPABILITY', 'LOGIN "u" "p"', 'AUTHENTICATE XOAUTH2', 'LIST "" "*"', 'EXAMINE "INBOX"', 'UID SEARCH SINCE 1-Aug-2026', 'UID FETCH 1,2 (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM)])', 'LOGOUT', 'uid fetch 3 (BODY.PEEK[1])']) {
+    assert.doesNotThrow(() => assertReadOnlyCommand(command), command);
+  }
+  // One command per line: an allowed verb cannot carry a second command.
+  for (const command of ['UID SEARCH ALL\r\nX EXPUNGE', 'UID FETCH 1 (UID)\nA1 STORE 1 +FLAGS (\\Deleted)', 'LOGOUT\0STORE']) {
+    assert.throws(() => assertReadOnlyCommand(command), /line break/, JSON.stringify(command));
+  }
+  // The refusal never echoes the command: a LOGIN line carries the password.
+  assert.doesNotMatch(String((() => { try { assertReadOnlyCommand('XLOGIN "u" "hunter2"'); } catch (err) { return err.message; } })()), /hunter2/);
+
+  // And the gate is in the path: a refused command never reaches the server.
+  await withServer({ onCommand: session({}) }, async ({ port, received }) => {
+    const client = new ImapClient({ host: '127.0.0.1', port, secure: false, user: 'u', pass: 'p', timeoutMs: 5000 });
+    await client.connect();
+    await client.login();
+    await assert.rejects(() => client.fetch([1], 'UID RFC822'), /mark the message as read/);
+    assert.ok(!received.some((line) => /RFC822/i.test(line)), 'the refused fetch was sent');
+    // The review's smuggle: fetch() puts its items into the command as given.
+    await assert.rejects(() => client.fetch([1], 'UID)\r\nA0099 UID STORE 1 +FLAGS (\\Deleted)\r\nA0100 NOOP (UID'), /line break/);
+    assert.ok(!received.some((line) => /STORE|NOOP/i.test(line)), 'a command was smuggled onto the wire');
+    await client.close();
+  });
+});
+
+test('every command the IMAP client can issue is one of the read verbs', () => {
+  /* The wire test covers what the program does today; this covers what the
+     file can do at all. Every command goes out through #exec — #pump is the
+     only place a tagged line is written — and every #exec call names its verb
+     as the literal start of its first argument. */
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'sources', 'imap.mjs'), 'utf8');
+  const calls = [...src.matchAll(/this\.#exec\(\s*(['"`])([^'"`$]*)/g)].map((m) => m[2]);
+  assert.ok(calls.length >= 9, `only ${calls.length} #exec calls found — the scan is broken`);
+  for (const literal of calls) {
+    assert.doesNotThrow(() => assertReadOnlyCommand(literal), `#exec issues ${literal}`);
+  }
+  // Every #exec call opens with a plain literal verb, not a computed one.
+  const allCalls = [...src.matchAll(/this\.#exec\(\s*([^\n]{0,20})/g)].map((m) => m[1]);
+  assert.equal(allCalls.length, calls.length, `a #exec call whose verb is computed: ${allCalls.filter((c) => !/^['"`][A-Z]/.test(c)).join(' | ')}`);
+  // And the socket is written in exactly three places: #pump's tagged command,
+  // the `*` that cancels an unwanted prompt, and a checked SASL continuation.
+  // A fourth is a way onto the wire that skips the gate.
+  const writes = [...src.matchAll(/\.write\(([^\n]*)/g)].map((m) => m[1].trim());
+  assert.deepEqual(writes, ['`${job.tag} ${job.command}${CRLF}`);', '`*${CRLF}`);', '`${line}${CRLF}`);'], `the socket is written outside the three known places: ${writes.join(' | ')}`);
+  // ...and nothing reaches #exec except as `this.#exec(`.
+  assert.equal((src.match(/#exec\b/g) || []).length, calls.length + 1, 'a #exec reference other than its definition and the scanned calls');
 });
 
 test('UID sets are chunked to at most 100 per command', async () => {
