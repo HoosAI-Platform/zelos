@@ -48,8 +48,14 @@ export const RESOLVER_RULES = 'MAP * ~NOTFOUND , EXCLUDE 127.0.0.1';
  * nothing else can be listening there.
  */
 export function startProxySink({ logger = null } = {}) {
+  // Logged on the first and then every hundredth: a hostile page can open
+  // connections faster than anyone wants to read about them.
+  let refused = 0;
   const server = net.createServer((socket) => {
-    logger?.warn('desktop: refused a connection the window tried to make past the board');
+    refused += 1;
+    if (refused === 1 || refused % 100 === 0) {
+      logger?.warn('desktop: refused a connection the window tried to make past the board', { refused });
+    }
     socket.destroy();
   });
   return new Promise((resolve, reject) => {

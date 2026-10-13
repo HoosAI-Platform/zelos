@@ -749,6 +749,7 @@ export const app = {
   requestSingleInstanceLock() { return true; },
   commandLine: {
     appendSwitch(name, value) { recorded.switches.push([name, value]); recorded.sequence.push('switch:' + name); },
+    getSwitchValue(name) { return (recorded.switches.find(([n]) => n === name) || [])[1] || ''; },
   },
   setName(name) { recorded.appName = name; },
   getVersion() { return '1.0.0'; },
@@ -2377,5 +2378,34 @@ describe('the window\'s network lock (desktop/session.js)', () => {
     const ses = { resolveProxy(url) { asked.push(new URL(url).port); return Promise.resolve(new URL(url).port === '1' ? 'DIRECT' : 'PROXY 127.0.0.1:5200'); } };
     await verifyProxy(ses, { boardPort: 1, proxyPort: 5200 });
     assert.ok(asked.includes('2'));
+  });
+});
+
+describe('the window\'s network lock is the shell\'s precondition, not a best effort', () => {
+  const MAIN = fs.readFileSync(path.join(REPO, 'desktop', 'main.js'), 'utf8');
+
+  it('opens no window when the lock does not take', () => {
+    /* Booting a second stub shell in one process is not possible (main.js is a
+       module singleton), so the order is read off the source: the lock and the
+       resolver check sit in a try whose catch returns before createWindow(). */
+    const boot = MAIN.slice(MAIN.indexOf('async function bootstrap()'));
+    const lock = boot.indexOf('await hardenSession(');
+    const check = boot.indexOf("getSwitchValue('host-resolver-rules')");
+    const refuse = boot.indexOf('return { ok: false, error: err, holder: null };', lock);
+    const window = boot.indexOf('createWindow();');
+    assert.ok(lock > 0 && check > lock && refuse > check && window > refuse,
+      'the window can open before, or without, the network lock');
+    assert.match(boot.slice(lock, refuse), /catch \(err\) \{[\s\S]*dialog\.showErrorBox[\s\S]*app\.quit\(\);/);
+  });
+
+  it('never routes the app\'s own networking through the window\'s session', () => {
+    /* The session's proxy goes nowhere and its resolver resolves nothing, on
+       purpose. The updater and the core reach GitHub and the user's services
+       with Node's own fetch; anything here moved onto Electron's net module or
+       the session would fail silently, behind the lock. */
+    const shell = fs.readdirSync(path.join(REPO, 'desktop')).filter((f) => f.endsWith('.js'));
+    const offenders = shell.filter((f) => /\bnet\.(fetch|request)\(|session\.[A-Za-z]*\.?fetch\(|defaultSession\.fetch\(/.test(fs.readFileSync(path.join(REPO, 'desktop', f), 'utf8')));
+    assert.deepEqual(offenders, []);
+    assert.match(fs.readFileSync(path.join(REPO, 'desktop', 'updater.js'), 'utf8'), /fetchImpl = globalThis\.fetch/);
   });
 });

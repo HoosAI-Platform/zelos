@@ -1207,6 +1207,11 @@ async function bootstrap() {
       proxyPort: proxySink.port,
       logger: zelos.logger,
     });
+    // The DNS layer cannot be read back from Chromium; the switch it rests on
+    // can, and a rule that is not there is a layer that is not there.
+    if (app.commandLine.getSwitchValue('host-resolver-rules') !== RESOLVER_RULES) {
+      throw new Error('the rule that stops the window looking up hostnames is not in place');
+    }
   } catch (err) {
     zelos.logger.error('desktop: could not shut the window off from the network', { error: err.message });
     dialog.showErrorBox(`${APP_NAME} could not start`, [

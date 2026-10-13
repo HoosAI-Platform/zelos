@@ -1,4 +1,5 @@
-// Every route off the machine the shell is meant to close, tried at once.
+// Every route off the machine the shell is meant to close, each aimed at a
+// listener of its own so the check can tell which got through.
 (async () => {
   if (document.readyState === 'loading') await new Promise((r) => document.addEventListener('DOMContentLoaded', r));
   const probe = (window.__probe = { tried: 0, errors: [] });
@@ -15,40 +16,39 @@
   prefetch.href = `//prefetch.${spec.canary}`;
   document.head.appendChild(prefetch);
 
-  const servers = [];
-  for (const { host, port } of spec.targets) {
-    servers.push(`turn:${host}:${port}?transport=tcp`, `turn:${host}:${port}?transport=udp`, `turns:${host}:${port}?transport=tcp`, `stun:${host}:${port}`);
-  }
-  for (const name of spec.hostnames) servers.push(`turn:${name}:${spec.targets[0].port}?transport=tcp`);
-  servers.push(`turn:turn.${spec.canary}:3478?transport=tcp`);
-
   const gathered = [];
-  for (const PC of [window.RTCPeerConnection, frame.contentWindow.RTCPeerConnection]) {
-    for (const urls of servers) {
-      for (const iceTransportPolicy of ['relay', 'all']) {
-        probe.tried += 1;
-        try {
-          const pc = new PC({ iceServers: [{ urls, username: 'u', credential: 'p' }], iceTransportPolicy });
-          pc.createDataChannel('x');
-          gathered.push(new Promise((resolve) => {
-            pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') resolve(); });
-            setTimeout(resolve, 20_000);
-          }));
-          await pc.setLocalDescription(await pc.createOffer());
-        } catch (err) {
-          probe.errors.push(`${urls}: ${err.name}`);
-        }
-      }
+  function peer(PC, urls) {
+    probe.tried += 1;
+    try {
+      const pc = new PC({ iceServers: [{ urls, username: 'u', credential: 'p' }], iceTransportPolicy: 'all' });
+      pc.createDataChannel('x');
+      gathered.push(new Promise((resolve) => {
+        pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') resolve(); });
+        setTimeout(resolve, 20_000);
+      }));
+      pc.createOffer().then((offer) => pc.setLocalDescription(offer)).catch((err) => probe.errors.push(`${urls}: ${err.name}`));
+    } catch (err) {
+      probe.errors.push(`${urls}: ${err.name}`);
     }
   }
 
-  // WebTransport: not a request, and it reached the network past the guard.
-  if (typeof WebTransport === 'function') {
-    for (const { host, port } of spec.targets) {
+  const top = window.RTCPeerConnection;
+  const inner = frame.contentWindow.RTCPeerConnection;
+  for (const { key, host, port } of spec.routes) {
+    if (key === 'turn-tcp') peer(top, `turn:${host}:${port}?transport=tcp`);
+    if (key === 'turns') peer(top, `turns:${host}:${port}?transport=tcp`);
+    if (key === 'turn-tcp-iframe') peer(inner, `turn:${host}:${port}?transport=tcp`);
+    if (key === 'turn-localhost') peer(top, `turn:localhost:${port}?transport=tcp`);
+    if (key === 'turn-udp') peer(top, `turn:${host}:${port}?transport=udp`);
+    if (key === 'stun') peer(top, `stun:${host}:${port}`);
+    if (key === 'webtransport') {
       probe.tried += 1;
+      if (typeof WebTransport !== 'function') { probe.errors.push('webtransport: not available'); continue; }
       try { new WebTransport(`https://${host}:${port}/`).closed.catch(() => {}); } catch (err) { probe.errors.push(`webtransport: ${err.name}`); }
     }
   }
+  // A TURN hostname: the lookup is the leak, whatever happens after it.
+  peer(top, `turn:turn.${spec.canary}:3478?transport=tcp`);
 
   await Promise.all(gathered);
   window.__probeDone = true;

@@ -6,8 +6,9 @@
  * desktop/session.js (unless PROBE_MODE=control), and has the page try every
  * route off the machine the shell is meant to close: TURN over TCP, TLS and UDP,
  * STUN, WebTransport, a TURN hostname and a dns-prefetch — from the top frame
- * and from an iframe. Listeners on loopback (and on a LAN address, when the
- * runner has one) count what arrives. It prints one JSON line and exits.
+ * and from an iframe, each route against a listener of its own on loopback
+ * (and on a LAN address, when the runner has one). It prints one JSON line and
+ * exits.
  */
 
 import { app, BrowserWindow, session } from 'electron';
@@ -26,35 +27,57 @@ const { hardenSession, RESOLVER_RULES, startProxySink } = await import(new URL('
 
 if (HARDENED) app.commandLine.appendSwitch('host-resolver-rules', RESOLVER_RULES);
 
-/** A TCP and a UDP listener on one address and port, counting what arrives. */
-async function listenOn(host) {
-  const hits = { tcp: 0, udp: 0 };
-  const tcp = net.createServer((socket) => { hits.tcp += 1; socket.destroy(); });
-  await new Promise((resolve, reject) => { tcp.once('error', reject); tcp.listen(0, host, resolve); });
-  const port = tcp.address().port;
-  const udp = dgram.createSocket(host.includes(':') ? 'udp6' : 'udp4');
-  udp.on('message', () => { hits.udp += 1; });
-  await new Promise((resolve, reject) => { udp.once('error', reject); udp.bind(port, host, resolve); });
-  return { host, port, hits, close: () => { tcp.close(); udp.close(); } };
+/*
+ * Every route, each with a listener of its own, so a control run can show
+ * that EACH one is live — a route the probe cannot hear even unlocked proves
+ * nothing when it is silent locked. `required` routes must be heard in the
+ * control run; the rest (a LAN address that may be a link-local stand-in on a
+ * CI runner) are reported as untested when they are not.
+ */
+const ROUTES = [
+  { key: 'turn-tcp', proto: 'tcp' },
+  { key: 'turns', proto: 'tcp' },
+  { key: 'turn-tcp-iframe', proto: 'tcp' },
+  { key: 'turn-localhost', proto: 'tcp', loopbackOnly: true },
+  { key: 'turn-udp', proto: 'udp' },
+  { key: 'stun', proto: 'udp' },
+  { key: 'webtransport', proto: 'udp' },
+];
+
+async function listen(host, proto) {
+  const counter = { hits: 0 };
+  if (proto === 'tcp') {
+    const server = net.createServer((socket) => { counter.hits += 1; socket.destroy(); });
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, host, resolve); });
+    return { port: server.address().port, counter, close: () => server.close() };
+  }
+  const socket = dgram.createSocket('udp4');
+  socket.on('message', () => { counter.hits += 1; });
+  await new Promise((resolve, reject) => { socket.once('error', reject); socket.bind(0, host, resolve); });
+  return { port: socket.address().port, counter, close: () => socket.close() };
 }
 
-async function maybeListen(host) {
-  try { return await listenOn(host); } catch { return null; }
-}
-
+// No CSP on the probe page: the threat is a page that has already got past
+// the board's, and `connect-src 'self'` would otherwise block WebTransport in
+// both runs, leaving that route untested.
 const page = http.createServer((req, res) => {
   const file = { '/': 'page.html', '/frame.html': 'frame.html', '/probe.js': 'probe.js' }[req.url.split('?')[0]];
   if (!file) { res.writeHead(404); res.end(); return; }
-  const type = file.endsWith('.js') ? 'text/javascript' : 'text/html';
-  res.writeHead(200, { 'Content-Type': type, 'Content-Security-Policy': "default-src 'self'" });
+  res.writeHead(200, { 'Content-Type': file.endsWith('.js') ? 'text/javascript' : 'text/html' });
   res.end(fs.readFileSync(path.join(HERE, file)));
 });
 
 app.whenReady().then(async () => {
-  const targets = (await Promise.all(['127.0.0.1', '::1', ...(LAN ? [LAN] : [])].map(maybeListen))).filter(Boolean);
+  const routes = [];
+  for (const host of ['127.0.0.1', ...(LAN ? [LAN] : [])]) {
+    for (const route of ROUTES) {
+      if (route.loopbackOnly && host !== '127.0.0.1') continue;
+      routes.push({ ...route, host, required: host === '127.0.0.1', ...(await listen(host, route.proto)) });
+    }
+  }
   await new Promise((resolve) => page.listen(0, '127.0.0.1', resolve));
   const boardPort = page.address().port;
-  const out = { mode: HARDENED ? 'hardened' : 'control', targets: [], lock: null, page: null };
+  const out = { mode: HARDENED ? 'hardened' : 'control', routes: [], lock: null, page: null };
 
   let sink = null;
   if (HARDENED) {
@@ -71,26 +94,20 @@ app.whenReady().then(async () => {
   });
 
   const win = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false } });
-  const spec = {
-    targets: targets.map((t) => ({ host: t.host.includes(':') ? `[${t.host}]` : t.host, port: t.port })),
-    canary: CANARY,
-    hostnames: ['localhost'],
-  };
+  const spec = { canary: CANARY, routes: routes.map(({ key, host, port }) => ({ key, host, port })) };
   await win.loadURL(`http://127.0.0.1:${boardPort}/?spec=${encodeURIComponent(JSON.stringify(spec))}`);
 
-  // Done when the page says so, or at the ceiling. The control run stops as
-  // soon as anything arrives: it only has to prove the listeners can hear.
+  // Done when the page says every attempt has finished gathering, or at the
+  // ceiling. Both runs go to the end: the control run has to hear every route.
   const deadline = Date.now() + 25_000;
   while (Date.now() < deadline) {
-    const done = await win.webContents.executeJavaScript('window.__probeDone === true').catch(() => false);
-    const heard = targets.some((t) => t.hits.tcp + t.hits.udp > 0);
-    if (done || (!HARDENED && heard)) break;
+    if (await win.webContents.executeJavaScript('window.__probeDone === true').catch(() => false)) break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   await new Promise((resolve) => setTimeout(resolve, 1_000)); // late packets
   out.page = await win.webContents.executeJavaScript('JSON.stringify(window.__probe || null)').then(JSON.parse).catch(() => null);
-  out.targets = targets.map((t) => ({ host: t.host, tcp: t.hits.tcp, udp: t.hits.udp }));
-  for (const t of targets) t.close();
+  out.routes = routes.map(({ key, host, required, counter }) => ({ key, host, required, hits: counter.hits }));
+  for (const route of routes) route.close();
   await sink?.close();
   process.stdout.write(`${JSON.stringify(out)}\n`);
   app.exit(0);
