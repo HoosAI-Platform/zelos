@@ -31,8 +31,13 @@ bracketed line at the end is the one to edit.
 > most 400) and, if the user turns it on, from the Sent folder, using `BODY.PEEK` so that no
 > message is marked read. It never issues `STORE`, `COPY`, `MOVE`, `APPEND` or `EXPUNGE`; it never
 > sends mail (there is no SMTP client in the program); it never deletes, labels, moves or modifies
-> anything. The IMAP client is in `core/sources/imap.mjs`, and the absence of every write command
-> is checked by the test suite, which is larger than the program.
+> anything. The IMAP client is in `core/sources/imap.mjs`. It refuses, before anything reaches
+> the socket, every command outside a fixed list of nine read verbs (`CAPABILITY`, `STARTTLS`,
+> `LOGIN`, `AUTHENTICATE`, `LIST`, `EXAMINE`, `UID SEARCH`, `UID FETCH`, `LOGOUT`), and any fetch
+> that would mark a message read. The test suite (`test/imap.test.mjs`) checks this three ways:
+> it records every command sent to a mock server on each path the program reads by and finds only
+> those verbs; it checks that the client refuses every write command; and it checks that every
+> command in the client's source is one of the nine.
 >
 > **Why `https://mail.google.com/` and not a narrower scope.** Zelos reads mail over IMAP, not
 > over the Gmail REST API, and Google's own documentation states that "the scope for IMAP, POP,
