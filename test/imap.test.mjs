@@ -734,6 +734,10 @@ function verbsOnTheWire(received) {
 }
 
 function assertOnlyReads(received, label) {
+  // Whatever its tag: a line smuggled behind another command need not use ours.
+  for (const line of received) {
+    assert.doesNotMatch(line, new RegExp(`^\\S+ (?:UID )?(?:${WRITE_VERBS.join('|')})\\b`, 'i'), `${label}: a write command went on the wire: ${line}`);
+  }
   const verbs = verbsOnTheWire(received);
   assert.ok(verbs.length > 0, `${label}: nothing was sent, so this proves nothing`);
   for (const verb of verbs) {
@@ -808,11 +812,15 @@ test('the client refuses to send any command that is not a read, before it reach
   for (const command of ['NOOP', 'IDLE', 'SEARCH ALL', 'FETCH 1 (FLAGS)', 'STATUS "INBOX" (MESSAGES)', 'ENABLE QRESYNC', '', '   ']) {
     assert.throws(() => assertReadOnlyCommand(command), /refusing to send/, JSON.stringify(command));
   }
-  for (const spec of ['UID BODY[]', 'UID BODY[TEXT]', 'UID RFC822', 'UID FLAGS RFC822.TEXT']) {
+  for (const spec of ['UID BODY[]', 'UID BODY[TEXT]', 'UID BINARY[1]', 'UID RFC822', 'UID FLAGS RFC822.TEXT']) {
     assert.throws(() => assertReadOnlyCommand(`UID FETCH 1 (${spec})`), /mark the message as read/, spec);
   }
   for (const command of ['CAPABILITY', 'LOGIN "u" "p"', 'AUTHENTICATE XOAUTH2', 'LIST "" "*"', 'EXAMINE "INBOX"', 'UID SEARCH SINCE 1-Aug-2026', 'UID FETCH 1,2 (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM)])', 'LOGOUT', 'uid fetch 3 (BODY.PEEK[1])']) {
     assert.doesNotThrow(() => assertReadOnlyCommand(command), command);
+  }
+  // One command per line: an allowed verb cannot carry a second command.
+  for (const command of ['UID SEARCH ALL\r\nX EXPUNGE', 'UID FETCH 1 (UID)\nA1 STORE 1 +FLAGS (\\Deleted)', 'LOGOUT\0STORE']) {
+    assert.throws(() => assertReadOnlyCommand(command), /line break/, JSON.stringify(command));
   }
   // The refusal never echoes the command: a LOGIN line carries the password.
   assert.doesNotMatch(String((() => { try { assertReadOnlyCommand('XLOGIN "u" "hunter2"'); } catch (err) { return err.message; } })()), /hunter2/);
@@ -824,6 +832,9 @@ test('the client refuses to send any command that is not a read, before it reach
     await client.login();
     await assert.rejects(() => client.fetch([1], 'UID RFC822'), /mark the message as read/);
     assert.ok(!received.some((line) => /RFC822/i.test(line)), 'the refused fetch was sent');
+    // The review's smuggle: fetch() puts its items into the command as given.
+    await assert.rejects(() => client.fetch([1], 'UID)\r\nA0099 UID STORE 1 +FLAGS (\\Deleted)\r\nA0100 NOOP (UID'), /line break/);
+    assert.ok(!received.some((line) => /STORE|NOOP/i.test(line)), 'a command was smuggled onto the wire');
     await client.close();
   });
 });
@@ -842,9 +853,13 @@ test('every command the IMAP client can issue is one of the read verbs', () => {
   // Every #exec call opens with a plain literal verb, not a computed one.
   const allCalls = [...src.matchAll(/this\.#exec\(\s*([^\n]{0,20})/g)].map((m) => m[1]);
   assert.equal(allCalls.length, calls.length, `a #exec call whose verb is computed: ${allCalls.filter((c) => !/^['"`][A-Z]/.test(c)).join(' | ')}`);
-  // And the only tagged write to the socket is #pump's.
-  const taggedWrites = src.match(/\.write\(`\$\{job\.tag\}/g) || [];
-  assert.equal(taggedWrites.length, 1, 'a tagged command is written somewhere other than #pump');
+  // And the socket is written in exactly three places: #pump's tagged command,
+  // the `*` that cancels an unwanted prompt, and a checked SASL continuation.
+  // A fourth is a way onto the wire that skips the gate.
+  const writes = [...src.matchAll(/\.write\(([^\n]*)/g)].map((m) => m[1].trim());
+  assert.deepEqual(writes, ['`${job.tag} ${job.command}${CRLF}`);', '`*${CRLF}`);', '`${line}${CRLF}`);'], `the socket is written outside the three known places: ${writes.join(' | ')}`);
+  // ...and nothing reaches #exec except as `this.#exec(`.
+  assert.equal((src.match(/#exec\b/g) || []).length, calls.length + 1, 'a #exec reference other than its definition and the scanned calls');
 });
 
 test('UID sets are chunked to at most 100 per command', async () => {
