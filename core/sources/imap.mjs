@@ -943,8 +943,11 @@ export class ImapClient {
     // credential is a bearer token: retrying with the same one cannot work, and
     // neither can retrying with a password there is no longer any such thing as.
     // Settings reads this to say "connect this account again" instead of "check
-    // your password", which is the only sentence that helps here.
-    if (failure.status === 'NO') failure.reconnect = true;
+    // your password", which is the only sentence that helps here — and the sweep
+    // rests the account on it, so a NO the server itself calls temporary
+    // (RFC 5530 UNAVAILABLE, a busy or broken backend) is not one of these.
+    const transient = TRANSIENT_AUTH_CODES.has(String(failure.code || '').trim().split(/\s+/)[0].toUpperCase());
+    if (failure.status === 'NO' && !transient) failure.reconnect = true;
 
     const note = describeXOAuth2Challenge(challenge);
     // `failure.status` is only set when the server ACTUALLY answered NO or BAD.
@@ -962,7 +965,7 @@ export class ImapClient {
     );
     err.status = failure.status;
     err.code = failure.code;
-    err.reconnect = true;
+    err.reconnect = !transient;
     err.cause = failure;
     throw err;
   }
@@ -2630,6 +2633,28 @@ function stripAngles(value) {
  * ================================================================== */
 
 /**
+ * Response codes (RFC 5530, plus THROTTLED) a server uses to say a refused
+ * AUTHENTICATE is its own temporary trouble, not the credential's. Anything
+ * else — AUTHENTICATIONFAILED, EXPIRED, or Microsoft's bare `NO AUTHENTICATE
+ * failed.` — means the sign-in itself was turned down.
+ */
+const TRANSIENT_AUTH_CODES = new Set(['UNAVAILABLE', 'INUSE', 'SERVERBUG', 'LIMIT', 'THROTTLED']);
+
+/**
+ * What a sign-in the server will no longer accept should say: the one action
+ * that fixes it first, then the server's own words for whoever wants them.
+ * `err.reconnect` marks these — a refused XOAUTH2 token, a refresh the provider
+ * turned down, an account with no grant on this machine — and "check your
+ * password" or a raw `AUTHENTICATE XOAUTH2 failed` helps nobody holding one.
+ * The server's words have already been through `#error`, which strikes our own
+ * credentials out of them.
+ */
+export function reconnectMessage(err) {
+  const said = err?.message ? ` (${err.message})` : '';
+  return `This account's sign-in is no longer accepted. Sign in again in Settings → Email.${said}`;
+}
+
+/**
  * Connect, authenticate, list. Never throws — the UI wants the reason, not a stack.
  *
  * The OAuth account is tested the same way it is swept, which is the point:
@@ -2656,7 +2681,7 @@ export async function testConnection({
     });
   } catch (err) {
     return {
-      ok: false, capabilities: [], mailboxes: [], error: err.message, reconnect: err.reconnect === true,
+      ok: false, capabilities: [], mailboxes: [], error: err.reconnect === true ? reconnectMessage(err) : err.message, reconnect: err.reconnect === true,
     };
   }
   try {
@@ -2669,7 +2694,7 @@ export async function testConnection({
     return { ok: true, capabilities, mailboxes, error: null, reconnect: false };
   } catch (err) {
     return {
-      ok: false, capabilities: [], mailboxes: [], error: err.message, reconnect: err.reconnect === true,
+      ok: false, capabilities: [], mailboxes: [], error: err.reconnect === true ? reconnectMessage(err) : err.message, reconnect: err.reconnect === true,
     };
   } finally {
     await client.close();

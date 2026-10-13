@@ -664,6 +664,25 @@ test('a model key cannot be borrowed as the Google client secret', () => {
   assert.equal(oauthClient({ oauth: { clients: { google: { clientSecretRef: ref } } } }, 'google').clientSecretRef, 'oauth.google.clientSecret');
 });
 
+test('saving a new credential lifts the rest the sweep put on the sources that use it', async (t) => {
+  // TT-3436: without this, Settings went on showing the old rest's retry time
+  // — and held "Check all connections" — until the next sweep noticed.
+  const ctx = await startServer(t, {
+    config: baseConfig({ mail: [{ id: 'm_rest', enabled: true, label: 'Work', host: 'imap.example.invalid', port: 993, secure: true, user: 'nemo@example.com', keyRef: 'mail.m_rest', mailboxes: ['INBOX'] }] }),
+  });
+  t.after(async () => { await deleteSecret('mail.m_rest').catch(() => {}); });
+  const key = 'source.m_rest.state';
+  db.setKV(ctx.db, key, JSON.stringify({ lastAt: 1, authBlockedUntil: Date.now() + 3_600_000, secretHash: 'old' }));
+  db.setKV(ctx.db, 'source.m_other.state', JSON.stringify({ authBlockedUntil: Date.now() + 3_600_000, secretHash: 'old' }));
+
+  assert.equal((await call(ctx, 'POST', '/api/secrets', { body: { ref: 'mail.m_rest', value: 'a-new-app-password' } })).status, 200);
+  const state = JSON.parse(db.getKV(ctx.db, key));
+  assert.equal(state.authBlockedUntil, 0);
+  assert.equal(state.secretHash, null);
+  assert.equal(state.lastAt, 1, 'the rest of the state was kept');
+  assert.ok(JSON.parse(db.getKV(ctx.db, 'source.m_other.state')).authBlockedUntil > Date.now(), 'another source\'s rest was lifted');
+});
+
 test('a credential-shaped field never reaches config.json or a response', async (t) => {
   const ctx = await startServer(t);
   const res = await call(ctx, 'PUT', '/api/config', {

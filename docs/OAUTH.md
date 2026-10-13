@@ -170,8 +170,10 @@ Two hard limits, both from Google's pages:
 - **7-day refresh tokens.** "A Google Cloud Platform project with an OAuth consent screen
   configured for an external user type and a publishing status of 'Testing' is issued a refresh
   token expiring in 7 days" ([oauth2 § Refresh token expiration][g-oauth2]). So every Gmail user
-  signs in again weekly until verification lands. Zelos reports the expired grant in Settings and
-  offers **Connect again**; it does not pretend.
+  signs in again weekly until verification lands. Zelos reports the expired grant in Settings —
+  "This account's sign-in is no longer accepted. Sign in again in Settings → Email." — stops
+  retrying it until the account is signed in again, and offers **Sign in again**; it does not
+  pretend.
 
 A third, softer one: a Testing app shows Google's tester warning screen ([restricted][g-restricted]:
 "a tester warning screen … a user cap is in effect, and the refresh token lifetime is limited").

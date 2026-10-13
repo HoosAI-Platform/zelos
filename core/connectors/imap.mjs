@@ -16,7 +16,8 @@
  * would be a worse editor for it.
  */
 
-import { fetchRecent } from '../sources/imap.mjs';
+import { fetchRecent, reconnectMessage } from '../sources/imap.mjs';
+import { AuthError } from './http.mjs';
 import { googleSecretRefFor, oauthClient } from '../sources/oauth.mjs';
 import { loadConfig } from '../config.mjs';
 
@@ -233,6 +234,13 @@ export default {
           note: null,
         });
       } catch (err) {
+        /* A sign-in the server will no longer accept belongs to the account,
+           not to this mailbox: every other mailbox would be refused the same
+           way, and so would every sweep after this one. Thrown as an AuthError
+           so the sweep rests the account until its sign-in changes and says
+           "sign in again", instead of a part error it retried every half hour
+           while recording the source as read (QA, 2026-10-10, TT-3436). */
+        if (err?.reconnect === true) throw new AuthError(reconnectMessage(err));
         parts.push({ label: mailbox, rows: [], error: err, note: null });
       }
     }

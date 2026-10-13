@@ -57,14 +57,14 @@ import { CALENDAR_DEFAULTS, loadConfig, saveConfig, validateConfig, paths, isVal
 /* The registry, so the two places below that used to name source kinds by hand
    ask it instead. It costs this process nothing new: every module it pulls in —
    core/sources/imap.mjs, caldav.mjs, ics.mjs — is already imported below. */
-import { describe as describeConnectors, typesFor } from './connectors/index.mjs';
+import { describe as describeConnectors, typesFor, sourceStateKey } from './connectors/index.mjs';
 import { readSourceStatus } from './source-status.mjs';
 import { createUpdateChecker } from './updates.mjs';
 import { getSecret, setSecret, deleteSecret, listRefs, backend } from './secrets.mjs';
 import { readModelKey, modelKeyRef, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
 import {
   listBoard, bucketCounts, listEvents, listDrafts, updateDraft, lastRun,
-  setItemState, insertCapture, search, getKV, getItem, resolveRef,
+  setItemState, insertCapture, search, getKV, setKV, getItem, resolveRef,
   listFinished, dataCounts, databaseSizes, listItemHistory,
 } from './db.mjs';
 import {
@@ -798,6 +798,30 @@ function stripSecretShaped(value) {
  * read only by modelKeyFor(), for the address they were saved for. Before that,
  * a calendar test naming the AI key's ref sent it to any address in the body.
  */
+/**
+ * A credential that has just been replaced ends any rest the sweep put on the
+ * sources that use it. The sweep would lift it on its own — it rests on a hash
+ * of the refused credential, and this is a different one — but only once it
+ * runs, and until then Settings goes on showing the old rest's retry time and
+ * keeps "Check all connections" waiting on it.
+ */
+function liftCredentialRest(db, config, keyRef, logger = log) {
+  if (!db || !keyRef) return;
+  for (const section of ['mail', 'calendars', 'sources']) {
+    for (const entry of Array.isArray(config?.[section]) ? config[section] : []) {
+      if (!entry || entry.keyRef !== keyRef || typeof entry.id !== 'string') continue;
+      try {
+        const key = sourceStateKey(entry.id);
+        const state = JSON.parse(getKV(db, key) || '{}');
+        if (!state || typeof state !== 'object' || !state.authBlockedUntil) continue;
+        setKV(db, key, JSON.stringify({ ...state, authBlockedUntil: 0, secretHash: null }));
+      } catch (err) {
+        logger.warn('server: could not lift a credential rest', { error: err.message });
+      }
+    }
+  }
+}
+
 async function secretFor(ref) {
   if (!ref || !isValidRef(ref) || isModelKeyRef(ref)) return null;
   try {
@@ -1218,6 +1242,7 @@ async function handleSecretSet(ctx) {
   const value = requireSecretValue(body);
   try {
     const result = await setSecret(ref, value);
+    liftCredentialRest(ctx.db, ctx.config(), ref);
     // `ref` is a handle, not a credential; the value is never echoed or logged.
     sendJSON(ctx.res, 200, { ok: true, ref, backend: result.backend });
   } catch (err) {
@@ -1612,10 +1637,11 @@ const DEVICE_FLOW_LINGER_MS = 5 * 60_000;
  * two of them sharing a table would let one cancel the other's sign-in.
  */
 class DeviceSignInPad {
-  constructor({ endpoint = MS_LOGIN_ORIGIN, sleep = undefined, logger = log } = {}) {
+  constructor({ endpoint = MS_LOGIN_ORIGIN, sleep = undefined, logger = log, onConnected = () => {} } = {}) {
     this.endpoint = endpoint;
     this.sleep = sleep;
     this.logger = logger;
+    this.onConnected = onConnected;
     this.flows = new Map();
     this.runs = new Set();
   }
@@ -1709,6 +1735,7 @@ class DeviceSignInPad {
         flow.state = 'connected';
         flow.scope = result.scope || '';
         this.logger.info('server: a mailbox was connected to Microsoft', { keyRef });
+        this.onConnected(keyRef);
       })
       .catch((err) => {
         flow.state = err?.code === 'cancelled' ? 'cancelled' : 'failed';
@@ -1846,8 +1873,9 @@ function sendPage(res, status, body) {
 class BrowserSignInPad {
   constructor({
     authorizeUrl = null, tokenUrl = null, fetchImpl = null, ttlMs = BROWSER_FLOW_TTL_MS,
-    boundPort = () => null, logger = log,
+    boundPort = () => null, logger = log, onConnected = () => {},
   } = {}) {
+    this.onConnected = onConnected;
     this.authorizeUrl = authorizeUrl;
     this.tokenUrl = tokenUrl;
     this.fetchImpl = fetchImpl;
@@ -2052,6 +2080,7 @@ class BrowserSignInPad {
       flow.scope = tokens.scope || '';
       flow.finishedAt = Date.now();
       this.logger.info('server: a mailbox was connected to Google', { keyRef: flow.keyRef });
+      this.onConnected(flow.keyRef);
       return { status: 200, body: SIGNED_IN_PAGE };
     } catch (err) {
       /* The message verbatim, for the same reason DeviceSignInPad echoes its
@@ -3212,10 +3241,12 @@ export function createServer({
   const touchedAt = new Map();
   /** Per-server, like the session token it hands out, and gone when it is. */
   const handoffs = new HandoffPad({ ttlMs: handoffTtlMs });
+  const liftRest = (keyRef) => liftCredentialRest(db, current, keyRef, logger);
   const deviceSignIns = new DeviceSignInPad({
     endpoint: deviceAuth.endpoint ?? MS_LOGIN_ORIGIN,
     sleep: deviceAuth.sleep,
     logger,
+    onConnected: liftRest,
   });
   const browserSignIns = new BrowserSignInPad({
     authorizeUrl: browserAuth.authorizeUrl ?? null,
@@ -3225,6 +3256,7 @@ export function createServer({
     // Read at begin(), by which time `server` below exists and is listening.
     boundPort: () => server.address()?.port ?? null,
     logger,
+    onConnected: liftRest,
   });
   const dueForTouch = (id) => {
     const now = Date.now();

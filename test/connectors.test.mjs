@@ -474,7 +474,7 @@ test('a refused credential rests the source, and the rest is on every run record
   assert.equal(second.stats.sources.length, 1, 'the resting source vanished from the run record');
   assert.equal(second.stats.sources[0].ok, false);
   assert.equal(second.stats.sources[0].count, 0);
-  assert.match(second.stats.sources[0].error, /not retrying until .* or until it changes/);
+  assert.match(second.stats.sources[0].error, /not trying it again until .* or as soon as you sign in again or enter a new one/);
   assert.equal(second.stats.sourcesOk, 0);
   assert.equal(second.stats.sourcesFailed, 1);
 });
