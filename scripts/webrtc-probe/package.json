@@ -1,0 +1,6 @@
+{
+  "name": "zelos-webrtc-probe",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs"
+}

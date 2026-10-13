@@ -14,6 +14,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -26,6 +27,7 @@ import { classifyTarget, guardWebContents } from '../desktop/guard.js';
 import { clampToDisplays, DEFAULT_BOUNDS, MIN_SIZE, WindowState } from '../desktop/window-state.js';
 import { buildAppMenuTemplate, buildTrayMenuTemplate, supportsLoginItem, VIEWS } from '../desktop/menus.js';
 import { startCore } from '../desktop/runtime.js';
+import { hardenSession, RESOLVER_RULES, verifyProxy } from '../desktop/session.js';
 /* The lock used to be defined in desktop/runtime.js and is now in core/, which
    is what made it reachable from the published package at all — `desktop/` is
    deliberately not shipped, so a lock living there was a lock only a git
@@ -672,6 +674,7 @@ class WebContentsStub {
 
 export class BrowserWindow {
   constructor(options) {
+    recorded.sequence.push('window');
     this.options = options;
     this.handlers = new Map();
     this.webContents = new WebContentsStub();
@@ -744,6 +747,10 @@ export const app = {
     setBadge(text) { recorded.dockBadge = text; },
   },
   requestSingleInstanceLock() { return true; },
+  commandLine: {
+    appendSwitch(name, value) { recorded.switches.push([name, value]); recorded.sequence.push('switch:' + name); },
+    getSwitchValue(name) { return (recorded.switches.find(([n]) => n === name) || [])[1] || ''; },
+  },
   setName(name) { recorded.appName = name; },
   getVersion() { return '1.0.0'; },
   // Only the updater asks, and only for where a Windows installer would wait.
@@ -754,7 +761,7 @@ export const app = {
   // been asked must look exactly like one that was told no.
   getLoginItemSettings() { return recorded.loginItem || { openAtLogin: false }; },
   setLoginItemSettings(settings) { recorded.loginItem = Object.assign({}, settings); },
-  whenReady() { return Promise.resolve(); },
+  whenReady() { recorded.sequence.push('whenReady'); return Promise.resolve(); },
   on(event, handler) { push(recorded.appEvents, event, handler); return this; },
   emit(event, ...args) { return fire(recorded.appEvents, event, ...args); },
   quit() {
@@ -814,6 +821,21 @@ export const session = {
       onBeforeRequest(filter, handler) { recorded.beforeRequest = { filter, handler }; },
       onHeadersReceived(filter, handler) { recorded.headersReceived = { filter, handler }; },
     },
+    setProxy(config) {
+      recorded.proxy = config;
+      recorded.sequence.push('setProxy');
+      return Promise.resolve();
+    },
+    // Chromium's answer for the one rule shape the shell writes: a single
+    // http:// proxy, and host:port bypass entries after '<-loopback>'.
+    resolveProxy(url) {
+      const config = recorded.proxy;
+      if (!config) return Promise.resolve('DIRECT');
+      const { host } = new URL(url);
+      const bypass = config.proxyBypassRules.split(',').map((rule) => rule.trim());
+      if (bypass.includes(host)) return Promise.resolve('DIRECT');
+      return Promise.resolve('PROXY ' + new URL(config.proxyRules).host);
+    },
   },
 };
 
@@ -830,6 +852,9 @@ export const ipcMain = {
 };
 recorded.revealed = [];
 recorded.ipcHandlers = new Map();
+recorded.switches = [];
+recorded.sequence = [];
+recorded.proxy = null;
 recorded.userData = '';
 `;
 
@@ -1276,35 +1301,43 @@ describe('the shell, booted against a stub Electron', () => {
     assert.equal(verdicts.at(-1), false);
   });
 
-  it('shuts WebRTC off: the board\'s CSP gains webrtc \'block\', and the peer layer gets no UDP', () => {
-    /* WebRTC is not a URL request. ICE, STUN/TURN and data channels never
-       enter the onBeforeRequest pipeline the test above exercises, and
-       `connect-src 'self'` does not govern them either — so without these two
-       controls, a script in the board's origin could hand the session token to
-       `turn:attacker.example` as an ICE credential and neither layer would
-       fire. The CSP directive is the deny; the IP-handling policy is the layer
-       underneath it, for the page that has somehow shed its CSP. */
+  it('shuts WebRTC off for real: no UDP, a proxy that goes nowhere, and no DNS', async () => {
+    /* WebRTC is not a URL request: ICE, STUN/TURN and data channels never enter
+       the onBeforeRequest pipeline the test above exercises. The shell used to
+       answer that with a `webrtc 'block'` CSP directive, which Chromium in
+       Electron 43 does not implement — TURN over TCP reached any host (TT-3418).
+       What holds, measured by scripts/check-webrtc.mjs, is these three. */
     for (const win of recorded.windows) {
       assert.equal(win.webContents.webRTCIPHandlingPolicy, 'disable_non_proxied_udp',
         'a window\'s peer-connection layer was left with its default UDP reach');
     }
 
-    const { filter, handler } = recorded.headersReceived ?? {};
-    assert.ok(handler, 'no header hook: the board\'s CSP never gains the webrtc directive');
-    assert.deepEqual(filter.urls, ['<all_urls>']);
+    // The proxy is a listener this process owns, and only the board bypasses it.
+    const { port } = booted.zelos;
+    const proxy = recorded.proxy;
+    assert.ok(proxy, 'the session was never given a proxy');
+    assert.equal(proxy.mode, 'fixed_servers');
+    const sink = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(proxy.proxyRules);
+    assert.ok(sink, `the proxy is not a single loopback listener: ${proxy.proxyRules}`);
+    assert.doesNotMatch(proxy.proxyRules, /direct/i, 'a direct:// fallback fails open');
+    assert.equal(proxy.proxyBypassRules, `<-loopback>,127.0.0.1:${port}`);
+    const dropped = await new Promise((resolve) => {
+      const socket = net.connect(Number(sink[1]), '127.0.0.1');
+      socket.on('close', () => resolve(true));
+      socket.on('error', () => resolve(false));
+    });
+    assert.equal(dropped, true, 'nothing the shell owns is listening on the proxy port');
 
-    // Appended to the policy the server sent, whatever case the header came in.
-    let out;
-    handler({ responseHeaders: { 'content-security-policy': ["default-src 'self'"] } },
-      (r) => { out = r.responseHeaders; });
-    assert.deepEqual(out['content-security-policy'], ["default-src 'self'", "webrtc 'block'"]);
-    handler({ responseHeaders: { 'Content-Security-Policy': ["default-src 'self'"] } },
-      (r) => { out = r.responseHeaders; });
-    assert.deepEqual(out['Content-Security-Policy'], ["default-src 'self'", "webrtc 'block'"]);
+    // No hostname resolves, and the switch is in before the app is ready.
+    assert.deepEqual(recorded.switches.find(([name]) => name === 'host-resolver-rules'), ['host-resolver-rules', RESOLVER_RULES]);
+    assert.ok(recorded.sequence.indexOf('switch:host-resolver-rules') < recorded.sequence.indexOf('whenReady'));
 
-    // And present even on a response that carried no policy at all.
-    handler({ responseHeaders: {} }, (r) => { out = r.responseHeaders; });
-    assert.deepEqual(out['Content-Security-Policy'], ["webrtc 'block'"]);
+    // And all of it before any window exists.
+    assert.ok(recorded.sequence.indexOf('setProxy') >= 0);
+    assert.ok(recorded.sequence.indexOf('setProxy') < recorded.sequence.indexOf('window'), recorded.sequence.join(' → '));
+
+    // The directive that never worked is gone, so nothing reads as if it did.
+    assert.equal(recorded.headersReceived ?? null, null, 'the board\'s responses are still being given a webrtc CSP directive');
   });
 
   it('denies every browser permission but the one the copy buttons need', () => {
@@ -2298,5 +2331,81 @@ describe('the shell as a stdio MCP server', () => {
     // A fresh home has AI access off, so the tool list is empty — proof the
     // server read its config from the home the flags named.
     assert.deepEqual(replies[1].result.tools, []);
+  });
+});
+
+describe('the window\'s network lock (desktop/session.js)', () => {
+  /** A session that records what it is given and answers resolveProxy as told. */
+  function fakeSession(answer) {
+    const calls = { proxy: null };
+    return {
+      calls,
+      setPermissionRequestHandler() {},
+      setPermissionCheckHandler() {},
+      webRequest: { onBeforeRequest() {} },
+      setProxy(config) { calls.proxy = config; return Promise.resolve(); },
+      resolveProxy(url) { return Promise.resolve(answer(url, calls.proxy)); },
+    };
+  }
+  const honest = (url, config) => (new URL(url).host === '127.0.0.1:4100' ? 'DIRECT' : `PROXY ${new URL(config.proxyRules).host}`);
+
+  it('takes when the proxy reads back as written', async () => {
+    const ses = fakeSession(honest);
+    await hardenSession(ses, { getPort: () => 4100, proxyPort: 5200 });
+    assert.deepEqual(ses.calls.proxy, { mode: 'fixed_servers', proxyRules: 'http://127.0.0.1:5200', proxyBypassRules: '<-loopback>,127.0.0.1:4100' });
+  });
+
+  it('refuses a lock that did not take, however it failed', async () => {
+    /* Each of these is a way Chromium quietly fails open: a malformed rule
+       resolves to nothing, a lost proxy to DIRECT, a `direct://` fallback to a
+       list ending in DIRECT, a bypass wider than the board to DIRECT for
+       another loopback port. */
+    const failures = {
+      'nothing': () => '',
+      'direct everywhere': () => 'DIRECT',
+      'a fallback': (url, config) => (honest(url, config) === 'DIRECT' ? 'DIRECT' : `${honest(url, config)};DIRECT`),
+      'another loopback port bypassed': (url, config) => (new URL(url).hostname === '127.0.0.1' ? 'DIRECT' : honest(url, config)),
+      'the board proxied': (url, config) => `PROXY ${new URL(config.proxyRules).host}`,
+      'some other proxy': () => 'PROXY 127.0.0.1:9',
+    };
+    for (const [name, answer] of Object.entries(failures)) {
+      await assert.rejects(hardenSession(fakeSession(answer), { getPort: () => 4100, proxyPort: 5200 }), /network lock did not take/, name);
+    }
+  });
+
+  it('checks a loopback port other than the board\'s, even at the edge of the range', async () => {
+    const asked = [];
+    const ses = { resolveProxy(url) { asked.push(new URL(url).port); return Promise.resolve(new URL(url).port === '1' ? 'DIRECT' : 'PROXY 127.0.0.1:5200'); } };
+    await verifyProxy(ses, { boardPort: 1, proxyPort: 5200 });
+    assert.ok(asked.includes('2'));
+  });
+});
+
+describe('the window\'s network lock is the shell\'s precondition, not a best effort', () => {
+  const MAIN = fs.readFileSync(path.join(REPO, 'desktop', 'main.js'), 'utf8');
+
+  it('opens no window when the lock does not take', () => {
+    /* Booting a second stub shell in one process is not possible (main.js is a
+       module singleton), so the order is read off the source: the lock and the
+       resolver check sit in a try whose catch returns before createWindow(). */
+    const boot = MAIN.slice(MAIN.indexOf('async function bootstrap()'));
+    const lock = boot.indexOf('await hardenSession(');
+    const check = boot.indexOf("getSwitchValue('host-resolver-rules')");
+    const refuse = boot.indexOf('return { ok: false, error: err, holder: null };', lock);
+    const window = boot.indexOf('createWindow();');
+    assert.ok(lock > 0 && check > lock && refuse > check && window > refuse,
+      'the window can open before, or without, the network lock');
+    assert.match(boot.slice(lock, refuse), /catch \(err\) \{[\s\S]*dialog\.showErrorBox[\s\S]*app\.quit\(\);/);
+  });
+
+  it('never routes the app\'s own networking through the window\'s session', () => {
+    /* The session's proxy goes nowhere and its resolver resolves nothing, on
+       purpose. The updater and the core reach GitHub and the user's services
+       with Node's own fetch; anything here moved onto Electron's net module or
+       the session would fail silently, behind the lock. */
+    const shell = fs.readdirSync(path.join(REPO, 'desktop')).filter((f) => f.endsWith('.js'));
+    const offenders = shell.filter((f) => /\bnet\.(fetch|request)\(|session\.[A-Za-z]*\.?fetch\(|defaultSession\.fetch\(/.test(fs.readFileSync(path.join(REPO, 'desktop', f), 'utf8')));
+    assert.deepEqual(offenders, []);
+    assert.match(fs.readFileSync(path.join(REPO, 'desktop', 'updater.js'), 'utf8'), /fetchImpl = globalThis\.fetch/);
   });
 });
