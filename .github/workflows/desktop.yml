@@ -71,6 +71,13 @@ jobs:
       - name: Check the window cannot reach the network
         run: node scripts/check-webrtc.mjs
 
+      # `Zelos mcp` is how a desktop AI client starts Zelos, over stdio. The
+      # unit tests hand the server their own streams, so only the real binary
+      # spawned with real pipes shows what a client gets — on Windows it once
+      # got an empty stdin and an instant exit.
+      - name: Check Zelos mcp serves MCP over stdio
+        run: node scripts/check-mcp-stdio.mjs
+
       # The commit is stamped into the packaged app's package.json, where
       # desktop/main.js reads it for About and the "shell ready" log line —
       # without it every build is "Zelos <version>" and "which build do you
