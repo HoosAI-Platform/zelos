@@ -206,12 +206,18 @@ Press `Ctrl-C` in the terminal to stop it.
   hours — see *Automatic updates* under
   [Updating from an earlier version](#updating-from-an-earlier-version). The
   shell blocks every outbound request from the window that is not the local
-  board — **including WebSockets**, which is the class it silently missed until the guard's match
-  pattern was widened from `*://*/*` to `<all_urls>` (`*` in a scheme position
-  means http and https and nothing else, so `new WebSocket('wss://…')` used to
-  sail past). It denies every browser permission except the one the "copy draft"
-  buttons need, and turns spellcheck off because Chromium fetches its
-  dictionaries from a Google server.
+  board — **including WebSockets**, which is the class it silently missed until
+  the guard's match pattern was widened from `*://*/*` to `<all_urls>` (`*` in a
+  scheme position means http and https and nothing else, so
+  `new WebSocket('wss://…')` used to sail past). What never becomes a request —
+  **WebRTC and WebTransport** — meets a proxy that goes nowhere, no UDP, and no
+  DNS: the window cannot look up any hostname at all. Up to 1.9.5 this rested
+  on a `webrtc 'block'` CSP directive that Electron's Chromium does not
+  implement, so TURN over TCP could reach any host; `scripts/check-webrtc.mjs`
+  now tries every one of those routes against the real Electron before each
+  release, and fails it if anything gets out. It denies every browser
+  permission except the one the "copy draft" buttons need, and turns spellcheck
+  off because Chromium fetches its dictionaries from a Google server.
 - No hidden launch. **Open Zelos at login** puts Zelos in the OS login-items
   list and nothing more: at login the window opens, in front of whatever you sat
   down to do. It never launched hidden, and the code no longer implies it might.

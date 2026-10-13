@@ -64,6 +64,13 @@ jobs:
         shell: bash
         run: node --test --test-timeout=180000 test/*.test.mjs
 
+      # The board's window must not reach the network: tried against this
+      # runner's real Electron, with a control run that must see traffic, so a
+      # lock that quietly stopped working fails the build instead of shipping.
+      # (A CSP directive Chromium ignored once did, for every release.)
+      - name: Check the window cannot reach the network
+        run: node scripts/check-webrtc.mjs
+
       # The commit is stamped into the packaged app's package.json, where
       # desktop/main.js reads it for About and the "shell ready" log line —
       # without it every build is "Zelos <version>" and "which build do you

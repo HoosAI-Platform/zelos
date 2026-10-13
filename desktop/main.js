@@ -20,10 +20,11 @@
  *     board's own window and carrying nothing the page chose.
  *   - The session cancels every outbound request that is not the board itself —
  *     on every scheme Chromium will put on the network, WebSockets included,
- *     and not only the http(s) a scheme wildcard would have shown it. WebRTC,
- *     which never becomes a request at all, is blocked in the board's CSP and
- *     stripped of UDP underneath that. The session also denies every
- *     permission but the one the Owed view's copy buttons use.
+ *     and not only the http(s) a scheme wildcard would have shown it. What
+ *     never becomes a request — WebRTC, WebTransport — meets a proxy that goes
+ *     nowhere, no UDP, and no DNS (desktop/session.js has the four layers and
+ *     how each was measured). The session also denies every permission but
+ *     the one the Owed view's copy buttons use.
  *     Spellcheck is off because Chromium fetches its dictionaries from Google,
  *     and this app does not talk to anyone the user did not configure.
  *   - Nothing here assumes it succeeded. There may be no tray icon, so closing
@@ -47,6 +48,7 @@ import {
 } from 'electron';
 
 import { classifyTarget, guardWebContents } from './guard.js';
+import { hardenSession, RESOLVER_RULES, startProxySink } from './session.js';
 import { buildAppMenuTemplate, buildTrayMenuTemplate, VIEWS } from './menus.js';
 import { startCore } from './runtime.js';
 import {
@@ -123,8 +125,6 @@ export function readUpdateConfig(dir) {
 
 /** ui/app.css: marble ground and black-figure ground. Kills the white flash. */
 const GROUND = { light: '#F4EFE6', dark: '#12100E' };
-/** The one permission the board needs: the Owed view copies drafts. */
-const ALLOWED_PERMISSIONS = new Set(['clipboard-sanitized-write']);
 
 /**
  * How long a renderer crash is remembered, and how long the shell waits before
@@ -147,6 +147,7 @@ let leaving = null;
 let leaveAction = null;
 let maintenanceActive = false;
 let updater = null;
+let proxySink = null;  // the proxy the window's session goes nowhere through
 let installAfterShutdown = false;
 let crashes = [];      // timestamps of recent render-process-gone events
 let crashTimer = null;
@@ -487,61 +488,6 @@ function showView(id) {
   mainWindow?.webContents
     .executeJavaScript(script)
     .catch((err) => zelos?.logger.warn('desktop: could not switch view', { view: id, error: err.message }));
-}
-
-/* ------------------------------------------------------------------ *
- * Session hardening
- * ------------------------------------------------------------------ */
-
-function hardenSession(ses) {
-  ses.setPermissionRequestHandler((_contents, permission, callback) => {
-    const granted = ALLOWED_PERMISSIONS.has(permission);
-    if (!granted) zelos?.logger.warn('desktop: denied a permission request', { permission });
-    callback(granted);
-  });
-  ses.setPermissionCheckHandler((_contents, permission) => ALLOWED_PERMISSIONS.has(permission));
-
-  // The renderer's CSP already says `default-src 'self'`. This is the same rule
-  // enforced a second time, one layer down, where a CSP bypass would not reach:
-  // no request leaves this window for anywhere but the board. (What is not a
-  // request at all — WebRTC — cannot be cancelled here; it is dealt with below.)
-  //
-  // The pattern is `<all_urls>` and not the `*://*/*` that reads like it means
-  // the same thing. It does not: `*` in a match pattern's scheme position is
-  // http and https and nothing else, so a `new WebSocket('wss://…')` sailed
-  // straight past the layer this comment sells as the one a CSP bypass cannot
-  // reach. Measured against the pinned Electron 43.3.0 with five requests on
-  // five schemes: `*://*/*` delivered three, `<all_urls>` delivered five, and
-  // the two it had been missing were `ws:` and `wss:`. (`file:`, `data:` and
-  // `blob:` are not part of that difference — Chromium refuses those in the
-  // renderer before they ever become network requests.)
-  ses.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
-    const verdict = classifyTarget(details.url, { port: zelos?.port ?? 0 });
-    if (verdict.action !== 'internal') {
-      zelos?.logger.warn('desktop: cancelled an outbound request from the board', { url: verdict.url });
-    }
-    callback({ cancel: verdict.action !== 'internal' });
-  });
-
-  // The one channel Chromium will put on the network that is NOT a request:
-  // WebRTC. ICE, STUN/TURN and data channels never enter the pipeline above on
-  // any pattern, and `connect-src 'self'` does not govern them either — so a
-  // script in the board's origin could hand data to `turn:attacker.example` as
-  // an ICE credential with neither layer firing. So the board's responses gain
-  // a second CSP that does govern it: `webrtc 'block'` shuts the whole API's
-  // network path off in the renderer, and a policy carrying only that
-  // directive can loosen nothing beside it. (Appended by the shell rather than
-  // baked into the server's headers because the promise being kept — nothing
-  // leaves this window — is the shell's own.) The layer underneath it, for a
-  // page that has somehow shed its CSP, is the IP-handling policy set on every
-  // webContents in bootstrap.
-  ses.webRequest.onHeadersReceived({ urls: ['<all_urls>'] }, (details, callback) => {
-    const responseHeaders = { ...details.responseHeaders };
-    const key = Object.keys(responseHeaders).find((name) => name.toLowerCase() === 'content-security-policy')
-      ?? 'Content-Security-Policy';
-    responseHeaders[key] = [...(responseHeaders[key] ?? []), "webrtc 'block'"];
-    callback({ responseHeaders });
-  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1084,6 +1030,7 @@ function beginShutdown() {
       windowState?.capture();
       updater?.stop();
       await zelos?.stop();
+      await proxySink?.close();
     } catch {
       // Quitting is not allowed to fail; whatever did not close is about to
       // stop existing anyway.
@@ -1153,6 +1100,11 @@ async function bootstrap() {
   // because this copy has to run beside the Zelos the person is using rather
   // than lose the lock to it and quit.
   if (flags.mcp) return serveMcp(flags);
+
+  // No hostname resolves on the Chromium side of the app: a TURN hostname or a
+  // dns-prefetch was a lookup, and so data out through DNS (desktop/session.js).
+  // A command-line switch, so it has to be set before the app is ready.
+  app.commandLine.appendSwitch('host-resolver-rules', RESOLVER_RULES);
 
   // One Zelos per machine: two would fight over the same database and the
   // second would bind a different port, so the URL in the banner would be a lie.
@@ -1245,7 +1197,26 @@ async function bootstrap() {
       return { ok: false, error: null, holder: zelos.contested };
     }
   }
-  hardenSession(session.defaultSession);
+  /* Before any window exists, and checked before one may: a window that
+     opened with the lock half in place would be a window that can reach the
+     network, so a lock that does not take is a shell that does not start. */
+  try {
+    proxySink = await startProxySink({ logger: zelos.logger });
+    await hardenSession(session.defaultSession, {
+      getPort: () => zelos?.port ?? 0,
+      proxyPort: proxySink.port,
+      logger: zelos.logger,
+    });
+  } catch (err) {
+    zelos.logger.error('desktop: could not shut the window off from the network', { error: err.message });
+    dialog.showErrorBox(`${APP_NAME} could not start`, [
+      'Zelos could not shut its window off from the network, so it will not open one.',
+      '',
+      err.message,
+    ].join('\n'));
+    app.quit();
+    return { ok: false, error: err, holder: null };
+  }
 
   // Every webContents, not just the first window: a guard that only covers the
   // window you remembered to guard is not a guard. Registered here, after the
@@ -1253,11 +1224,10 @@ async function bootstrap() {
   // nothing has created a webContents before this line.
   const logger = zelos.logger;
   app.on('web-contents-created', (_event, contents) => {
-    // The second WebRTC lock (the CSP directive in hardenSession is the
-    // first): even a page that shed its CSP gets no UDP to speak over.
-    // `disable_non_proxied_udp` allows peer traffic only through a UDP proxy,
-    // and this app configures none. TCP-only ICE is what remains — the pinned
-    // Electron has no switch for it, which is why the CSP block above matters.
+    // WebRTC gets no UDP, and may use TCP only through the session's proxy —
+    // which goes nowhere (desktop/session.js). Without this the proxy would not
+    // apply to it at all: STUN and TURN over UDP reached the network with the
+    // proxy in place and the default policy.
     contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
     guardWebContents(contents, {
       // Read at event time, not captured: after shutdown there is no port, and

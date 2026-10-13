@@ -319,6 +319,18 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    `core/connectors/http.mjs`, which refuses any other origin before a socket
    exists. Footnote 4 below has the list.
 
+In the desktop app, the window that shows the board can reach **none** of
+these, nor anything else, except the local core: every request that is not the
+board is cancelled, and what never becomes a request — WebRTC (STUN/TURN over
+TCP, TLS or UDP) and WebTransport — meets a session proxy the shell owns that
+drops every connection, with UDP refused by `disable_non_proxied_udp` and every
+hostname mapped to NOTFOUND, so not even a DNS lookup leaves
+(`desktop/session.js`). The connections listed here are made by the core and
+the updater, in Node, not by the window. Up to 1.9.5 the WebRTC half rested on a
+`webrtc 'block'` CSP directive that Electron 43's Chromium ignores;
+`scripts/check-webrtc.mjs` now proves the lock against the real Electron, with a
+control run that must see traffic, before every desktop release.
+
 Those are the configured reading and model destinations. An update check adds
 the official GitHub release API, and a desktop update download adds GitHub's
 release file storage, both as described in item 7 below.
