@@ -148,6 +148,8 @@ const MAX_ICS_BYTES = 8 * 1_048_576;
 const NOW_BOARD_LIMIT = 4;
 const ASK_CONTEXT_HITS = 12;
 const ASK_CONTEXT_CHARS = 1_200;
+/** A grounding block's heading, on one line: the sweep's cap on a subject. */
+const ASK_TITLE_CHARS = 200;
 const HEARTBEAT_MS = 15_000;
 
 /** Hostnames that mean "this machine". Anything else in `Host` is a rebind. */
@@ -2369,7 +2371,17 @@ function askContext(db, question, privacy) {
     }
 
     sources.push({ ref: hit.ref, kind: hit.kind, title: cap(title, 120), excerpt: cap(hit.excerpt, 200), ...(hit.sourceInactive ? { sourceInactive: true } : {}) });
-    blocks.push(`[${hit.ref}] ${title}\n${scrubForPrompt(facts.filter(Boolean).join('\n'))}`);
+    /* The title is as untrusted as the facts under it — a subject or an event
+       title is whatever the sender typed — so it is scrubbed the same way. It
+       used to go in raw: `<|im_start|>` in an event title reached the model
+       while the same token in its description arrived as "[template marker
+       removed]" (QA, 2026-10-10, TT-3426). Put on one line first, so a line
+       break in a subject cannot start a block of its own — nor hide a template
+       token from the scrub by splitting it — then capped after the scrub, so
+       the cap holds whatever NFKC does to the length. */
+    const oneLine = title.replace(/\s*[\n\r\u0085\u2028\u2029]\s*/g, ' ');
+    const heading = cap(scrubForPrompt(oneLine), ASK_TITLE_CHARS);
+    blocks.push(`[${hit.ref}] ${heading}\n${scrubForPrompt(facts.filter(Boolean).join('\n'))}`);
   }
 
   return { sources, context: blocks.join('\n\n---\n\n') };

@@ -210,6 +210,15 @@ demotion and drop — a non-empty `errors` is normal traffic, not a failure.
 
 This is a blocklist. Blocklists lose. Here is exactly where the line is.
 
+It is applied to every untrusted field Zelos itself puts into a model prompt:
+each field of the sweep prompt (`core/triage.mjs`), and every line of Ask's
+grounding (`askContext` in `core/server.mjs`) — headings included. A subject or
+an event title is whatever its sender typed, no less hostile than a body. In
+1.9.5 and earlier Ask's headings went in unscrubbed; a test now holds them to
+it. What the MCP tools hand a connected AI client is the data it asked for and
+is not scrubbed — [section 6a](#6a-ai-access-mcp) covers
+that exposure.
+
 ### It removes, reliably
 
 - **Invisible characters**: zero-width spaces and joiners, bidi embedding and
