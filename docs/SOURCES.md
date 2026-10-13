@@ -693,14 +693,17 @@ file's own mode on your own disk.
 **What it deliberately does not do.** Nothing is ever written, moved or deleted
 — including the export and including the `.zip`, which is read a few kilobytes
 at a time through its own central directory rather than unpacked. A media export
-can be two gigabytes; this never allocates more than the compressed `_chat.txt`
-inside it. An unchanged export is not re-read at all.
+can be two gigabytes; this reads only the `_chat.txt` inside it, a megabyte at a
+time, and never holds more than about 8 MB of its text. An unchanged export is
+not re-read at all.
 
 **Where it stops.**
 
-- 8 MB of chat text per export, read **from the end**. A chat log is
-  append-only, so the tail is the recent part, and the recent part is what a
-  board about today wants.
+- 8 MB of chat text per export, read **from the end** — a `.txt` and a `.zip`
+  alike. A chat log is append-only, so the tail is the recent part, and the
+  recent part is what a board about today wants. A zipped chat that inflates to
+  more than 512 MB of text is refused with a sentence asking for the unzipped
+  `_chat.txt`; it is a work limit, not a memory one.
 - 2,000 messages kept per chat, 20 export files per sweep, 40 remembered.
 - **There is no "WhatsApp export format".** WhatsApp renders each line with the
   phone's own date and time formatter, so the file's shape is a product of the

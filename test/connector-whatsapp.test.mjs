@@ -268,3 +268,130 @@ test('the manifest says out loud that this is an archive, not a connection', () 
   assert.match(`${whatsapp.option}`, /export|file|archive/i,
     'the picker sentence does not say this is a file the user exports');
 });
+
+/* ------------------------------------------------------------------ *
+ * Zipped exports (TT-3441)
+ *
+ * iOS hands over a .zip by default, and the connector calls it "the most
+ * common thing to arrive here" — yet nothing tested it, and a long chat in one
+ * was refused outright: a stored member by a cap on its size, a deflated one
+ * as "could not be decompressed" once it inflated past 8 MB. SOURCES.md
+ * promises the last 8 MB, as a .txt gets. The archives here are written byte
+ * by byte, the way WhatsApp's and Finder's writers lay them out.
+ * ------------------------------------------------------------------ */
+
+import zlib from 'node:zlib';
+
+/** A one-member ZIP: stored (0) or deflated (8), optionally streamed with a data descriptor. */
+function zipOf(name, data, { method = 8, descriptor = false, compressed = null } = {}) {
+  const comp = compressed ?? (method === 8 ? zlib.deflateRawSync(data) : data);
+  const crc = zlib.crc32 ? zlib.crc32(data) : 0;
+  const nameBuf = Buffer.from(name, 'utf8');
+  const flags = descriptor ? 0x0008 : 0;
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(flags, 6);
+  local.writeUInt16LE(method, 8);
+  // A streaming writer leaves the local sizes zero and writes them afterwards.
+  local.writeUInt32LE(descriptor ? 0 : crc, 14);
+  local.writeUInt32LE(descriptor ? 0 : comp.length, 18);
+  local.writeUInt32LE(descriptor ? 0 : data.length, 22);
+  local.writeUInt16LE(nameBuf.length, 26);
+  const trailer = descriptor ? Buffer.alloc(16) : Buffer.alloc(0);
+  if (descriptor) {
+    trailer.writeUInt32LE(0x08074b50, 0);
+    trailer.writeUInt32LE(crc, 4);
+    trailer.writeUInt32LE(comp.length, 8);
+    trailer.writeUInt32LE(data.length >>> 0, 12);
+  }
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(flags, 8);
+  central.writeUInt16LE(method, 10);
+  central.writeUInt32LE(crc, 16);
+  central.writeUInt32LE(comp.length, 20);
+  central.writeUInt32LE(data.length >>> 0, 24);
+  central.writeUInt16LE(nameBuf.length, 28);
+  central.writeUInt32LE(0, 42);
+  const body = Buffer.concat([local, nameBuf, comp, trailer]);
+  const cd = Buffer.concat([central, nameBuf]);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(cd.length, 12);
+  end.writeUInt32LE(body.length, 16);
+  return Buffer.concat([body, cd, end]);
+}
+
+/** A chat log of `bytes` or more, oldest first, whose very first and last lines are marked. */
+function longChat(bytes) {
+  const lines = ['[1/1/26, 9:00:00 AM] Kit Alder: THE VERY FIRST MESSAGE'];
+  let size = lines[0].length + 1;
+  for (let i = 0; size < bytes; i += 1) {
+    const minute = String(i % 60).padStart(2, '0');
+    // Long messages, so 12 MB is a few thousand of them: the parser, not the
+    // zip reader, is what a hundred thousand short lines would be timing.
+    const line = `[1/1/26, 10:${minute}:00 AM] Kit Alder: progress note ${String(i).padStart(7, '0')} ${'on the retainage schedule and the punch list '.repeat(90)}`;
+    lines.push(line);
+    size += line.length + 1;
+  }
+  lines.push('[1/2/26, 9:00:00 AM] Nemo Hale: THE VERY LAST MESSAGE');
+  return Buffer.from(lines.join('\n'), 'utf8');
+}
+
+async function collectZip(t, archive, fileName = 'WhatsApp Chat - Alder family.zip') {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-whatsapp-zip-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, fileName);
+  fs.writeFileSync(file, archive);
+  const result = await whatsapp.collect({
+    source: { id: 's_wa_zip', settings: { path: file, yourName: 'Nemo Hale' } },
+    label: 'WhatsApp', cursor: null, timezone: 'UTC', identityEmail: '',
+    emit() {}, signal: null, log: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  return result.parts[0];
+}
+
+test('a zipped chat is read, deflated or stored, and a streaming writer\'s zero local sizes are not believed', async (t) => {
+  const chat = Buffer.from([
+    '[9/8/26, 9:14:02 AM] Kit Alder: Retainage schedule is posted',
+    '[9/8/26, 9:15:00 AM] Nemo Hale: On it',
+  ].join('\n'));
+  for (const options of [{ method: 8 }, { method: 0 }, { method: 8, descriptor: true }]) {
+    const part = await collectZip(t, zipOf('_chat.txt', chat, options));
+    assert.equal(part.error, null, `${JSON.stringify(options)}: ${part.error}`);
+    assert.equal(part.rows.length, 2, JSON.stringify(options));
+    assert.doesNotMatch(String(part.note ?? ''), /Only the last/, 'a short chat was reported as truncated');
+  }
+});
+
+test('a zipped chat longer than 8 MB is read from the end, as a .txt is, not refused (TT-3441)', async (t) => {
+  const chat = longChat(12_000_000);
+  for (const options of [{ method: 8 }, { method: 0 }, { method: 8, descriptor: true }]) {
+    const part = await collectZip(t, zipOf('_chat.txt', chat, options));
+    assert.equal(part.error, null, `${JSON.stringify(options)}: a long zipped chat was refused: ${part.error}`);
+    const texts = part.rows.map((row) => row.text ?? row.body ?? row.snippet ?? JSON.stringify(row));
+    assert.ok(texts.some((text) => /THE VERY LAST MESSAGE/.test(text)), `${JSON.stringify(options)}: the newest message is missing`);
+    assert.ok(!texts.some((text) => /THE VERY FIRST MESSAGE/.test(text)), `${JSON.stringify(options)}: the oldest message was read, so the tail was not`);
+    assert.match(String(part.note), /Only the last 8,000,000 bytes of this file were read\./, JSON.stringify(options));
+  }
+});
+
+test('a zipped chat that would inflate past half a gigabyte is refused in words, not inflated for minutes', async (t) => {
+  // 520 MB of zeros deflates to about half a megabyte: the shape of a zip bomb.
+  const deflate = zlib.createDeflateRaw({ level: 9 });
+  const out = [];
+  deflate.on('data', (chunk) => out.push(chunk));
+  const block = Buffer.alloc(1 << 20);
+  for (let i = 0; i < 520; i += 1) deflate.write(block);
+  await new Promise((resolve) => deflate.end(resolve));
+  const compressed = Buffer.concat(out);
+
+  const part = await collectZip(t, zipOf('_chat.txt', Buffer.alloc(0), { method: 8, compressed }));
+  assert.equal(part.rows.length, 0);
+  assert.match(String(part.error), /more than 512,000,000 bytes of chat text/);
+});
