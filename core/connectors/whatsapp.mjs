@@ -65,7 +65,8 @@
  * NOTHING IS EVER WRITTEN, MOVED OR DELETED, including the export itself and
  * including the `.zip`, which is read a few kilobytes at a time through its own
  * central directory rather than unpacked. A media export can be two gigabytes;
- * this never allocates more than the compressed `_chat.txt` inside it.
+ * only the `_chat.txt` inside it is read, and never more than about 8 MB of its
+ * text is held, however large it is (see readChatFromZip).
  *
  * ========================================================================
  * THE FORMAT, WHICH IS NOT A FORMAT

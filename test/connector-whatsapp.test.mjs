@@ -333,9 +333,11 @@ function longChat(bytes) {
   let size = lines[0].length + 1;
   for (let i = 0; size < bytes; i += 1) {
     const minute = String(i % 60).padStart(2, '0');
-    // Long messages, so 12 MB is a few thousand of them: the parser, not the
-    // zip reader, is what a hundred thousand short lines would be timing.
-    const line = `[1/1/26, 10:${minute}:00 AM] Kit Alder: progress note ${String(i).padStart(7, '0')} ${'on the retainage schedule and the punch list '.repeat(90)}`;
+    // Long messages, so 12 MB is under a thousand of them: under the 2,000
+    // message cap, so a missing first message proves the tail was read rather
+    // than the cap dropping it — and the parser, not the zip reader, is what a
+    // hundred thousand short lines would be timing.
+    const line = `[1/1/26, 10:${minute}:00 AM] Kit Alder: progress note ${String(i).padStart(7, '0')} ${'on the retainage schedule and the punch list '.repeat(300)}`;
     lines.push(line);
     size += line.length + 1;
   }
@@ -374,10 +376,11 @@ test('a zipped chat longer than 8 MB is read from the end, as a .txt is, not ref
   for (const options of [{ method: 8 }, { method: 0 }, { method: 8, descriptor: true }]) {
     const part = await collectZip(t, zipOf('_chat.txt', chat, options));
     assert.equal(part.error, null, `${JSON.stringify(options)}: a long zipped chat was refused: ${part.error}`);
-    const texts = part.rows.map((row) => row.text ?? row.body ?? row.snippet ?? JSON.stringify(row));
+    const texts = part.rows.map((row) => row.text);
     assert.ok(texts.some((text) => /THE VERY LAST MESSAGE/.test(text)), `${JSON.stringify(options)}: the newest message is missing`);
     assert.ok(!texts.some((text) => /THE VERY FIRST MESSAGE/.test(text)), `${JSON.stringify(options)}: the oldest message was read, so the tail was not`);
     assert.match(String(part.note), /Only the last 8,000,000 bytes of this file were read\./, JSON.stringify(options));
+    assert.doesNotMatch(String(part.note), /keeps the most recent/, 'the message cap, not the tail read, is what dropped the oldest');
   }
 });
 

@@ -693,8 +693,9 @@ file's own mode on your own disk.
 **What it deliberately does not do.** Nothing is ever written, moved or deleted
 — including the export and including the `.zip`, which is read a few kilobytes
 at a time through its own central directory rather than unpacked. A media export
-can be two gigabytes; this reads only the `_chat.txt` inside it, a megabyte at a
-time, and never holds more than about 8 MB of its text. An unchanged export is
+can be two gigabytes; this reads only the `_chat.txt` inside it — its last 8 MB
+directly when it is stored, or a megabyte at a time when it is compressed — and
+never holds more than about 8 MB of its text. An unchanged export is
 not re-read at all.
 
 **Where it stops.**
