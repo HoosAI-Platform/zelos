@@ -870,8 +870,7 @@ test('REGRESSION: a source resting on a refused credential stays on the run reco
      revoked at 09:00 was red on the 09:00 sweep and a quiet day at 09:30, for
      the rest of the six-hour block. The state rows are seeded here exactly as
      core/sweep.mjs writes them after a 401 and a 429 (test/connectors.test.mjs
-     covers the writing), because the mail reader catches its own failures
-     into parts and so never rests on its own. */
+     covers the writing; the test below covers mail writing its own). */
   const reads = [];
   const deps = { getSecret: SECRETS, fetchMail: async (o) => { reads.push(o.mailbox); return [fetched()]; } };
 
@@ -887,7 +886,7 @@ test('REGRESSION: a source resting on a refused credential stays on the run reco
   assert.equal(second.stats.sources[0].id, 'm_work');
   assert.equal(second.stats.sources[0].ok, false);
   assert.equal(second.stats.sources[0].count, 0);
-  assert.match(second.stats.sources[0].error, /credential was refused; not retrying until .* or until it changes/,
+  assert.match(second.stats.sources[0].error, /sign-in or key was refused, so Zelos is not trying it again until .* or as soon as you sign in again or enter a new one/,
     'the row has to say when it retries and that a new credential lifts it');
   assert.equal(second.stats.sourcesFailed, 1);
   assert.equal(second.stats.sourcesOk, 0);
@@ -898,6 +897,59 @@ test('REGRESSION: a source resting on a refused credential stays on the run reco
   assert.equal(reads.length, 0, 'the sweep read a source that asked not to be read yet');
   assert.deepEqual(rested.stats.sources, [],
     'a rate-limit rest is minutes and routine; a red row for it is the noise the rest exists to stop');
+});
+
+test('REGRESSION: a mail sign-in the server no longer accepts rests the account and says "sign in again"', async () => {
+  /* QA, 2026-10-10 (TT-3436). The client marks a refused XOAUTH2 token
+     `reconnect: true`, but the mail reader turned it into a part error, and
+     the sweep then wrote `lastOkAt` and cleared `authBlockedUntil` — so it was
+     retried every sweep, and Settings showed `AUTHENTICATE XOAUTH2 failed`. */
+  const db = fresh();
+  const reads = [];
+  let secret = '{"kind":"xoauth2","refreshToken":"revoked"}';
+  const refused = () => Object.assign(new Error('imap.gmail.com:993: AUTHENTICATE XOAUTH2 failed — NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)'), { reconnect: true, status: 'NO' });
+  const deps = {
+    getSecret: async () => secret,
+    fetchMail: async (o) => { reads.push(o.mailbox); throw refused(); },
+  };
+  const config = baseConfig({ mail: [mailAccount({ auth: 'xoauth2' })] });
+
+  const first = await runSweep({ db, config, mode: 'light', deps });
+  assert.deepEqual(reads, ['INBOX'], 'Sent was tried with a sign-in INBOX had just been refused');
+  const row = first.stats.sources.find((s) => s.id === 'm_work');
+  assert.equal(row.ok, false);
+  assert.match(row.error, /^This account's sign-in is no longer accepted\. Sign in again in Settings → Email\./);
+  assert.match(row.error, /AUTHENTICATE XOAUTH2 failed/, 'the server\'s own words are kept, after the action');
+  const state = JSON.parse(getKV(db, sourceStateKey('m_work')));
+  assert.ok(state.authBlockedUntil > Date.now(), 'the account was not rested');
+  assert.ok(!state.lastOkAt, 'a refused account was recorded as read');
+
+  // The next sweep does not ask again with the same refused sign-in...
+  const second = await runSweep({ db, config, mode: 'light', deps });
+  assert.deepEqual(reads, ['INBOX'], 'the next sweep asked again with the sign-in the server refused');
+  assert.match(second.stats.sources[0].error, /as soon as you sign in again/);
+
+  // ...and signing in again lifts the rest at once.
+  secret = '{"kind":"xoauth2","refreshToken":"fresh"}';
+  deps.fetchMail = async (o) => { reads.push(o.mailbox); return [fetched()]; };
+  const third = await runSweep({ db, config, mode: 'light', deps });
+  assert.deepEqual(reads, ['INBOX', 'INBOX', 'Sent'], 'a new sign-in did not lift the rest');
+  assert.ok(third.stats.sources.every((s) => s.ok), JSON.stringify(third.stats.sources));
+});
+
+test('a source whose every part failed is not recorded as read', async () => {
+  // Not a sign-in problem — an unreachable host is retried next sweep, as
+  // before — but "read" is not what happened, and a credential rest from an
+  // earlier sweep is not lifted by it.
+  const db = fresh();
+  const blockedUntil = Date.now() - 1; // already lapsed, so the sweep tries
+  setKV(db, sourceStateKey('m_work'), JSON.stringify({ lastAt: Date.now() - 1_800_000, authBlockedUntil: blockedUntil, secretHash: secretHash('a-password') }));
+  const deps = { getSecret: SECRETS, fetchMail: async () => { throw new Error('connect ECONNREFUSED'); } };
+  const result = await runSweep({ db, config: baseConfig({ mail: [mailAccount()] }), mode: 'light', deps });
+  assert.ok(result.stats.sources.every((s) => !s.ok));
+  const state = JSON.parse(getKV(db, sourceStateKey('m_work')));
+  assert.ok(!state.lastOkAt, 'a source that read nothing was recorded as read');
+  assert.equal(state.authBlockedUntil, blockedUntil, 'a failed read wrote over the credential state as if it had succeeded');
 });
 
 /* ================================================================== *

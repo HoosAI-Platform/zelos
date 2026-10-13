@@ -470,7 +470,7 @@ function authResting(state, secret, nowMs) {
   const until = Number(state.authBlockedUntil) || 0;
   if (!until || nowMs >= until) return null;
   if (state.secretHash && state.secretHash !== secretHash(secret)) return null;
-  return `the stored credential was refused; not retrying until ${new Date(until).toISOString()} or until it changes`;
+  return `The saved sign-in or key was refused, so Zelos is not trying it again until ${new Date(until).toISOString()} — or as soon as you sign in again or enter a new one in Settings.`;
 }
 
 function errorText(err) {
@@ -801,7 +801,13 @@ export async function runSweep({
         });
       }
 
-      record({ lastOkAt: startedMs, notBefore: 0, authBlockedUntil: 0, secretHash: null });
+      /* A source is "read" when something was. Every part failing is not that:
+         recording it as read cleared a credential's rest and claimed a success
+         for a mailbox that was refused, which is how a revoked sign-in went on
+         being retried every sweep. */
+      const parts = result?.parts || [];
+      const read = parts.length === 0 || parts.some((part) => !part.error);
+      record(read ? { lastOkAt: startedMs, notBefore: 0, authBlockedUntil: 0, secretHash: null } : {});
       return { sink: connector.sink, rows, cursor: result?.cursor, sourceId: source.id, snapshotComplete, taskSnapshot };
     } catch (err) {
       slog.warn(`${connector.family} source failed: ${label}`, { error: storedError(err) });

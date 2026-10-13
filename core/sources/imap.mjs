@@ -2638,6 +2638,20 @@ function stripAngles(value) {
  * cannot open. `reconnect` comes back alongside `error` so the button can say
  * "connect this account again" instead of "check your password".
  */
+/**
+ * What a sign-in the server will no longer accept should say: the one action
+ * that fixes it first, then the server's own words for whoever wants them.
+ * `err.reconnect` marks these — a refused XOAUTH2 token, a refresh the provider
+ * turned down, an account with no grant on this machine — and "check your
+ * password" or a raw `AUTHENTICATE XOAUTH2 failed` helps nobody holding one.
+ * The server's words have already been through `#error`, which strikes our own
+ * credentials out of them.
+ */
+export function reconnectMessage(err) {
+  const said = err?.message ? ` (${err.message})` : '';
+  return `This account's sign-in is no longer accepted. Sign in again in Settings → Email.${said}`;
+}
+
 export async function testConnection({
   host, port, secure, user, pass, auth = null, oauth = null, accessToken = '',
   requireTls = null, timeoutMs, logger,
@@ -2656,7 +2670,7 @@ export async function testConnection({
     });
   } catch (err) {
     return {
-      ok: false, capabilities: [], mailboxes: [], error: err.message, reconnect: err.reconnect === true,
+      ok: false, capabilities: [], mailboxes: [], error: err.reconnect === true ? reconnectMessage(err) : err.message, reconnect: err.reconnect === true,
     };
   }
   try {
@@ -2669,7 +2683,7 @@ export async function testConnection({
     return { ok: true, capabilities, mailboxes, error: null, reconnect: false };
   } catch (err) {
     return {
-      ok: false, capabilities: [], mailboxes: [], error: err.message, reconnect: err.reconnect === true,
+      ok: false, capabilities: [], mailboxes: [], error: err.reconnect === true ? reconnectMessage(err) : err.message, reconnect: err.reconnect === true,
     };
   } finally {
     await client.close();
