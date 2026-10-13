@@ -1079,7 +1079,12 @@ export async function serveMcp(flags, io = {}) {
   const load = (rel) => import(pathToFileURL(path.join(ROOT, 'core', rel)).href);
   try {
     const [{ serveStdio }, { log }] = await Promise.all([load('mcp.mjs'), load('log.mjs')]);
-    await serveStdio({ logger: log, input: io.input ?? mcpInput(), ...io });
+    await serveStdio({ logger: log, ...io, input: io.input ?? mcpInput() });
+    // app.exit does not wait for stdout. On macOS and Linux a pipe write is
+    // asynchronous, so the last replies of a client that sent a burst and hung
+    // up were cut off at exit; flushed first, they are not.
+    const output = io.output ?? process.stdout;
+    await new Promise((resolve) => output.write('', resolve));
     app.exit?.(0);
     return { ok: true, mcp: true };
   } catch (err) {
@@ -1092,22 +1097,39 @@ export async function serveMcp(flags, io = {}) {
 /**
  * The stream an MCP client's requests arrive on.
  *
- * On Windows, Electron is a GUI-subsystem program and gives its main process a
- * `process.stdin` that is an empty stream which ends at once — whatever the
- * parent connected. `Zelos mcp` read it, saw the end of input before the first
- * request, and exited without a word, so no client could use it (QA,
- * 2026-10-10, TT-3420). The pipe the client passed is still there as file
- * descriptor 0, and a socket opened on it reads it: measured on a Windows
- * runner against the pinned Electron, where it carried a request through and
- * closed with the client. macOS and Linux keep `process.stdin`, which works
- * there — and where the same socket fails with EAGAIN on a non-blocking pipe.
+ * On Windows, Electron's own start-up code redefines `process.stdin` as an
+ * empty stream that has already ended — and makes it unconfigurable — whatever
+ * the parent connected. `Zelos mcp` read it, saw the end of input before the
+ * first request, and exited without a word, so no client could use it (QA,
+ * 2026-10-10, TT-3420). Node never opened fd 0, so the client's pipe is still
+ * there, and a socket opened on it reads it: measured on a Windows runner
+ * against the pinned Electron, where it carried requests through and closed
+ * with the client. A socket rather than an fs stream because its reads can be
+ * cancelled when the client goes; libuv reads a non-overlapped pipe (what
+ * Python, Go and Claude Desktop pass) on a cancellable thread. macOS and Linux
+ * keep `process.stdin`, which works there.
  *
  * A pipe error (a client killed mid-message) closes the stream, which ends the
- * server as a closed stdin does, instead of crashing it.
+ * server as a closed stdin does, instead of crashing it. A stdin that is not a
+ * pipe at all — a file, NUL, a console, or nothing, as when `Zelos.exe mcp` is
+ * typed into a terminal — is read from the file when it is one, and otherwise
+ * refused in words, rather than as a stack trace.
  */
-export function mcpInput({ platform = process.platform, stdin = process.stdin, openFd0 = () => new net.Socket({ fd: 0, readable: true, writable: false }) } = {}) {
+export function mcpInput({
+  platform = process.platform,
+  stdin = process.stdin,
+  openFd0 = () => new net.Socket({ fd: 0, readable: true, writable: false }),
+  readFd0 = () => fs.createReadStream(null, { fd: 0, autoClose: false }),
+} = {}) {
   if (platform !== 'win32') return stdin;
-  const socket = openFd0();
+  let socket;
+  try {
+    socket = openFd0();
+  } catch (err) {
+    if (err?.code !== 'ERR_INVALID_FD_TYPE') throw err;
+    if (/FILE/.test(err.message)) return readFd0();
+    throw new Error('stdin is not a pipe. `Zelos mcp` is started by an AI client, which connects to it; it is not run by hand.');
+  }
   socket.on('error', () => socket.destroy());
   return socket;
 }

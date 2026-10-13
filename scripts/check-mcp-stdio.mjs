@@ -35,17 +35,20 @@ const result = await new Promise((resolve) => {
   child.stdout.on('data', (d) => { stdout += d; });
   child.stderr.on('data', (d) => { stderr += d; });
   child.on('error', (err) => resolve({ code: null, stdout, stderr: `${stderr}\nspawn failed: ${err.message}` }));
+  // A child that died early makes these writes EPIPE; the result says so.
+  child.stdin.on('error', () => {});
+  let hangUp = null;
   // Sent after a pause, as a client that starts the server and then talks to
   // it would: an input that ended on its own has ended by then.
   setTimeout(() => {
     for (const request of requests) child.stdin.write(`${JSON.stringify(request)}\n`);
     // Hang up once both answers are in, as a client closing does.
-    const hangUp = setInterval(() => {
+    hangUp = setInterval(() => {
       if (stdout.split('\n').filter((l) => l.trim()).length >= 2) { clearInterval(hangUp); child.stdin.end(); }
     }, 100);
   }, 2_000);
   const timer = setTimeout(() => { child.kill(); }, 60_000);
-  child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+  child.on('close', (code) => { clearTimeout(timer); clearInterval(hangUp); resolve({ code, stdout, stderr }); });
 });
 
 fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

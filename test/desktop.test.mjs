@@ -2356,6 +2356,17 @@ describe('the shell as a stdio MCP server', () => {
     assert.doesNotThrow(() => input.emit('error', Object.assign(new Error('pipe broke'), { code: 'EPIPE' })));
     return new Promise((resolve) => setImmediate(() => { assert.equal(closed, true); resolve(); }));
   });
+
+  it('on Windows, reads a file given as stdin, and refuses a console in words', () => {
+    const invalid = (type) => Object.assign(new TypeError(`Unsupported fd type: ${type}`), { code: 'ERR_INVALID_FD_TYPE' });
+    const file = new PassThrough();
+    assert.equal(main.mcpInput({ platform: 'win32', openFd0: () => { throw invalid('FILE'); }, readFd0: () => file }), file);
+    for (const type of ['TTY', 'UNKNOWN']) {
+      assert.throws(() => main.mcpInput({ platform: 'win32', openFd0: () => { throw invalid(type); } }), /started by an AI client/, type);
+    }
+    // Anything else is not ours to reinterpret.
+    assert.throws(() => main.mcpInput({ platform: 'win32', openFd0: () => { throw new Error('boom'); } }), /boom/);
+  });
 });
 
 describe('the window\'s network lock (desktop/session.js)', () => {
