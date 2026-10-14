@@ -626,8 +626,8 @@ function explainAuth(err) {
     return new AuthError(
       'GitHub answered 403. The response does not say which of three things it was: a classic token '
       + 'without the `notifications` scope (`repo` also grants it), a fine-grained token without read '
-      + 'access to Notifications, or GitHub’s secondary rate limit. Run `zelos doctor` — it prints the '
-      + 'scopes this token actually carries.',
+      + 'access to Notifications, or GitHub’s secondary rate limit. From a terminal, `zelos doctor` '
+      + 'prints the scopes this token actually carries.',
       { status: 403 },
     );
   }

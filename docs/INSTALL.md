@@ -548,8 +548,29 @@ directly.
 
 **Start here: `zelos doctor`.** It is the shortest path from "it isn't working"
 to "here is the line to fix", and it names the specific next action rather than
-the exception it caught. From source that is `node zelos.mjs doctor`; in the
-desktop app, **Settings → About** shows the same findings.
+the exception it caught. From source that is `node zelos.mjs doctor`.
+
+**In the desktop app there is no `zelos doctor`** — the app does not include the
+command-line launcher. What it has instead:
+
+- **Reading status**, on the board, opens by itself when a connection failed and
+  says which one and why.
+- **Setup status**, at the top of Settings (open it), marks a connection that
+  failed as "needs attention". Its **Review** button opens that connection,
+  which shows the reason, when it was last tried, and **Check all connections**,
+  which reads every connection again now.
+- **Settings → Email**: an account's **Edit → Test the connection** tries it
+  now and says what went wrong in words. In **Settings → Calendars** it is
+  **Edit → Test it**.
+- **Settings → AI**: **Test the connection** (or **Check it works**) asks the AI
+  you chose to answer, and names the address it could not reach.
+
+None of those checks the data folder, the settings file, the password store or
+the database, which `zelos doctor` does. For those, run it from a terminal with
+the source download (it needs Node 22.16 or later) against the same folder:
+`node zelos.mjs doctor --home <your data folder>` — the folder is listed as
+**Folder** in Settings → About. Quit the app from the tray first (closing the
+window leaves it running), so the two do not both refresh the same sign-in.
 
 **"Zelos could not start" on launch.**
 Almost always a port or a data folder problem. The dialog names the actual
@@ -576,7 +597,9 @@ closing the window quits even with sweeps on, unless you have set
 `ZELOS_TRAY_RESIDENT=1` — see "What the shell adds" above for why.
 
 **Something is wrong and I want to see why.**
-Run `zelos doctor` first. If you want the raw record after that:
+In the desktop app, start with Reading status on the board and Setup status in
+Settings (see Troubleshooting above); from source, run `zelos doctor`. If you
+want the raw record after that:
 `Board → Show logs`, then open `desktop.log`. Passwords and API keys are
 redacted before anything is written, so the file is safe to read and safe to
 send to someone — but read it first anyway.

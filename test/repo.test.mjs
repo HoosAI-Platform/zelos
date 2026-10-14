@@ -1360,6 +1360,43 @@ function firstParagraphUnder(text, heading) {
   return first.replace(/\s+/g, ' ');
 }
 
+test('docs/INSTALL.md sends a desktop user to diagnosis the desktop app actually has', () => {
+  /* QA, 2026-10-09 (TT-3475): INSTALL.md said "in the desktop app, Settings →
+     About shows the same findings" as `zelos doctor`. About has no doctor, and
+     the desktop build does not ship zelos.mjs, so the one path every "it is not
+     working" ends at led a stuck person to a screen that was not there. This
+     fails while any page says otherwise and About has no doctor. */
+  const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const settings = fs.readFileSync(path.join(ROOT, 'ui', 'views', 'settings.js'), 'utf8');
+  const start = settings.indexOf('function aboutPanel(');
+  assert.ok(start >= 0, 'aboutPanel is gone — this guard no longer knows where About is');
+  const about = settings.slice(start, settings.indexOf('\n}\n', start));
+  const aboutHasDoctor = /doctor\w*\(|\/api\/doctor/.test(about);
+  // Any sentence, in any order and wording, that puts doctor's findings in About.
+  const pages = ['README.md', 'docs/README.md', 'docs/INSTALL.md', 'docs/SECURITY.md', 'website/help.html'];
+  for (const page of pages) {
+    const text = fs.readFileSync(path.join(ROOT, page), 'utf8').replace(/<[^>]+>/g, ' ');
+    for (const sentence of text.split(/(?<=[.!?])\s+|\n\s*\n/)) {
+      // "About … with `zelos doctor`, or …" names two ways to check one thing,
+      // and is true; what may not appear is About holding doctor's own results.
+      const claims = /\bAbout\b/.test(sentence)
+        && /same\s+(?:findings|checks|results)|doctor['’]s|what\s+(?:`?zelos\s+)?doctor`?\s+(?:finds|checks|reports|says)|doctor\s+(?:findings|checks|results|report)/i.test(sentence);
+      assert.ok(!claims || aboutHasDoctor, `${page} puts doctor's findings in Settings → About, which has none: ${sentence.replace(/\s+/g, ' ').slice(0, 160)}`);
+    }
+  }
+
+  // And what it names instead is really there.
+  const desktop = JSON.parse(fs.readFileSync(path.join(ROOT, 'desktop', 'package.json'), 'utf8'));
+  assert.ok(!JSON.stringify(desktop.build).includes('zelos.mjs'), 'the desktop build ships zelos.mjs now — INSTALL.md can say so');
+  assert.match(install, /In the desktop app there is no `zelos doctor`/);
+  for (const label of ['Check all connections', 'Test the connection', 'Test it', 'Check it works']) {
+    assert.ok(install.includes(label), `INSTALL.md no longer names ${label}`);
+    assert.ok(settings.includes(`'${label}'`) || fs.readFileSync(path.join(ROOT, 'ui', 'lib', 'source-status.js'), 'utf8').includes(`'${label}'`),
+      `INSTALL.md names a "${label}" button the UI does not have`);
+  }
+  assert.ok(settings.includes("el('dt', { text: 'Folder' })"), 'INSTALL.md points at a Folder line in About that is gone');
+});
+
 test('docs/INSTALL.md leads each first-open warning with what to click, in plain words', () => {
   const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
 
