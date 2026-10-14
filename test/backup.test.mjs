@@ -13,6 +13,7 @@ import { createBackup, stageBackup, applyRestore, recoverRestore, recoveryDestin
 import { acquireMaintenance, registerDataConnection, MAINTENANCE_FILE } from '../core/data-lease.mjs';
 import { startCore, requestBarrier } from '../desktop/runtime.js';
 import { EventEmitter } from 'node:events';
+import http from 'node:http';
 import { diagnose } from '../core/doctor.mjs';
 import { recordAccess } from '../core/mcp.mjs';
 
@@ -369,8 +370,10 @@ describe('native runtime maintenance', () => {
     assert.ok(fs.statSync(destination).size > 0);
   });
 
-  it('tracks work after a response is closed and rejects new handlers while paused', async () => {
+  it('tracks work after a response is closed and hands the pause to the server to enforce', async () => {
     const server = new EventEmitter();
+    let unavailable = false;
+    server.zelos = { setUnavailable: (next) => { unavailable = next; } };
     let finish;
     let calls = 0;
     server.on('request', async () => { calls++; await new Promise((resolve) => { finish = resolve; }); });
@@ -378,12 +381,72 @@ describe('native runtime maintenance', () => {
     server.emit('request', {}, {});
     await Promise.resolve();
     barrier.pause();
+    assert.equal(unavailable, true);
     assert.equal(barrier.idle(), false);
-    let status; let body;
-    server.emit('request', {}, { writeHead: (code) => { status = code; }, end: (text) => { body = text; } });
-    assert.equal(status, 503); assert.match(body, /backing up/); assert.equal(calls, 1);
     finish(); await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(barrier.idle(), true); barrier.resume();
+    assert.equal(calls, 1);
+    assert.equal(barrier.idle(), true);
+    barrier.resume();
+    assert.equal(unavailable, false);
+  });
+
+  it('keeps the Host, Origin and token checks, and the security headers, while a backup holds the board', async () => {
+    /* The pause used to answer 503 in front of the whole pipeline, so during a
+       backup a rebound Host or a foreign Origin got a 503 with no
+       X-Frame-Options instead of the 403 a running board gives them. Hold a
+       real backup at its quiesce step and ask. */
+    const fx = fixture('paused'); shut(fx.db);
+    const core = await startCore({ root: path.resolve('.'), home: fx.home, port: 0 });
+    // Quiesce asks twice; one gate holds both, so releasing it lets the backup run.
+    let finish;
+    let markHeld;
+    const held = new Promise((resolve) => { markHeld = resolve; });
+    const gate = new Promise((resolve) => { finish = resolve; });
+    const original = core.server.zelos.cancelSignInsAndWait;
+    core.server.zelos.cancelSignInsAndWait = () => { markHeld(); return gate; };
+    const ask = (pathname, headers = {}) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: core.port, path: pathname, headers }, (res) => {
+        res.resume(); res.on('end', () => resolve(res));
+      });
+      req.on('error', reject); req.end();
+    });
+    const own = `127.0.0.1:${core.port}`;
+    let backup;
+    try {
+      backup = core.createBackup(path.join(dir, 'paused.zelos-backup'), { appVersion: version, timeoutMs: 10_000 });
+      // A backup that fails before it reaches quiesce fails the test here, not hangs it.
+      await Promise.race([held, backup]);
+
+      const rebound = await ask('/api/state', { host: `evil.example:${core.port}`, 'x-zelos-token': core.token });
+      assert.equal(rebound.statusCode, 403, 'a rebound Host is refused, paused or not');
+      assert.equal(rebound.headers['x-frame-options'], 'DENY');
+      const foreign = await ask('/api/state', { host: own, origin: 'http://evil.example', 'x-zelos-token': core.token });
+      assert.equal(foreign.statusCode, 403, 'a foreign Origin is refused, paused or not');
+      assert.equal(foreign.headers['x-frame-options'], 'DENY');
+      const tokenless = await ask('/api/state', { host: own });
+      assert.equal(tokenless.statusCode, 401, 'an API caller without the token learns nothing about the pause');
+
+      const api = await ask('/api/state', { host: own, 'x-zelos-token': core.token });
+      assert.equal(api.statusCode, 503);
+      assert.equal(api.headers['retry-after'], '2');
+      assert.equal(api.headers['x-frame-options'], 'DENY');
+      assert.match(api.headers['content-security-policy'], /default-src 'self'/);
+      for (const pathname of ['/', '/api/mcp']) {
+        const page = await ask(pathname, { host: own });
+        assert.equal(page.statusCode, 503, `${pathname} waits for the backup too`);
+        assert.equal(page.headers['x-frame-options'], 'DENY');
+      }
+
+      finish();
+      await backup;
+      const after = await ask('/api/state', { host: own, 'x-zelos-token': core.token });
+      assert.equal(after.statusCode, 200, 'the board answers again once the backup is done');
+    } finally {
+      finish();
+      await backup?.catch(() => {});
+      core.server.zelos.cancelSignInsAndWait = original;
+      await core.stop();
+    }
   });
 
   it('exports through a quiescent live core, resumes its API, restores and reopens with the saved data', async () => {
