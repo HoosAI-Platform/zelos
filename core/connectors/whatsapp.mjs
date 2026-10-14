@@ -65,7 +65,8 @@
  * NOTHING IS EVER WRITTEN, MOVED OR DELETED, including the export itself and
  * including the `.zip`, which is read a few kilobytes at a time through its own
  * central directory rather than unpacked. A media export can be two gigabytes;
- * this never allocates more than the compressed `_chat.txt` inside it.
+ * only the `_chat.txt` inside it is read, and never more than about 8 MB of its
+ * text is held, however large it is (see readChatFromZip).
  *
  * ========================================================================
  * THE FORMAT, WHICH IS NOT A FORMAT
@@ -117,6 +118,7 @@ import fs from 'node:fs/promises';
 import { constants as FS } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
 
 import { offsetFor } from '../time.mjs';
@@ -137,8 +139,21 @@ import { offsetFor } from '../time.mjs';
  */
 const MAX_TEXT_BYTES = 8_000_000;
 
-/** The compressed `_chat.txt` inside a .zip. The archive itself may be any size. */
-const MAX_MEMBER_BYTES = 8_000_000;
+/**
+ * How much a zipped `_chat.txt` may inflate to before Zelos stops reading it.
+ *
+ * A deflated member cannot be read from the end — deflate is a stream, and
+ * the last eight megabytes only exist once everything before them has been
+ * inflated — so it is inflated in chunks and only the last MAX_TEXT_BYTES are
+ * kept. Memory stays at about that; this caps the WORK, so an archive built to
+ * inflate a thousand-fold cannot keep a sweep busy for minutes. Half a
+ * gigabyte of chat text is several decades of the busiest group anyone has.
+ * A stored member is simply read from the end, like a .txt, and needs no cap.
+ */
+const MAX_INFLATED_BYTES = 512_000_000;
+
+/** Compressed bytes read from the archive per step of that inflation. */
+const INFLATE_CHUNK = 1_048_576;
 
 /** Messages kept from one chat, newest first. `limits.maxRows` restates it. */
 const MAX_MESSAGES = 2_000;
@@ -851,24 +866,62 @@ async function readChatFromZip(handle, size, label) {
   if (chosen.method !== 0 && chosen.method !== 8) {
     throw new ExportError(`${label} uses compression method ${chosen.method}, which Zelos does not read.`);
   }
-  if (chosen.compSize > MAX_MEMBER_BYTES) {
-    throw new ExportError(`${label} holds a ${chosen.compSize.toLocaleString('en-US')}-byte chat file, `
-      + `and Zelos reads at most ${MAX_MEMBER_BYTES.toLocaleString('en-US')} compressed.`);
-  }
-
   const local = Buffer.alloc(30);
   await readFully(handle, local, chosen.localAt);
   if (local.readUInt32LE(0) !== SIG_LOCAL) throw new ExportError(`${label} has a damaged entry for ${chosen.base}.`);
   const dataAt = chosen.localAt + 30 + local.readUInt16LE(26) + local.readUInt16LE(28);
+  if (dataAt + chosen.compSize > size) throw new ExportError(`${label} has a damaged entry for ${chosen.base}.`);
 
-  const comp = Buffer.alloc(chosen.compSize);
-  await readFully(handle, comp, dataAt);
-  if (chosen.method === 0) return comp;
+  /* Past the ceiling the chat is read FROM THE END, exactly as a .txt is: a
+     long chat used to be refused outright — a stored one by a cap on its size,
+     a deflated one as "could not be decompressed" once it inflated past eight
+     megabytes — so the longest chats, the ones most worth reading, gave
+     nothing at all (QA, 2026-10-10, TT-3441). */
+  if (chosen.method === 0) {
+    const take = Math.min(chosen.compSize, MAX_TEXT_BYTES);
+    const bytes = Buffer.alloc(take);
+    await readFully(handle, bytes, dataAt + chosen.compSize - take);
+    return { bytes, truncated: take < chosen.compSize };
+  }
+  return inflateTail(handle, dataAt, chosen.compSize, label);
+}
+
+/**
+ * Inflate a deflated member in chunks, keeping only its last MAX_TEXT_BYTES.
+ * Stops — with a sentence — past MAX_INFLATED_BYTES of output.
+ */
+async function inflateTail(handle, at, compSize, label) {
+  const kept = [];
+  let keptBytes = 0;
+  let total = 0;
   try {
-    return zlib.inflateRawSync(comp, { maxOutputLength: MAX_TEXT_BYTES });
+    await pipeline(
+      async function* compressed() {
+        for (let pos = 0; pos < compSize; pos += INFLATE_CHUNK) {
+          const chunk = Buffer.alloc(Math.min(INFLATE_CHUNK, compSize - pos));
+          await readFully(handle, chunk, at + pos);
+          yield chunk;
+        }
+      },
+      zlib.createInflateRaw(),
+      async function tail(inflated) {
+        for await (const chunk of inflated) {
+          total += chunk.length;
+          if (total > MAX_INFLATED_BYTES) throw new ExportError(`${label} holds more than `
+            + `${MAX_INFLATED_BYTES.toLocaleString('en-US')} bytes of chat text, which Zelos does not read. `
+            + 'Unzip it and point this source at the _chat.txt inside.');
+          kept.push(chunk);
+          keptBytes += chunk.length;
+          while (keptBytes - kept[0].length >= MAX_TEXT_BYTES) keptBytes -= kept.shift().length;
+        }
+      },
+    );
   } catch (err) {
+    if (err instanceof ExportError) throw err;
     throw new ExportError(`${label} could not be decompressed (${collapse(err?.message).slice(0, 80)}).`);
   }
+  const all = Buffer.concat(kept, keptBytes);
+  return { bytes: all.length > MAX_TEXT_BYTES ? all.subarray(all.length - MAX_TEXT_BYTES) : all, truncated: total > MAX_TEXT_BYTES };
 }
 
 /**
@@ -895,8 +948,8 @@ async function readExport(file) {
     if (!stat.isFile()) throw new ExportError(`${label} is not a regular file.`);
 
     if (label.toLowerCase().endsWith('.zip')) {
-      const bytes = await readChatFromZip(handle, stat.size, label);
-      return { text: decodeText(bytes), name: chatNameFor(file, true), mtimeMs: stat.mtimeMs, stat };
+      const { bytes, truncated } = await readChatFromZip(handle, stat.size, label);
+      return { text: decodeText(bytes), name: chatNameFor(file, true), mtimeMs: stat.mtimeMs, stat, truncated };
     }
 
     const take = Math.min(stat.size, MAX_TEXT_BYTES);
