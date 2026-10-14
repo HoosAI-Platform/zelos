@@ -548,8 +548,23 @@ directly.
 
 **Start here: `zelos doctor`.** It is the shortest path from "it isn't working"
 to "here is the line to fix", and it names the specific next action rather than
-the exception it caught. From source that is `node zelos.mjs doctor`; in the
-desktop app, **Settings → About** shows the same findings.
+the exception it caught. From source that is `node zelos.mjs doctor`.
+
+**In the desktop app there is no `zelos doctor`** — the app does not include the
+command-line launcher. Its checks are in Settings instead:
+
+- **Setup status**, at the top of Settings, lists every connection with its last
+  result — "needs attention", and the reason, when one failed — and has a
+  **Review** link to that connection and a **Check all connections** button.
+- **Settings → Email**: each account's **Test the connection** tries it now and
+  says what went wrong in words. **Settings → Calendars** has **Test it** for
+  each calendar.
+- **Settings → AI**: **Test the connection** (or **Check it works**) asks the AI
+  you chose to answer, and names the address it could not reach.
+
+If those do not explain it, the same data folder can be checked from a terminal
+with the source download: `node zelos.mjs doctor --home <your data folder>`
+(the folder is listed as **Folder** in Settings → About). Quit the app first.
 
 **"Zelos could not start" on launch.**
 Almost always a port or a data folder problem. The dialog names the actual

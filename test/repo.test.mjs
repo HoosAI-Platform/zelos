@@ -1360,6 +1360,31 @@ function firstParagraphUnder(text, heading) {
   return first.replace(/\s+/g, ' ');
 }
 
+test('docs/INSTALL.md sends a desktop user to diagnosis the desktop app actually has', () => {
+  /* QA, 2026-10-09 (TT-3475): INSTALL.md said "in the desktop app, Settings →
+     About shows the same findings" as `zelos doctor`. About has no doctor, and
+     the desktop build does not ship zelos.mjs, so the one path every "it is not
+     working" ends at led a stuck person to a screen that was not there. Either
+     the claim goes or the view arrives; this fails while one is true without
+     the other. */
+  const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const settings = fs.readFileSync(path.join(ROOT, 'ui', 'views', 'settings.js'), 'utf8');
+  const about = settings.slice(settings.indexOf('function aboutPanel('), settings.indexOf('\n}\n', settings.indexOf('function aboutPanel(')));
+  const promised = /About\*{0,2}\s+shows\s+the\s+same\s+findings|doctor[^.\n]*Settings\s+→\s+About/i.test(install);
+  assert.ok(!promised || /doctor/i.test(about), 'INSTALL.md promises doctor\'s findings in Settings → About, which has no doctor');
+
+  // And what it names instead is really there.
+  const desktop = JSON.parse(fs.readFileSync(path.join(ROOT, 'desktop', 'package.json'), 'utf8'));
+  assert.ok(!JSON.stringify(desktop.build).includes('zelos.mjs'), 'the desktop build ships zelos.mjs now — INSTALL.md can say so');
+  assert.match(install, /In the desktop app there is no `zelos doctor`/);
+  for (const label of ['Check all connections', 'Test the connection', 'Test it', 'Check it works']) {
+    assert.ok(install.includes(label), `INSTALL.md no longer names ${label}`);
+    assert.ok(settings.includes(`'${label}'`) || fs.readFileSync(path.join(ROOT, 'ui', 'lib', 'source-status.js'), 'utf8').includes(`'${label}'`),
+      `INSTALL.md names a "${label}" button the UI does not have`);
+  }
+  assert.ok(settings.includes("el('dt', { text: 'Folder' })"), 'INSTALL.md points at a Folder line in About that is gone');
+});
+
 test('docs/INSTALL.md leads each first-open warning with what to click, in plain words', () => {
   const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
 
