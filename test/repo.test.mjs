@@ -1119,8 +1119,8 @@ test('no connector reaches the network except through ctx.http', () => {
      `ics.mjs` is exempt BY NAME and on purpose, and the name is the point. Its
      `fetchIcsText` predates the transport and hand-rolls the same protections —
      `redirect: 'manual'` with a one-hop rule, credentials dropped when the hop
-     leaves the origin, `AbortSignal.timeout`, and a byte cap — so it is not a
-     hole; it is the DUPLICATION this transport exists to end, and the audit
+     leaves the origin, and `AbortSignal.timeout` (its byte cap is the
+     transport's own `readCapped`) — so it is not a hole; it is the DUPLICATION this transport exists to end, and the audit
      already found real defects in one of the hand-rolled copies. Exempting it
      by name rather than loosening the rule means a NEW bare fetch in any other
      connector still fails here, and that migrating ics.mjs is a one-line
