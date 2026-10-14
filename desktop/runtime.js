@@ -66,27 +66,34 @@ async function loadCore(root) {
   return { config, db, server, sweep, log: logmod, backup };
 }
 
-/** Gate before invoking handlers and track their promises, including the time
- * after a response/socket closes. An aborted socket is not a completed write.
+/** Track handler promises, including the time after a response/socket closes.
+ * An aborted socket is not a completed write.
+ *
+ * Pausing does NOT refuse requests here. It asks the server to, via
+ * `server.zelos.setUnavailable`, so the 503 is sent after the Host, Origin and
+ * session-token checks and with the security headers, not in front of them.
+ * The requests it refuses are still tracked here, but they are done in a tick.
  */
 export function requestBarrier(server) {
+  // Fail at startup, not halfway into quiesce with the maintenance lease held.
+  if (typeof server.zelos?.setUnavailable !== 'function') {
+    throw new TypeError('requestBarrier needs a server from createServer (server.zelos.setUnavailable)');
+  }
   const handlers = server.listeners('request');
   const pending = new Set();
-  let paused = false;
   for (const handler of handlers) server.removeListener('request', handler);
   server.on('request', (req, res) => {
-    if (paused) {
-      res.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Retry-After': '2' });
-      res.end(JSON.stringify({ error: 'Zelos is backing up or restoring data. Please try again shortly.' }));
-      return;
-    }
     for (const handler of handlers) {
       const work = Promise.resolve().then(() => handler(req, res));
       pending.add(work);
       work.finally(() => pending.delete(work)).catch(() => { if (!res.writableEnded) res.destroy(); });
     }
   });
-  return { pause: () => { paused = true; }, resume: () => { paused = false; }, idle: () => pending.size === 0 };
+  return {
+    pause: () => { server.zelos.setUnavailable(true); },
+    resume: () => { server.zelos.setUnavailable(false); },
+    idle: () => pending.size === 0,
+  };
 }
 
 async function bounded(work, timeoutMs) {

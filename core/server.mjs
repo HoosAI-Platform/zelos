@@ -3258,6 +3258,23 @@ export function createServer({
     logger,
     onConnected: liftRest,
   });
+  /* Set while the desktop shell backs up or restores this data home (see
+     desktop/runtime.js's requestBarrier). Enforced inside the pipeline rather
+     than in front of it, so a paused board still refuses a rebound Host or a
+     foreign Origin, and an /api/ caller without the session token, exactly as
+     a running one does, and every refusal carries SECURITY_HEADERS. */
+  let unavailable = false;
+  const sendUnavailable = (res) => {
+    const payload = Buffer.from(`${JSON.stringify({ error: 'Zelos is backing up or restoring data. Please try again shortly.' })}\n`, 'utf8');
+    res.writeHead(503, {
+      ...SECURITY_HEADERS,
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': payload.length,
+      'Cache-Control': 'no-store',
+      'Retry-After': '2',
+    });
+    res.end(payload);
+  };
   const dueForTouch = (id) => {
     const now = Date.now();
     const last = touchedAt.get(id) ?? 0;
@@ -3284,6 +3301,16 @@ export function createServer({
     if (!originIsOwn(req.headers.origin, server.address()?.port)) {
       logger.warn('server: refused a request from a foreign origin', { origin: req.headers.origin });
       sendText(res, 403, 'Cross-origin requests are not accepted');
+      return;
+    }
+
+    /* Paused for a backup or restore. The session-token routes wait for their
+       token check below. Everything else stops here: the handoff, the sign-in
+       callback (it writes a credential), the static board, and /api/mcp, whose
+       token check is asynchronous and reads the config and secret store that a
+       restore is about to replace. */
+    if (unavailable && (!url.pathname.startsWith('/api/') || url.pathname === '/api/mcp')) {
+      sendUnavailable(res);
       return;
     }
 
@@ -3394,6 +3421,10 @@ export function createServer({
       sendJSON(res, 401, { error: 'unauthorized', detail: 'send the session token in the X-Zelos-Token header' });
       return;
     }
+    if (unavailable) {
+      sendUnavailable(res);
+      return;
+    }
 
     const { handler, params, pathExists, allowed } = matchRoute(req.method, url.pathname);
     if (!handler) {
@@ -3479,6 +3510,15 @@ export function createServer({
      */
     mintHandoff() {
       return handoffs.mint();
+    },
+    /**
+     * Answer 503 to every request that gets past the Host and Origin checks
+     * (and, for the API, the session token) until `false` is passed back.
+     * The pipeline's checks are synchronous up to that point, so a refused
+     * request never reaches the database or the secret store.
+     */
+    setUnavailable(next) {
+      unavailable = Boolean(next);
     },
   };
   return server;
