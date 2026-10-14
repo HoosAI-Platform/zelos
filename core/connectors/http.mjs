@@ -1,7 +1,7 @@
 /**
  * core/connectors/http.mjs — the only way out to the network a connector gets.
  *
- * Three hand-rolled HTTP readers already exist in this repo — core/sweep.mjs's
+ * Three hand-rolled HTTP readers already exist in this repo — ics.mjs's
  * `fetchIcsText`, core/server.mjs's calendar probe, core/doctor.mjs's redirect
  * follower — and each carries its own copy of the same paragraph: that
  * `redirect: 'follow'` means twenty hops on undici, and that a measured
@@ -20,8 +20,8 @@
  * and the sentence read as enforcement while nothing enforced it. It exists
  * now, with exactly two exemptions, both named in it — this file, and
  * `ics.mjs`, whose `fetchIcsText` predates the transport and hand-rolls the
- * same one-hop redirect rule, origin-scoped credentials, timeout and byte cap.
- * That one is duplication rather than a hole, and it is on the list to migrate.
+ * same one-hop redirect rule, origin-scoped credentials and timeout (its body
+ * cap is this file's `readCapped`). That one is duplication rather than a hole, and it is on the list to migrate.
  *
  * Everything below is enforcement, not convenience:
  *
@@ -167,13 +167,13 @@ function sleep(ms, signal) {
 /**
  * Read a response body with a hard ceiling, off the stream.
  *
- * `res.text()` then `text.length > cap` — which is what fetchIcsText does — has
- * already bought the whole body by the time it decides it was too big. That is
- * fine for a calendar the user chose and pointed at; it is not fine for nine
- * vendors, one of which will one day answer a paginated request with something
- * enormous. The reader stops asking for chunks the moment the cap is passed.
+ * `res.text()` then `text.length > cap` has already bought the whole body by
+ * the time it decides it was too big, and a feed with no Content-Length that
+ * never ends is never too big until memory runs out. The reader stops asking for
+ * chunks the moment the cap is passed. Exported for `fetchIcsText`, which keeps
+ * its own request (see ics.mjs) but has no reason to keep its own body reader.
  */
-async function readCapped(res, maxBytes, describe) {
+export async function readCapped(res, maxBytes, describe) {
   if (!res.body || typeof res.body.getReader !== 'function') {
     const text = await res.text();
     if (Buffer.byteLength(text) > maxBytes) {

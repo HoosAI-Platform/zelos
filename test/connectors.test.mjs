@@ -1093,6 +1093,34 @@ test("the sweep's .ics reader holds one deadline across a redirect, not one per 
   assert.ok(elapsed < 800, `one 600ms deadline should cover both hops, took ${elapsed}ms`);
 });
 
+test("the sweep's .ics reader refuses an endless feed at its 8 MB cap, off the stream", async (t) => {
+  /* It used to `res.text()` and only then compare the length, so a feed with no
+     Content-Length that never ends was read until the deadline, all of it held
+     in memory. The server below writes until the client hangs up and counts
+     what it managed to send; the reader must stop near the cap. */
+  const MiB = 1024 * 1024;
+  let sent = 0;
+  const home = await feedServer(t, {
+    handler: (req, res) => {
+      res.writeHead(200, { 'content-type': 'text/calendar' });
+      const chunk = Buffer.from('BEGIN:VCALENDAR\r\n'.padEnd(64 * 1024, 'X'));
+      const pump = () => {
+        while (!res.destroyed && sent < 64 * MiB) {
+          sent += chunk.length;
+          if (!res.write(chunk)) { res.once('drain', pump); return; }
+        }
+        res.end();
+      };
+      res.on('close', () => res.removeAllListeners('drain'));
+      pump();
+    },
+  });
+  await assert.rejects(() => fetchIcsText(`${home.origin}/cal.ics`, { timeoutMs: 15_000 }),
+    /calendar at 127\.0\.0\.1:\d+ returned more than 8388608 bytes/);
+  // The cap plus what sat in socket buffers when the reader let go; nowhere near 64 MiB.
+  assert.ok(sent < 24 * MiB, `the server got ${(sent / MiB).toFixed(1)} MiB out before the reader stopped`);
+});
+
 test('a body larger than the cap is refused off the stream, not after buying it', async (t) => {
   const home = await feedServer(t, {
     handler: (req, res) => {
