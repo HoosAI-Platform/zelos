@@ -1149,14 +1149,22 @@ function checkUnknownSources(cfg) {
  */
 export async function diagnose(options = {}) {
   const home = homeDirPath();
-  assertNoMaintenance(home);
+  /* The folder is looked at before anything touches it: the maintenance check
+     reads a file inside it (and threw ENOTDIR on a home that is a file), and
+     the lease and paths() below create things in it. A home that is missing
+     or unusable is reported, and nothing else is run — with no folder there
+     are no settings to check, and the report says how to make one (TT-3484). */
   const homeCheck = checkHome(home);
-  if (homeCheck.status === 'fail') {
+  // (A caller that hands doctor its config has something to check without a
+  // folder, and is let through — only the tests do; `zelos doctor` passes none.)
+  if (homeCheck.status === 'fail' || (!fs.existsSync(home) && !options.config)) {
     const checks = [checkNode(), homeCheck];
     const counts = { pass: 0, warn: 0, fail: 0, skip: 0 };
     for (const item of checks) counts[item.status]++;
-    return { ok: false, ready: false, status: 'fail', checks, counts, home, node: process.versions.node, ranAt: new Date().toISOString(), ms: 0 };
+    const failed = counts.fail > 0;
+    return { ok: !failed, ready: false, status: failed ? 'fail' : 'warn', checks, counts, home, node: process.versions.node, ranAt: new Date().toISOString(), ms: 0 };
   }
+  assertNoMaintenance(home);
   // Doctor opens SQLite directly and can refresh OAuth credentials while
   // testing a mailbox. Its whole diagnostic lifetime must exclude restore.
   const lease = registerDataConnection(path.join(home, 'zelos.db'));
@@ -1182,11 +1190,32 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
   let loadError = null;
   let configFile = path.join(home, 'config.json');
   try {
+    /* Parsed here, read-only, before loadConfig: that call moves an
+       unparseable config.json aside and carries on with the defaults, so a
+       hand-broken file was renamed by the check meant to report it, and then
+       reported as "No settings file has been written yet… Nothing to do",
+       with exit 0 (TT-3484). */
+    if (!cfg) {
+      let text = null;
+      try { text = fs.readFileSync(configFile, 'utf8'); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
+      if (text !== null) {
+        let parsed;
+        try { parsed = JSON.parse(text); } catch (err) { throw new Error(`config.json is not valid JSON (${err.message})`); }
+        // loadConfig reads anything but an object as {} without a word, so
+        // `[]` or `"x"` would throw every setting away and pass as "valid".
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error(`config.json is not a JSON object (it holds ${parsed === null ? 'null' : Array.isArray(parsed) ? 'a list' : `a ${typeof parsed}`})`);
+        }
+      }
+    }
     const where = paths();
     configFile = where.configFile;
     if (!cfg) cfg = loadConfig();
   } catch (err) {
     loadError = errorText(err);
+    // Back to what the caller gave (usually nothing), so the AI and mail
+    // checks below are skipped rather than run against a half-read config.
+    cfg = config;
   }
   checks.push(checkConfig(cfg, configFile, loadError));
 

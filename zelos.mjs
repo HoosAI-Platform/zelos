@@ -666,8 +666,16 @@ export async function main(argv = process.argv.slice(2)) {
     assertRuntimeSupported();
   }
 
-  // Before loadConfig can repair a malformed file, and before doctor/MCP
-  // can touch a credential store belonging to a restore in progress.
+  /* Doctor goes first, untouched by what follows. paths() below creates the
+     home, chmods it to 0700 and makes logs/ and cache/ — so a missing or
+     world-readable home was repaired, then reported as fine, and a home that
+     is a file threw a stack trace instead of doctor's sentence (QA,
+     2026-10-10, TT-3484). Doctor takes its own maintenance check and data
+     lease (core/doctor.mjs diagnose), after it has looked. */
+  if (flags.command === 'doctor') return commandDoctor(flags);
+
+  // Before loadConfig can repair a malformed file, and before MCP can touch a
+  // credential store belonging to a restore in progress.
   const { assertNoMaintenance, registerDataConnection } = await import('./core/data-lease.mjs');
   const { paths: dataPaths } = await import('./core/config.mjs');
   assertNoMaintenance(dataPaths().home);
@@ -676,7 +684,6 @@ export async function main(argv = process.argv.slice(2)) {
 }
 
 async function runWithData(flags) {
-  if (flags.command === 'doctor') return commandDoctor(flags);
   if (flags.command === 'sweep') return commandSweep(flags);
   if (flags.command === 'mcp') return commandMcp(flags);
 
