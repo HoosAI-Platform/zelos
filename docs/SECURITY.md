@@ -515,6 +515,11 @@ This is a real switch, not a label.
   titles, times, places, organisers and attendees still go. This holds for the
   sweep and for Ask alike.
 
+`privacy.maxItemsPerSweep` (default 150) caps how many emails, events and
+notes a check sends, and how many sources Ask grounds an answer on (never more
+than 12 there). The board's own items, which a check sends so the model can
+carry them forward, are not counted against it.
+
 A privacy value that is present but not usable — a blank or `null` cap, a
 `sendBodies` that is not `true` or `false`, a `privacy` section that is not an
 object — is read as the most private setting it allows (no message bodies and
