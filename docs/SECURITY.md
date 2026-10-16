@@ -508,7 +508,10 @@ This is a real switch, not a label.
   to `privacy.bodyChars` characters (default 4000).
 - `sendBodies: false` — the model receives **headers and the snippet only**:
   sender, recipients, subject, date, and the short plain-text preview stored in
-  the database. Full bodies are never placed in the prompt.
+  the database. Full bodies are never placed in the prompt, and neither are
+  calendar event descriptions, which are free text somebody wrote. Event
+  titles, times, places, organisers and attendees still go. This holds for the
+  sweep and for Ask alike.
 
 What it does **not** change: subjects, sender names and recipient addresses are
 sent either way, because without them there is nothing to reason about. If you
