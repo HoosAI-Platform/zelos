@@ -5763,3 +5763,56 @@ test('Your data counts what Zelos is holding, and stands unchanged when the rout
   assert.match(onScreen(bare), /Your board and saved history live in one folder on this computer\./);
   assert.doesNotMatch(onScreen(bare), /on disk/, 'a panel with no answer must not claim a size');
 });
+
+test('the AI panel and the engine agree on which addresses need no key (TT-3449)', async () => {
+  /* QA, 2026-10-10: the page's own check was a regex for 127.0.0.1, localhost
+     and ::1, narrower than the engine's isLocalAddress, so a runtime on the
+     local network could not be saved keyless. The page now carries a copy;
+     this is what keeps the copy honest. */
+  const { isLocalAddress: engine } = await import('../core/llm.mjs');
+  const page = await import(fileUrl(UI, 'lib/local-address.js'));
+  const addresses = [
+    'http://127.0.0.1:11434/v1', 'http://localhost:1234', 'http://[::1]:8080', 'http://127.0.0.2',
+    'http://192.168.1.40:8000/v1', 'http://10.0.0.5', 'http://172.16.0.1', 'http://172.31.255.255', 'http://172.32.0.1',
+    'http://169.254.10.10', 'http://gpu-box.local:8000', 'http://studio.localhost', 'http://[fd12:3456::1]:8000',
+    'http://[fe80::1]', 'http://[::ffff:192.168.1.2]', 'http://[2001:db8::1]', 'https://api.openai.com/v1',
+    'https://api.anthropic.com', 'http://8.8.8.8', 'localhost:11434', '192.168.0.9:8000', '', 'not a url',
+  ];
+  for (const address of addresses) {
+    assert.equal(page.isLocalAddress(address), engine(address), `the page and the engine disagree about ${JSON.stringify(address)}`);
+  }
+  // The case from the ticket, and the badge it gets.
+  assert.equal(page.isLocalAddress('http://192.168.1.40:8000/v1'), true);
+  assert.equal(page.isThisMachine('http://192.168.1.40:8000/v1'), false, 'a LAN box is not "on this machine"');
+  assert.equal(page.isThisMachine('http://127.0.0.1:11434'), true);
+  assert.equal(page.isThisMachine('http://[::1]:8080'), true);
+  for (const address of ['http://0.0.0.0:8000', 'http://[::ffff:127.0.0.1]', 'http://[::ffff:7f00:1]']) {
+    assert.equal(page.isThisMachine(address), true, `${address} is this machine`);
+  }
+
+  // And the panel asks this module, not a rule of its own.
+  const src = fs.readFileSync(path.join(UI, 'views', 'settings.js'), 'utf8');
+  assert.match(src, /from '\.\.\/lib\/local-address\.js'/);
+  assert.match(src, /const isLocal = \(\) => isLocalAddress\(/);
+});
+
+test('a model server on the local network gets the "on your network" badge and an optional key box (TT-3449)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = {
+    identity: {}, mail: [], calendars: [], sources: [],
+    model: { protocol: 'openai', baseUrl: 'http://192.168.1.40:8000/v1', model: 'qwen', label: 'vLLM' },
+  };
+  store.state.health = { model: { configured: true } };
+  store.state.configErrors = [];
+  store.state.modelKeyStored = false;
+  const view = settings.renderSettings({ sub: 'model', navigate() {}, rerender() {} });
+  await settle();
+  const seen = anywhere(view);
+  assert.match(seen, /on your network/, 'a LAN runtime is not marked as local');
+  // A runtime started with --api-key must still be able to take one.
+  assert.match(seen, /API key \(optional\)/, 'the key box is hidden for a local address');
+});
