@@ -1189,6 +1189,16 @@ test('action items survive whether the vendor sends a string or a list', () => {
   assert.deepEqual(actionItems(null), []);
 });
 
+test('REGRESSION: a `**Name**` speaker heading keeps both of its asterisks', () => {
+  /* The bullet strip read the heading's first `*` as a list bullet, so the AI
+     and the stored body got `*Dana Vance**` — the comment above actionItems()
+     promises the headings are kept. */
+  assert.deepEqual(actionItems({ action_items: '**Dana Vance**\n* Send the SOV\n*Book the crane\n- **Nemo Hale** to sign' }),
+    ['**Dana Vance**', 'Send the SOV', 'Book the crane', '**Nemo Hale** to sign']);
+  assert.deepEqual(actionItems({ action_items: ['  **Dana Vance**  ', '* Send the SOV'] }),
+    ['**Dana Vance**', 'Send the SOV']);
+});
+
 test('attendees fold across both lists the vendor sends, on the address', () => {
   assert.deepEqual(attendeesOf(MEETING_FULL), [
     { name: 'Dana Vance', email: 'dana@vance.example' },
