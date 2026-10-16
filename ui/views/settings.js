@@ -3103,7 +3103,7 @@ function privacyPanel() {
     checkbox('Let the AI read the full text of your emails (recommended — it does a better job)', {
       checked: sendBodies,
       onChange: (v) => { sendBodies = v; },
-      hint: 'Switched off, the AI sees only who wrote, the subject, and the first couple of lines. It will be worse at judging what matters, and it will say less about why.',
+      hint: 'Switched off, the AI sees only who wrote, the subject, and the first couple of lines, and none of the notes on your calendar events. It will be worse at judging what matters, and it will say less about why.',
     }),
     fold('Advanced', [
       el('p', { class: 'quiet-note', text: 'There is no telemetry, analytics or remote font. Reading and AI use your configured services; update checks contact only the official GitHub release, without your data. These two numbers cap what each AI request carries.' }),

@@ -219,7 +219,7 @@ Ask page can outspend a day of sweeps.
 On a normal inbox with a mid-priced model the sweeps are cents a day, not
 dollars. If you want it cheaper, turn
 **Send message bodies** off in Settings → Privacy: Zelos will then send only
-headers and short snippets. That is a genuine change in what leaves your
+headers and short snippets, and no calendar event notes. That is a genuine change in what leaves your
 machine, and the board gets noticeably less sharp — the app says so honestly
 rather than pretending otherwise.
 

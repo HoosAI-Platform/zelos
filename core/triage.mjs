@@ -934,7 +934,7 @@ function applyItemCap(counts, maxItems) {
  *
  * `privacy.sendBodies:false` is honoured literally: no message body text is
  * placed in the prompt at all, only headers and the stored ≤240-character
- * snippet, and event descriptions are held to the same length.
+ * snippet, and event descriptions are left out entirely.
  */
 export function buildSweepPrompt({
   identity = {},

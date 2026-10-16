@@ -1063,6 +1063,51 @@ test('Ask scrubs titles and subjects as it scrubs what is under them', async (t)
   assert.match(prompt, /\[template marker removed\]/);
 });
 
+test('Ask keeps event descriptions out of the prompt with "Send message bodies" off', async (t) => {
+  /* QA, 2026-10-10 (TT-3416): the sweep treats a description as body content
+     and drops it with sendBodies off; Ask sent it anyway. */
+  const NOTES = 'ZZ-DESCRIPTION-DOOR-CODE-4417-ZZ';
+  const BODY = 'ZZ-MESSAGE-BODY-ROUTING-ZZ';
+  async function askWith(sendBodies) {
+    const upstream = await startMockUpstream(t);
+    const ctx = await startServer(t, {
+      config: baseConfig({
+        model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' },
+        privacy: { maxItemsPerSweep: 150, sendBodies, bodyChars: 4000 },
+      }),
+    });
+    db.upsertEvent(ctx.db, {
+      calendarId: 'c_1', uid: 'site-visit-1', startsAt: '2026-08-11T14:00:00-04:00',
+      title: 'Site visit at the warehouse', location: 'Dock 4', description: `Gate notes ${NOTES}`,
+    });
+    db.upsertMessage(ctx.db, {
+      sourceId: 'm_1', uid: 3, messageId: '<warehouse@test>',
+      from: { name: 'Marcus', email: 'marcus@example.com' },
+      subject: 'Warehouse site visit', date: '2026-08-10T09:00:00-04:00',
+      snippet: 'See you at the warehouse.', text: `See you at the warehouse. ${BODY}`, folder: 'INBOX',
+    });
+    const response = await fetch(`${ctx.base}/api/ask`, {
+      method: 'POST',
+      headers: { 'X-Zelos-Token': ctx.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'When is the warehouse site visit?' }),
+    });
+    await readStream(response, null, { until: (f) => f.startsWith('event: done') });
+    const sent = upstream.received.find((r) => r.url.startsWith('/chat/completions'));
+    assert.ok(sent, 'Ask never reached the model');
+    return sent.body.messages.map((m) => m.content).join('\n');
+  }
+
+  const on = await askWith(true);
+  assert.ok(on.includes(NOTES), 'with bodies on, the description should be in the grounding, or this test proves nothing');
+  assert.ok(on.includes(BODY), 'with bodies on, the message body should be in the grounding, or this test proves nothing');
+
+  const off = await askWith(false);
+  assert.ok(!off.includes(NOTES), 'an event description reached the model with "Send message bodies" off');
+  assert.ok(!off.includes(BODY), 'a message body reached the model with "Send message bodies" off');
+  assert.match(off, /Site visit at the warehouse/, 'the event itself should still be in the grounding');
+  assert.match(off, /Dock 4/, 'the event\'s place is a header and should still be sent');
+});
+
 test('/api/ask streams a grounded answer and names its sources', async (t) => {
   const upstream = await startMockUpstream(t);
   const ctx = await startServer(t, {

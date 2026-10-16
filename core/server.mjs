@@ -2384,13 +2384,17 @@ function askContext(db, question, privacy) {
       title = row.subject || '(no subject)';
       facts.push(`from: ${row.from_name || ''} <${row.from_email || ''}>`.trim());
       facts.push(`sent: ${row.sent_at || 'unknown'}`);
-      facts.push(privacy.sendBodies ? cap(row.body || row.snippet, privacy.bodyChars) : cap(row.snippet, 240));
+      facts.push(privacy.sendBodies !== false ? cap(row.body || row.snippet, privacy.bodyChars) : cap(row.snippet, 240));
     } else if (hit.kind === 'event') {
       title = row.title || '(untitled event)';
       facts.push(`when: ${row.starts_at || 'unknown'}${row.ends_at ? ` to ${row.ends_at}` : ''}`);
       if (row.location) facts.push(`where: ${row.location}`);
       if (row.organizer) facts.push(`organiser: ${row.organizer}`);
-      facts.push(cap(row.description, ASK_CONTEXT_CHARS));
+      /* A description is free text somebody wrote, so it is body content, as
+         the sweep treats it (triage.mjs renderEvent): with "Send message
+         bodies" off it does not travel at all. Ask sent it anyway (QA,
+         2026-10-10, TT-3416). */
+      if (privacy.sendBodies !== false) facts.push(cap(row.description, ASK_CONTEXT_CHARS));
     } else if (hit.kind === 'item') {
       title = row.headline || '(no headline)';
       facts.push(`bucket: ${row.bucket}`, `state: ${row.state}`, cap(row.why, ASK_CONTEXT_CHARS));
