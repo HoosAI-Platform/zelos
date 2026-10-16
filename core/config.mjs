@@ -175,6 +175,9 @@ export const SOURCE_DEFAULTS = deepFreeze({
  */
 export const PRIVACY_RANGES = deepFreeze({ bodyChars: [200, 100_000], maxItemsPerSweep: [1, 1000] });
 
+/** The range validateConfig holds sweep.intervalMinutes to; Settings → Schedule keeps a copy (TT-3489). */
+export const SWEEP_INTERVAL_RANGE = deepFreeze([5, 1440]);
+
 /** The most private reading of the privacy settings: what an unusable value means. */
 export const PRIVACY_CLOSED = deepFreeze({ sendBodies: false, bodyChars: 0, maxItemsPerSweep: 1 });
 
@@ -892,7 +895,8 @@ export function validateConfig(cfg) {
   const s = cfg.sweep;
   if (!isPlainObject(s)) errors.push({ path: 'sweep', message: 'must be an object' });
   else {
-    if (!isInt(s.intervalMinutes, 5, 1440)) errors.push({ path: 'sweep.intervalMinutes', message: 'must be an integer between 5 and 1440' });
+    const [everyMin, everyMax] = SWEEP_INTERVAL_RANGE;
+    if (!isInt(s.intervalMinutes, everyMin, everyMax)) errors.push({ path: 'sweep.intervalMinutes', message: `must be an integer between ${everyMin} and ${everyMax}` });
     if (!Array.isArray(s.activeHours) || s.activeHours.length !== 2 || !s.activeHours.every((h) => isInt(h, 0, 23))) {
       errors.push({ path: 'sweep.activeHours', message: 'must be [startHour, endHour] with each 0-23' });
     } else if (s.activeHours[0] >= s.activeHours[1]) {
