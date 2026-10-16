@@ -5816,3 +5816,116 @@ test('a model server on the local network gets the "on your network" badge and a
   // A runtime started with --api-key must still be able to take one.
   assert.match(seen, /API key \(optional\)/, 'the key box is hidden for a local address');
 });
+
+test('"Custom (OpenAI-compatible)" exists, and an address typed under Advanced is saved as one (TT-3450)', async (t) => {
+  /* QA, 2026-10-10: docs/README.md told people to pick a choice that did not
+     exist; an address typed under Advanced on a fresh home went out with the
+     Anthropic protocol; the workaround saved an unrelated brand's name. Run
+     with the real presets, so the fresh home's Claude card is restored. */
+  const { PRESETS } = await import('../core/llm.mjs');
+  async function panel({ presets = PRESETS } = {}) {
+    withPlainDom(t);
+    const calls = [];
+    globalThis.fetch = plainFetch({ calls, presets });
+    t.after(() => { delete globalThis.fetch; });
+    const store = await import(fileUrl(UI, 'lib/store.js'));
+    const settings = await import(fileUrl(UI, 'views/settings.js'));
+    store.state.config = {
+      identity: {}, mail: [], calendars: [], sources: [],
+      model: { protocol: 'anthropic', label: 'Claude', baseUrl: 'https://api.anthropic.com', model: '' },
+    };
+    store.state.health = { model: { configured: false } };
+    store.state.configErrors = [];
+    const view = settings.renderSettings({ sub: 'model', navigate() {}, rerender() {} });
+    await settle();
+    const inputs = () => plainWalk(view).filter((n) => n.tag === 'input' && (n.attributes.placeholder || '').match(/^https:|model id/));
+    const protocol = () => plainWalk(view).find((n) => n.tag === 'select' && plainWalk(n).some((o) => o.tag === 'option' && o.value === 'openai'));
+    const save = async () => {
+      findButton(view, 'Save').fire('click');
+      await settle();
+      return calls.filter((c) => c.method === 'PUT' && c.path === '/api/config').at(-1)?.body?.model;
+    };
+    return { view, inputs, protocol, save };
+  }
+
+  // 1. The ticket's own case: a fresh home, an address typed under Advanced.
+  {
+    const { inputs, save } = await panel();
+    const [base, model] = inputs();
+    base.value = 'http://192.168.1.5:8000/v1';
+    base.fire('input');
+    base.fire('change');
+    await settle();
+    const [, model2] = inputs();
+    (model2 || model).value = 'qwen2.5';
+    (model2 || model).fire('input');
+    const saved = await save();
+    assert.ok(saved, 'case 1 saved nothing');
+    assert.equal(saved.protocol, 'openai', 'an OpenAI-compatible address was saved to be spoken to as Anthropic');
+    assert.equal(saved.label, 'Custom (OpenAI-compatible)', 'the Claude card\'s name was saved for a LAN server');
+  }
+
+  // 2. The choice itself, from More choices.
+  {
+    const { view, inputs, protocol, save } = await panel();
+    const custom = findButtons(view, /^Custom \(OpenAI-compatible\)/)[0];
+    assert.ok(custom, 'the choice docs/README.md names does not exist');
+    custom.fire('click');
+    await settle();
+    assert.equal(protocol().value, 'openai');
+    const [base, model] = inputs();
+    base.value = 'http://127.0.0.1:8080/v1';
+    base.fire('input');
+    model.value = 'qwen2.5';
+    model.fire('input');
+    const saved = await save();
+    assert.ok(saved, 'case 2 saved nothing');
+    assert.deepEqual([saved.protocol, saved.label, saved.baseUrl], ['openai', 'Custom (OpenAI-compatible)', 'http://127.0.0.1:8080/v1']);
+  }
+
+  // 3. The picker is wired: moving it renames a brand card's choice too. (A
+  // local address, so Save does not stop to ask for a key.)
+  {
+    const { inputs, protocol, save } = await panel();
+    const [base] = inputs();
+    base.value = 'http://127.0.0.1:9000';
+    base.fire('input');
+    const picker = protocol();
+    picker.value = 'openai';
+    picker.fire('change');
+    await settle();
+    const [, model] = inputs();
+    model.value = 'm';
+    model.fire('input');
+    const saved = await save();
+    assert.ok(saved, 'case 3 saved nothing');
+    assert.equal(saved.protocol, 'openai');
+    assert.notEqual(saved.label, 'Claude', 'a brand name was kept for a protocol that brand does not speak');
+  }
+
+  // 3b. A protocol picked on purpose is not flipped by the address after it.
+  {
+    const { inputs, protocol, save } = await panel();
+    const picker = protocol();
+    picker.value = 'anthropic';
+    picker.fire('change');
+    await settle();
+    const [base, model] = inputs();
+    base.value = 'http://127.0.0.1:4000';
+    base.fire('input');
+    base.fire('change');
+    await settle();
+    const [, model2] = inputs();
+    (model2 || model).value = 'claude-proxy';
+    (model2 || model).fire('input');
+    const saved = await save();
+    assert.ok(saved, 'case 3b saved nothing');
+    assert.equal(saved.protocol, 'anthropic', 'a protocol picked for a proxy was flipped by the address');
+  }
+
+  // 4. Offered even when the list of services cannot be loaded.
+  {
+    const { view } = await panel({ presets: undefined });
+    assert.ok(findButtons(view, /^Custom \(OpenAI-compatible\)/)[0], 'the Custom choice depends on the presets loading');
+  }
+});
