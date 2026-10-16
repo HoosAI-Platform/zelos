@@ -141,6 +141,24 @@ function stripComments(xml) {
 }
 
 /**
+ * The most of one element `textOf` will read, in characters: mime.mjs's
+ * MAX_HTML_CHARS, applied here as well because the XML-layer decode below runs
+ * before `htmlToText` gets the chance to cap its input.
+ */
+const MAX_TEXT_CHARS = 512 * 1024;
+
+/**
+ * A `<` that does not open a complete tag, as `&lt;`.
+ *
+ * After the XML layer is decoded, "x&lt;y" is "x<y", and `stripTags` reads an
+ * unterminated `<y` as a tag running to the end of the input — the rest of a
+ * title gone. Escaping it again lets `htmlToText` hand it back as the character
+ * it was. Each `<` looks ahead only as far as the next `<` or `>`, so this is
+ * linear.
+ */
+const escapeStrayLt = (s) => s.replace(/<(?![A-Za-z/!?][^<>]*>)/g, '&lt;');
+
+/**
  * The text of one element, markup removed and entities decoded.
  *
  * `htmlToText` is core/sources/mime.mjs's, the same function that turns an HTML
@@ -156,7 +174,36 @@ function stripComments(xml) {
  * decoding it there would turn an escaped `&amp;lt;` into a tag that was never
  * one.
  */
-const textOf = (raw) => htmlToText(unwrapCdata(raw ?? '', decodeXmlEntities));
+function textOf(raw, type = 'html') {
+  let s = String(raw ?? '');
+  if (s.length > MAX_TEXT_CHARS) s = s.slice(0, MAX_TEXT_CHARS);
+  // Atom xhtml is real elements in the XML: they are the markup and `&lt;` in
+  // them is text, so tags come off before entities are decoded, as always.
+  if (type === 'xhtml') return htmlToText(unwrapCdata(s));
+  // Atom type="text" is the characters themselves; `&lt;b&gt;` is "<b>". They
+  // are escaped for htmlToText so it only tidies the whitespace.
+  if (type === 'text') {
+    return htmlToText(unwrapCdata(s, decodeXmlEntities).replace(/&/g, '&amp;').replace(/</g, '&lt;'));
+  }
+  return htmlToText(unwrapCdata(s, (text) => escapeStrayLt(decodeXmlEntities(text))));
+}
+
+/**
+ * How an element's text is to be read -> 'html', 'xhtml' or 'text'.
+ *
+ * Only Atom says: its `type` attribute is `text`, `html` or `xhtml` (or, on
+ * `<content>`, a media type). Everything in RSS is read as HTML, which is what
+ * its `<description>` is and the safe reading of a title. An Atom element with
+ * no `type` is text by RFC 4287, but feeds that put escaped HTML there without
+ * saying so are common, and reading those as text hands the model the markup —
+ * so only an explicit `text` is read literally.
+ */
+function textTypeOf(attrs) {
+  const type = attr(attrs, 'type').trim().toLowerCase();
+  if (type === 'xhtml' || type === 'application/xhtml+xml') return 'xhtml';
+  if (type === 'text' || type === 'text/plain') return 'text';
+  return 'html';
+}
 
 const collapse = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
@@ -240,7 +287,7 @@ function nextElement(xml, name, from) {
     if (tag.selfClosing) { pos = tag.open; continue; }
     const closer = nextCloser(xml, name, tag.open);
     if (!closer) return null;
-    return { start: tag.start, open: tag.open, close: closer.at, end: closer.end };
+    return { start: tag.start, attrsAt: tag.attrsAt, open: tag.open, close: closer.at, end: closer.end };
   }
 }
 
@@ -248,6 +295,19 @@ function nextElement(xml, name, from) {
 function first(xml, name) {
   const el = nextElement(xml, name, 0);
   return el ? xml.slice(el.open, el.close) : '';
+}
+
+/**
+ * The text of the first of `names` that has any, read as its own `type` says.
+ * `first(a) || first(b)`, keeping the attributes `first` throws away.
+ */
+function textOfFirst(xml, ...names) {
+  for (const name of names) {
+    const el = nextElement(xml, name, 0);
+    if (!el || el.close === el.open) continue;
+    return textOf(xml.slice(el.open, el.close), textTypeOf(xml.slice(el.attrsAt, el.open - 1)));
+  }
+  return '';
 }
 
 /** One attribute off a tag's attribute string. */
@@ -342,13 +402,13 @@ export function parseFeed(input) {
   // taking the first `<title>` in the document without that check picks up the
   // first article's title on a feed whose channel has none.
   const head = xml.slice(0, firstEntryAt);
-  const title = collapse(textOf(first(head, 'title')));
+  const title = collapse(textOfFirst(head, 'title'));
   const date = collapse(unwrapCdata(
     first(head, 'lastBuildDate') || first(head, 'updated') || first(head, 'pubDate') || first(head, 'date'),
   ));
 
   const entries = blocks.map((block) => ({
-    title: collapse(textOf(first(block, 'title'))),
+    title: collapse(textOfFirst(block, 'title')),
     link: linkOf(block),
     // The guid gets the same treatment as the link, and for the same reason:
     // it is usually a URL, it is the FIRST choice for messageId, and an escaped
@@ -359,9 +419,7 @@ export function parseFeed(input) {
     date: collapse(unwrapCdata(
       first(block, 'pubDate') || first(block, 'published') || first(block, 'updated') || first(block, 'date'),
     )),
-    body: textOf(
-      first(block, 'encoded') || first(block, 'content') || first(block, 'description') || first(block, 'summary'),
-    ),
+    body: textOfFirst(block, 'encoded', 'content', 'description', 'summary'),
   }));
 
   return { title, date, entries };

@@ -645,6 +645,30 @@ test('REGRESSION: entity-encoded HTML in a feed reaches the AI as text, not mark
   assert.equal(xhtml.entries[0].body, 'Cash & a mug');
 });
 
+test('decoding a feed\'s XML layer first does not cost text that only looks like markup', () => {
+  /* The other side of the fix above. Once `&lt;` is decoded, "x&lt;y" is "x<y",
+     and an unterminated `<y` used to read as a tag running to the end of the
+     field — the rest of the title gone. */
+  const rss = parseFeed('<rss><channel><title>Dev &lt; Ops</title><item><guid>g1</guid>'
+    + '<title>Why x&lt;y and more</title>'
+    + '<description>Revenue &lt;5% and before &lt;!-- not closed and after</description>'
+    + '</item></channel></rss>');
+  assert.equal(rss.title, 'Dev < Ops');
+  assert.equal(rss.entries[0].title, 'Why x<y and more');
+  assert.equal(rss.entries[0].body, 'Revenue <5% and before <!-- not closed and after');
+
+  /* Atom says how to read its text. type="text" is the characters themselves,
+     and in xhtml the elements are the markup while `&lt;` is text. */
+  const atom = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Use &lt;b&gt; for bold</title>'
+    + '<entry><id>e1</id><title type="text">Returns List&lt;T&gt;</title>'
+    + '<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Use &lt;em&gt; for <b>emphasis</b></p></div></content>'
+    + '</entry><entry><id>e2</id><summary type="text">a &amp;amp; b, &lt;i&gt;</summary></entry></feed>');
+  assert.equal(atom.title, 'Use <b> for bold');
+  assert.equal(atom.entries[0].title, 'Returns List<T>');
+  assert.equal(atom.entries[0].body, 'Use <em> for emphasis');
+  assert.equal(atom.entries[1].body, 'a &amp; b, <i>', 'text is decoded once, as XML, and never as HTML');
+});
+
 test('REGRESSION: an escaped ampersand in a link is decoded, because it is a row identity', () => {
   /* Found by pointing this connector at NASA's real feed instead of a fixture.
      Two of ten entries came back as
