@@ -127,7 +127,7 @@ export function directionOf(message, mailbox, account, identityEmail) {
  * `requireTls` is forwarded deliberately, and `?? null` rather than `|| null`,
  * because the setting is three-valued: `false` is a standing permission to talk
  * to this one host in the clear, and collapsing it into "not set" would put the
- * requirement back on a Proton Bridge the user has already excused. An account
+ * requirement back on a local bridge the user has already excused. An account
  * saved before the field existed has no value at all, which is what `null`
  * means — the client then decides from the host, as it always has.
  *

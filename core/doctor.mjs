@@ -787,6 +787,17 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
         `Zelos stopped before your password left this machine. Use the TLS port in Settings → Email — ${guess.host ? `${guess.host}:${guess.port}` : 'usually 993'} — and if this host really is a local bridge that cannot do TLS, turn requireTls off for this account.`,
       );
     }
+    // A certificate nobody vouches for. Not the network and not the password:
+    // the generic advice below would send the user looking in the wrong place.
+    if (/certificate/i.test(reason)) {
+      return check(
+        id, label, 'fail',
+        `${account.host}: ${reason}`,
+        'Zelos could not verify this server’s certificate, so it stopped before sending your password. '
+          + 'If the address in Settings → Email is right, the server’s certificate needs to be signed by an authority this computer trusts. '
+          + 'A self-made certificate is accepted only from a program on this computer, such as Proton Bridge on 127.0.0.1.',
+      );
+    }
     const authish = /auth|login|credential|password|invalid|denied|token|oauth/i.test(reason);
     /* An OAuth account gets its own sentence, and the reason is that the one
        below is actively misleading for it. "Most sign-in failures here are a

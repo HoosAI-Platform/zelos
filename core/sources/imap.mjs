@@ -549,11 +549,11 @@ function hasAttachmentParts(parts, chosen) {
  * Loopback, in every spelling a person or a provider actually writes.
  *
  * This matters because loopback is the one address where a cleartext IMAP
- * session is defensible: Proton Bridge and the other local proxies that
- * decrypt on your behalf listen on 127.0.0.1 with no TLS on purpose, and that
- * traffic never leaves the machine. `guessImapHost` returns exactly that for a
- * proton.me address. Any other host is a network, and a network has people on
- * it.
+ * session is defensible: local proxies that decrypt on your behalf listen on
+ * 127.0.0.1, and that traffic never leaves the machine. Proton Bridge is one
+ * (it does encrypt, with a certificate of its own — see `tlsOptionsFor`), and
+ * `guessImapHost` returns exactly that for a proton.me address. Any other host
+ * is a network, and a network has people on it.
  */
 export function isLoopbackHost(host) {
   const h = String(host ?? '').trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
@@ -662,13 +662,16 @@ export class ImapClient {
    */
   constructor({
     host, port, secure = true, user, pass, accessToken = '', auth = null,
-    requireTls = null, timeoutMs = 30000, logger, signal,
+    requireTls = null, timeoutMs = 30000, logger, signal, lookup = null,
   } = {}) {
     if (!host || typeof host !== 'string') throw new Error('ImapClient: host is required');
     this.host = host;
     this.secure = secure !== false;
     this.port = Number(port) || (this.secure ? 993 : 143);
-    this.requireTls = requireTls === null || requireTls === undefined
+    // Left to decide, the rule is re-read against the address the socket
+    // reached; see `#assertEncrypted`.
+    this.tlsDecidedByHost = requireTls === null || requireTls === undefined;
+    this.requireTls = this.tlsDecidedByHost
       ? tlsRequiredByDefault(this.host)
       : requireTls !== false;
     this.user = user == null ? '' : String(user);
@@ -676,6 +679,9 @@ export class ImapClient {
     this.accessToken = accessToken == null ? '' : String(accessToken);
     this.auth = resolveAuthMethod(auth, this.accessToken);
     this.timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 30000;
+    // A DNS seam for tests: it lets a test give a non-loopback NAME a loopback
+    // address, which is how the certificate rule below is proved to read both.
+    this.lookup = typeof lookup === 'function' ? lookup : null;
     this.mailbox = null;
     const base = logger || defaultLog;
     this.log = typeof base.child === 'function' ? base.child('[imap]') : base;
@@ -746,8 +752,15 @@ export class ImapClient {
    * authenticate has nothing left to do on it.
    */
   #assertEncrypted() {
-    if (!this.requireTls) return;
     if (this.#socket && this.#socket.encrypted === true) return;
+    // Loopback by NAME is not enough when the account left this to Zelos:
+    // `bridge.localhost` may be resolved by DNS, and a hostile network can
+    // point it anywhere and simply not offer STARTTLS. Cleartext is excused
+    // only when the address actually reached is loopback too. An explicit
+    // `requireTls: false` is the user's standing word and is left alone.
+    const required = this.requireTls
+      || (this.tlsDecidedByHost && !isLoopbackHost(this.#socket?.remoteAddress));
+    if (!required) return;
     const err = this.#error(
       'this connection is still in the clear and the server never offered STARTTLS, '
       + 'so your password was not sent. Connect with TLS (port 993 usually), or, if a '
@@ -770,9 +783,16 @@ export class ImapClient {
       // an 'error' between connect and #attach would be thrown, not handled.
       const onError = (err) => finish(reject, this.#error(`connection failed — ${err.message}`, err));
 
+      const where = { host: this.host, port: this.port, ...(this.lookup ? { lookup: this.lookup } : {}) };
       const socket = useTls
-        ? tls.connect({ host: this.host, port: this.port, ...sniFor(this.host) }, () => finish(resolve, socket))
-        : net.connect({ host: this.host, port: this.port }, () => finish(resolve, socket));
+        ? tls.connect({ ...where, ...tlsOptionsFor(this.host) }, () => {
+          const refused = this.#refuseUnverified(socket);
+          if (refused) {
+            socket.destroy();
+            finish(reject, this.#error(`connection failed — ${refused}`));
+          } else finish(resolve, socket);
+        })
+        : net.connect(where, () => finish(resolve, socket));
 
       const timer = setTimeout(() => {
         socket.destroy();
@@ -807,6 +827,20 @@ export class ImapClient {
     return socket;
   }
 
+  /**
+   * The second half of the loopback certificate rule (see `tlsOptionsFor`): a
+   * certificate nobody vouches for is accepted only when the address this
+   * socket actually reached is loopback too. The name alone is not enough —
+   * `bridge.localhost` is loopback by name, but the system resolver may well
+   * ask DNS about it, and a hostile network can answer with anywhere at all.
+   * -> null when the session may go on, or the reason it may not.
+   */
+  #refuseUnverified(socket) {
+    if (socket.authorized) return null;
+    if (isLoopbackHost(socket.remoteAddress)) return null;
+    return `the server's certificate could not be verified (${socket.authorizationError || 'unknown reason'})`;
+  }
+
   async #startTls() {
     await this.#exec('STARTTLS');
     const plain = this.#detach();
@@ -822,7 +856,13 @@ export class ImapClient {
         settled = true;
         fn(arg);
       };
-      const socket = tls.connect({ socket: plain, ...sniFor(this.host) }, () => settle(resolve, socket));
+      const socket = tls.connect({ socket: plain, ...tlsOptionsFor(this.host) }, () => {
+        const refused = this.#refuseUnverified(socket);
+        if (refused) {
+          socket.destroy();
+          settle(reject, this.#error(`STARTTLS handshake failed — ${refused}`));
+        } else settle(resolve, socket);
+      });
       socket.once('error', (err) => settle(reject, this.#error(`STARTTLS handshake failed — ${err.message}`, err)));
       socket.once('close', () => settle(reject, this.#error('STARTTLS handshake failed — the server closed the connection')));
     });
@@ -1554,6 +1594,28 @@ function withoutCredentials(message, user, pass, accessToken = '') {
  */
 function sniFor(host) {
   return net.isIP(host) ? {} : { servername: host };
+}
+
+/**
+ * The options for a TLS handshake with `host`.
+ *
+ * Proton Bridge encrypts — STARTTLS on 127.0.0.1:1143 by default, or TLS from
+ * the first byte if the user switches it — with a certificate it makes for
+ * itself, which nothing on this machine vouches for (Node does not read the
+ * Keychain Bridge offers to install it in). Verifying it failed every Bridge
+ * account, whatever was chosen: the client upgrades whenever STARTTLS is
+ * offered, so there was no setting to get past it.
+ *
+ * So on loopback the certificate is not verified. That is no weaker than the
+ * cleartext session `tlsRequiredByDefault` already allows there, and anything
+ * able to answer on 127.0.0.1 is already running on this computer. The
+ * session is still encrypted, so `requireTls` keeps meaning what it says.
+ * The name is half the rule; `#refuseUnverified` checks the address the
+ * socket really reached. Everywhere else, verification is Node's default.
+ * Nothing outside this file opens TLS with these options.
+ */
+function tlsOptionsFor(host) {
+  return { ...sniFor(host), ...(isLoopbackHost(host) ? { rejectUnauthorized: false } : {}) };
 }
 
 function quoted(value) {

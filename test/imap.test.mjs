@@ -1534,6 +1534,140 @@ test('a client takes its TLS requirement from the host, and an explicit setting 
   assert.equal(new ImapClient({ host: '127.0.0.1', secure: false, requireTls: 'false' }).requireTls, true);
 });
 
+/* ------------------------------------------------------------------ *
+ * Proton Bridge: TLS with a certificate of its own
+ * ------------------------------------------------------------------ */
+
+/* Bridge encrypts on 127.0.0.1:1143 — STARTTLS by default, TLS from the first
+   byte if switched — with a self-signed certificate. Verifying it failed every
+   Bridge account. These need a server that really speaks TLS, which
+   startMockImap does not, so this one answers just enough IMAP to log in.
+   The certificate is a test-only fixture for 127.0.0.1 and localhost. */
+const BRIDGE_TLS = {
+  key: fs.readFileSync(fileURLToPath(new URL('./fixtures/test-only-loopback-key.pem', import.meta.url))),
+  cert: fs.readFileSync(fileURLToPath(new URL('./fixtures/test-only-loopback-cert.pem', import.meta.url))),
+};
+
+async function startBridgeMock(t, { implicit = false, listenHost = '127.0.0.1', starttls = true } = {}) {
+  const tlsModule = await import('node:tls');
+  const secureContext = tlsModule.createSecureContext(BRIDGE_TLS);
+  const seen = []; // [line, encrypted]
+  const serve = (socket, encrypted) => {
+    socket.on('error', () => {});
+    let buffer = '';
+    const onData = (chunk) => {
+      buffer += chunk.toString('latin1');
+      let idx;
+      while ((idx = buffer.indexOf('\r\n')) >= 0) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        seen.push([line, encrypted]);
+        const [tag, verb = ''] = line.split(' ');
+        const word = verb.toUpperCase();
+        if (word === 'CAPABILITY') {
+          socket.write(`* CAPABILITY IMAP4rev1 ${encrypted ? 'AUTH=PLAIN' : starttls ? 'STARTTLS' : 'AUTH=PLAIN'}\r\n${tag} OK done\r\n`);
+        } else if (word === 'STARTTLS' && !encrypted) {
+          socket.removeListener('data', onData);
+          socket.write(`${tag} OK Begin TLS negotiation now\r\n`, () => {
+            serve(new tlsModule.TLSSocket(socket, { isServer: true, secureContext }), true);
+          });
+          return;
+        } else if (word === 'LOGOUT') {
+          socket.end(`* BYE\r\n${tag} OK bye\r\n`);
+        } else {
+          socket.write(`${tag} OK ${word} done\r\n`);
+        }
+      }
+    };
+    socket.on('data', onData);
+  };
+  const greet = (socket, encrypted) => {
+    socket.write('* OK Proton Bridge (mock) ready\r\n');
+    serve(socket, encrypted);
+  };
+  const server = implicit
+    ? tlsModule.createServer({ ...BRIDGE_TLS }, (socket) => greet(socket, true))
+    : net.createServer((socket) => greet(socket, false));
+  await new Promise((resolve) => server.listen(0, listenHost, resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  return { port: server.address().port, seen };
+}
+
+test('REGRESSION: Proton Bridge\'s own certificate is accepted on loopback, by STARTTLS and by TLS', async (t) => {
+  for (const implicit of [false, true]) {
+    const { port, seen } = await startBridgeMock(t, { implicit });
+    const client = new ImapClient({
+      host: '127.0.0.1', port, secure: implicit, user: 'nemo@proton.me', pass: 'bridge-pass', timeoutMs: 5000,
+    });
+    try {
+      await client.connect();
+      await client.login();
+    } finally {
+      await client.close();
+    }
+    const login = seen.find(([line]) => /LOGIN|AUTHENTICATE/i.test(line));
+    assert.ok(login, `${implicit ? 'TLS' : 'STARTTLS'}: the client never logged in`);
+    assert.equal(login[1], true, 'credentials crossed a socket that was not encrypted');
+  }
+});
+
+test('the loopback certificate rule stays on loopback: any other name is still verified', async (t) => {
+  /* The name is not loopback, so the certificate is checked as everywhere else —
+     even though, through `lookup`, the server really is on this machine. */
+  for (const implicit of [false, true]) {
+    const { port, seen } = await startBridgeMock(t, { implicit });
+    const client = new ImapClient({
+      host: 'imap.example.test', port, secure: implicit, user: 'u', pass: 'p', timeoutMs: 5000,
+      lookup: (hostname, options, callback) => (options?.all
+        ? callback(null, [{ address: '127.0.0.1', family: 4 }])
+        : callback(null, '127.0.0.1', 4)),
+    });
+    await assert.rejects(() => client.connect(), /certificate/);
+    await client.close();
+    assert.ok(!seen.some(([line]) => /LOGIN|AUTHENTICATE/i.test(line)), 'credentials were sent');
+  }
+});
+
+test('a loopback NAME that reaches another address does not get the loopback certificate rule',
+  { skip: process.platform === 'win32' ? 'binding a LAN address on Windows CI is not reliable' : false },
+  async (t) => {
+    /* `bridge.localhost` is loopback by name, but the system resolver may ask
+       DNS about it, and a hostile network can answer with anywhere. What counts
+       is the address the socket actually reached. */
+    const lan = Object.values(os.networkInterfaces()).flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
+    if (!lan) { t.skip('no non-loopback IPv4 address on this machine'); return; }
+    for (const implicit of [false, true]) {
+      const { port, seen } = await startBridgeMock(t, { implicit, listenHost: lan });
+      const client = new ImapClient({
+        host: 'bridge.localhost', port, secure: implicit, user: 'u', pass: 'p', timeoutMs: 5000,
+        lookup: (hostname, options, callback) => (options?.all
+          ? callback(null, [{ address: lan, family: 4 }])
+          : callback(null, lan, 4)),
+      });
+      await assert.rejects(() => client.connect(), /certificate could not be verified/);
+      await client.close();
+      assert.ok(!seen.some(([line]) => /LOGIN|AUTHENTICATE/i.test(line)), 'credentials were sent');
+    }
+
+    /* And the cleartext allowance: the same address can simply not offer
+       STARTTLS. Left to decide, Zelos refuses; an explicit `requireTls: false`
+       is the user's word and still stands. */
+    const toLan = (hostname, options, callback) => (options?.all
+      ? callback(null, [{ address: lan, family: 4 }])
+      : callback(null, lan, 4));
+    const { port, seen } = await startBridgeMock(t, { listenHost: lan, starttls: false });
+    const decided = new ImapClient({ host: 'bridge.localhost', port, secure: false, user: 'u', pass: 'p', timeoutMs: 5000, lookup: toLan });
+    await assert.rejects(() => decided.connect(), /still in the clear/);
+    await decided.close();
+    assert.ok(!seen.some(([line]) => /LOGIN|AUTHENTICATE/i.test(line)), 'a password crossed the network in the clear');
+    const excused = new ImapClient({
+      host: 'bridge.localhost', port, secure: false, user: 'u', pass: 'p', timeoutMs: 5000, lookup: toLan, requireTls: false,
+    });
+    await excused.connect();
+    await excused.close();
+  });
+
 test('a server that never offers STARTTLS gets no credentials, and says why', async () => {
   await withServer(
     {
