@@ -295,6 +295,34 @@ test('an unchanged export is not read again at all, only stat-ed (TT-3443)', asy
   }
 });
 
+test('a folder with nothing new to read is a quiet read, not a failure (TT-3442)', async (t) => {
+  /* QA, 2026-10-10: an unchanged export adds no part, so the "nothing is
+     waiting" note fired on every sweep of a healthy folder, and the sweep
+     stores a note as a failed read. */
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-whatsapp-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const collect = (cursor) => whatsapp.collect({
+    source: { id: 's_wa', settings: { path: dir, yourName: 'Nemo Hale' } },
+    label: 'WhatsApp', cursor, timezone: 'UTC', identityEmail: '',
+    emit() {}, signal: null, log: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+
+  // An empty drop folder is a steady state too (new, or emptied after each
+  // import); doctor is where it is pointed out.
+  const empty = await collect(null);
+  assert.ok(empty.parts.every((p) => !p.note && !p.error), 'an empty folder was reported as a failed read');
+
+  fs.writeFileSync(path.join(dir, 'WhatsApp Chat with Kit Alder.txt'),
+    '[9/8/26, 9:14:02 AM] Kit Alder: Retainage schedule is posted\n');
+  const first = await collect(null);
+  assert.equal(first.parts[0].rows.length, 1);
+
+  const again = await collect(first.cursor);
+  assert.ok(again.parts.every((p) => !p.note && !p.error),
+    `an unchanged folder was reported: ${again.parts.map((p) => p.note || p.error).join('; ')}`);
+  assert.equal(again.parts.reduce((n, p) => n + p.rows.length, 0), 0);
+});
+
 test('the manifest says out loud that this is an archive, not a connection', () => {
   /* The most important line in the connector is not code. WhatsApp offers no
      way to read a personal account live, so a user who reads "WhatsApp" in a

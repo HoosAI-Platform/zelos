@@ -1240,12 +1240,14 @@ export default {
     }
 
     if (!parts.length) {
-      parts.push({
-        label: '',
-        rows: [],
-        error: null,
-        note: listing.folder ? `No .txt or .zip export is waiting in ${target}.` : null,
-      });
+      /* A successful read of nothing, never a note: the sweep stores a note
+         as a failed read. Every unchanged export adds no part, so "No export
+         is waiting" fired on every sweep of a healthy folder (QA, 2026-10-10,
+         TT-3442), and an empty drop folder (a new one, or one emptied after
+         each import) is a steady state too. core/connectors/folder.mjs says
+         nothing in the same case; this source's check() still warns, when
+         somebody asks, that a folder holds no export. */
+      parts.push({ label: '', rows: [], error: null, note: null });
     }
 
     ctx.emit(`${ctx.label}: ${total} message${total === 1 ? '' : 's'} from ${fresh} export${fresh === 1 ? '' : 's'}`,
