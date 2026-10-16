@@ -35,6 +35,7 @@ import tls from 'node:tls';
 
 import { imapDate, instant } from '../time.mjs';
 import { log as defaultLog } from '../log.mjs';
+import { isLoopbackHost, tlsRequiredByDefault } from '../net.mjs';
 import { getSecret, setSecret, deleteSecret } from '../secrets.mjs';
 import { isModelKeyRef } from '../model-key.mjs';
 /* The one provider table. Google's authorization and token endpoints are
@@ -545,35 +546,14 @@ function hasAttachmentParts(parts, chosen) {
  * 5. The client
  * ================================================================== */
 
-/**
- * Loopback, in every spelling a person or a provider actually writes.
- *
- * This matters because loopback is the one address where a cleartext IMAP
- * session is defensible: Proton Bridge and the other local proxies that
- * decrypt on your behalf listen on 127.0.0.1 with no TLS on purpose, and that
- * traffic never leaves the machine. `guessImapHost` returns exactly that for a
- * proton.me address. Any other host is a network, and a network has people on
- * it.
+/*
+ * `isLoopbackHost` and `tlsRequiredByDefault` live in core/net.mjs now, beside
+ * the calendar readers' version of the same rule (QA, 2026-10-10, TT-3425):
+ * CalDAV and a protected .ics link needed the loopback test too, and importing
+ * this whole client to get it was the wrong price. They are re-exported here so
+ * core/server.mjs and every test that imports them from this file keep working.
  */
-export function isLoopbackHost(host) {
-  const h = String(host ?? '').trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
-  if (!h) return false;
-  if (h === 'localhost' || h.endsWith('.localhost')) return true;
-  if (h === '::1' || h === '0:0:0:0:0:0:0:1') return true;
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(h);
-  const v4 = mapped ? mapped[1] : h;
-  if (!/^127(?:\.\d{1,3}){3}$/.test(v4)) return false;
-  return v4.split('.').every((octet) => Number(octet) <= 255);
-}
-
-/**
- * Whether an account must prove the connection is encrypted before it hands
- * over a password, when the config has not said either way. On by default
- * everywhere except loopback — see `isLoopbackHost`.
- */
-export function tlsRequiredByDefault(host) {
-  return !isLoopbackHost(host);
-}
+export { isLoopbackHost, tlsRequiredByDefault };
 
 /**
  * Which SASL mechanism a session will use — stated, never inferred from what
@@ -1741,7 +1721,7 @@ export function normalizeClientId(clientId) {
  * what makes the tenant check above sufficient: the host cannot be moved from
  * the path, and the path cannot be moved from the tenant.
  *
- * Loopback is permitted for the same reason `isLoopbackHost` exists further up:
+ * Loopback is permitted for the same reason `isLoopbackHost` exists (core/net.mjs):
  * it is where the test rig's mock authorization server lives, and it is traffic
  * that never leaves the machine. Everything else must be the Microsoft origin,
  * spelled exactly, over https. A config that could name its own token endpoint

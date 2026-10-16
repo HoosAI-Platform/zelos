@@ -848,6 +848,39 @@ test('a calendar whose kind names no reader is still read as a subscribed .ics',
   assert.equal(listEvents(db).length, 1);
 });
 
+/**
+ * QA, 2026-10-10, TT-3425. A calendar at a non-loopback http:// address with a
+ * username stops syncing, and the reason has to be on its row, every sweep,
+ * until it is moved to https or excused. It must NOT rest: a calendar error is
+ * not an `AuthError`, and a refusal is not the server rejecting a credential —
+ * nothing was sent. Resting it would hide the one message that says what to do.
+ */
+test('a calendar password refused over http:// is an ordinary failed read with the reason on its row, and does not rest', async (t) => {
+  const realFetch = globalThis.fetch;
+  const hits = [];
+  globalThis.fetch = async (input) => { hits.push(String(input?.url ?? input)); throw new Error('stubbed: no network in this test'); };
+  t.after(() => { globalThis.fetch = realFetch; });
+
+  const db = fresh();
+  const config = baseConfig({
+    calendars: [{ id: 'c_plain', enabled: true, label: 'Home server', kind: 'caldav', url: 'http://cal.example.test/dav/', user: 'nemo', keyRef: 'calendar.c_plain' }],
+  });
+
+  for (let sweep = 0; sweep < 2; sweep += 1) {
+    const result = await runSweep({ db, config, mode: 'light', deps: { getSecret: SECRETS } });
+    const source = result.stats.sources.find((s) => s.id === 'c_plain');
+    assert.ok(source, `sweep ${sweep}: the refused calendar vanished from the run record`);
+    assert.equal(source.ok, false);
+    assert.match(source.error, /Zelos stopped before your calendar password left this machine: cal\.example\.test is a plain http:\/\/ address/,
+      `sweep ${sweep}: ${source.error}`);
+    assert.doesNotMatch(source.error, /not trying it again/, 'the refusal rested the calendar, and hid its own fix');
+    const state = JSON.parse(getKV(db, sourceStateKey('c_plain')) || '{}');
+    assert.equal(state.authBlockedUntil, undefined, 'a refusal is not a rejected credential');
+    assert.ok(!state.lastOkAt, 'a calendar that read nothing was recorded as read');
+  }
+  assert.deepEqual(hits, [], 'the password went out before the refusal');
+});
+
 test('an account with no stored password is reported, not crashed on', async () => {
   const db = fresh();
   const model = fakeModel(board([]));

@@ -295,6 +295,25 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    included. Zelos refuses *before* `LOGIN`, so a stripped connection costs you
    a sweep and never a password.
 2. **Your calendar URL** — an `.ics` feed or a CalDAV server.
+
+   A calendar that signs in — a CalDAV account, or a protected `.ics` link
+   with a username — follows the same rule, under the same name: each calendar
+   has its own `requireTls`, set in **Settings → Calendars** as "Sending the
+   password". Left unset, a username on a plain `http://` address that is not
+   loopback is refused before any connection is opened, because Basic auth is
+   the password in base64 and an `http://` request carries it readable. Set to
+   `false` it is a standing permission for that one calendar — a server on
+   your own network with no https; set to `true` it is enforced on loopback
+   too. "Signs in" means a username is set, with or without a password: an
+   empty password still sends a header naming the account. The sweep, the
+   **Test it** button and `zelos doctor` all apply it, and all say the same
+   thing: *"Zelos stopped before your calendar password left this machine:
+   ‹host› is a plain http:// address. Use its https:// address — or, if this
+   server is on your own network and has no https, set “Sending the password”
+   to “Let this one server take it unencrypted” for this calendar."* Before
+   this (QA, 2026-10-10, TT-3425) calendars had no rule at all. A calendar
+   with no username is untouched: there is nothing to protect, and a public
+   `http://` feed reads as it always did.
 3. **Your model endpoint** — the `model.baseUrl` you chose. If you point that
    at Ollama, LM Studio, llama.cpp, vLLM or LocalAI on `127.0.0.1`, then
    **nothing Zelos read leaves the machine at all**, and Zelos still works
@@ -931,7 +950,7 @@ table, are where a sign-in *creates* one:
 | `POST /api/model/key`, `DELETE /api/model/key`, `GET /api/model/key` | files, forgets or reports (`{stored}`) the key for a `baseUrl`; the server derives the ref and never echoes the value |
 | `POST /api/mail/guess` | nothing — it names a provider from the address’s domain and reads no secret. For a domain its table does not list it may send the **domain** of the address (never the address) to the system DNS resolver, for its MX and then its SRV record, and nothing else |
 | `POST /api/mail/test` | sends the mail password to the `host`/`port` **in the request**; a `model.` ref is refused |
-| `POST /api/calendar/test` | sends the calendar password to the `url` **in the request**; a `model.` ref is refused |
+| `POST /api/calendar/test` | sends the calendar password to the `url` **in the request**; a `model.` ref is refused; a username on a non-loopback `http://` address is refused before any request unless the request's `requireTls` is `false` (§ 5, item 2) |
 | `POST /api/mail/oauth` | starts a sign-in and reads no stored secret. **Microsoft** (`provider: 'microsoft'`): asks `login.microsoftonline.com` for a device code and, when you finish in your browser, stores the refresh token under the account's `keyRef`; the device code stays in this process and the page sees only the user code. **Google** (`provider: 'google'`): mints a PKCE verifier and a `state`, answers with the `accounts.google.com` URL for the page to open, and stores nothing until the callback below lands. A `clientSecret` in the body is written to the store under `oauth.google.clientSecret` before it is used and is never echoed; `GET /api/mail/oauth/:id` answers with the state of the flow and nothing credential-shaped |
 | `GET /oauth/callback` | the one route that takes no session token (section 6). Reads no stored secret; **writes** one — it trades the `code` and the PKCE verifier at `oauth2.googleapis.com` (with the client id, and the client secret when the client has one) and files the refresh token under the flow's `keyRef`. Refuses anything not from `127.0.0.1` or whose `state` does not match a pending flow, with one generic `400`. The page it returns contains no token and no address |
 

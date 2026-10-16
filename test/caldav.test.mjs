@@ -1340,3 +1340,89 @@ test('a chunked body past the size cap is cut off with "too large"', async (t) =
   assert.equal(result.ok, false);
   assert.match(result.error, /too large/);
 });
+
+/* ------------------------------------------------------------------ *
+ * The password over plain http://
+ *
+ * QA, 2026-10-10, TT-3425. `basicAuth` put the username and password on every
+ * request to the typed origin, and an account typed as `http://` sent them
+ * that way — readable — on every sweep, with nothing anywhere to stop it or say
+ * so. Mail's `requireTls` rule now applies, read off the calendar's own
+ * `requireTls`, and it is applied before the first request: these tests stub
+ * `fetch` and assert it was never called, on a `.test` host that could not be
+ * reached anyway.
+ * ------------------------------------------------------------------ */
+
+/** A `fetch` that records and refuses, so "never called" is checkable and nothing leaves. */
+function stubFetch(t) {
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ url: String(input?.url ?? input), auth: init.headers?.Authorization ?? null });
+    throw new Error('stubbed: no network in this test');
+  };
+  t.after(() => { globalThis.fetch = real; });
+  return calls;
+}
+
+test('a username on a plain http:// address is refused before any request, by every entry point', async (t) => {
+  const calls = stubFetch(t);
+  const url = 'http://cal.example.test/dav/';
+
+  for (const pass of [PASS, '', null]) {
+    // An empty password still sends `Basic nemo:` — a header naming the
+    // account — so the trigger is the username, not the pair.
+    await assert.rejects(() => discover({ url, user: USER, pass }), (err) => {
+      assert.equal(err.cleartextRefused, true);
+      assert.equal(err.host, 'cal.example.test');
+      assert.match(err.message, /^Zelos stopped before your calendar password left this machine: cal\.example\.test is a plain http:\/\/ address\./);
+      return true;
+    });
+    await assert.rejects(() => fetchRange({ url, user: USER, pass }), { cleartextRefused: true });
+    const probed = await testConnection({ url, user: USER, pass });
+    assert.equal(probed.ok, false);
+    assert.equal(probed.cleartextRefused, true, 'the Test route and the doctor branch on this flag');
+    assert.match(probed.error, /Let this one server take it unencrypted/);
+  }
+  // `requireTls: true` is "decide from the host" made strict — still refused.
+  await assert.rejects(() => discover({ url, user: USER, pass: PASS, requireTls: true }), { cleartextRefused: true });
+
+  assert.deepEqual(calls, [], 'a request was made — the password was on the wire before the refusal');
+});
+
+test('a remembered layout cannot carry a refused account past the check', async (t) => {
+  // fetchRange can reach a REPORT without calling discover at all, once the
+  // layout is cached, so it checks for itself. Prime the cache under the
+  // permission, then take the permission away.
+  const mock = await startServer(NEXTCLOUD_ROUTES);
+  t.after(() => mock.close());
+  const url = mock.origin; // http://127.0.0.1 — loopback, allowed by default
+  const window = { from: '2026-08-01T00:00:00Z', to: '2026-11-30T00:00:00Z' };
+  await fetchRange({ url, user: USER, pass: PASS, ...window });
+  const before = mock.requests.length;
+  assert.ok(before > 0);
+
+  await assert.rejects(() => fetchRange({ url, user: USER, pass: PASS, requireTls: true, ...window }), { cleartextRefused: true });
+  assert.equal(mock.requests.length, before, 'the cached layout was used to send the password anyway');
+});
+
+test('requireTls: false lets one http:// server take it; loopback and no username need nothing', async (t) => {
+  const calls = stubFetch(t);
+
+  // Each of these reaches `fetch` — the stub refuses it, so the walk fails
+  // with "could not reach", which is the point: it was allowed to try.
+  const allowed = [
+    { url: 'http://cal.example.test/dav/', user: USER, pass: PASS, requireTls: false },
+    { url: 'http://localhost:5232/', user: USER, pass: PASS },
+    { url: 'http://[::1]:5232/', user: USER, pass: PASS },
+    { url: 'http://cal.example.test/dav/', user: '', pass: '' },
+    { url: 'https://cal.example.test/dav/', user: USER, pass: PASS, requireTls: true },
+  ];
+  for (const opts of allowed) {
+    const before = calls.length;
+    const result = await testConnection(opts);
+    assert.equal(result.ok, false);
+    assert.equal(result.cleartextRefused, undefined, JSON.stringify(opts));
+    assert.ok(calls.length > before, `${JSON.stringify(opts)} was refused, and should have been tried`);
+  }
+});

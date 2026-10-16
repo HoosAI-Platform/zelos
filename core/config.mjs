@@ -133,7 +133,18 @@ export const MAIL_ACCOUNT_DEFAULTS = deepFreeze({
   maxMessages: 400,
 });
 
-/** Defaults for one calendar. Exported so the UI can build a blank one. */
+/**
+ * Defaults for one calendar. Exported so the UI can build a blank one.
+ *
+ * `requireTls` is mail's setting with mail's three values, stored as null for
+ * mail's reason — see MAIL_ACCOUNT_DEFAULTS above. It governs one thing:
+ * whether a CalDAV account or a protected .ics link may send its password over
+ * a plain http:// address. `null` decides from the host (refused everywhere except
+ * loopback), `true` refuses even there, and `false` lets this one server take
+ * it in the clear. Calendars had no rule at all until this, and sent the
+ * password unencrypted to any http:// address they were given. (QA,
+ * 2026-10-10, TT-3425; the check is `assertCleartextAllowed` in core/net.mjs.)
+ */
 export const CALENDAR_DEFAULTS = deepFreeze({
   id: '',
   enabled: true,
@@ -142,6 +153,7 @@ export const CALENDAR_DEFAULTS = deepFreeze({
   url: '',
   user: '',
   keyRef: null,
+  requireTls: null,
 });
 
 /**
@@ -836,6 +848,7 @@ export function validateConfig(cfg) {
         checkUrl(errors, `${at}.url`, c.url, { schemes: ['http:', 'https:', 'webcal:'], required: !!c.enabled });
       }
       if (!isStr(c.user)) errors.push({ path: `${at}.user`, message: 'must be a string' });
+      if (c.requireTls !== null && !isBool(c.requireTls)) errors.push({ path: `${at}.requireTls`, message: 'must be true, false, or null to decide from the host' });
       checkRef(errors, `${at}.keyRef`, c.keyRef, { allowNull: true, notModel: true });
     });
   }

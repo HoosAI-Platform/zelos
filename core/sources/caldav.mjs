@@ -33,6 +33,7 @@ import { Buffer } from 'node:buffer';
 
 import { paths, writeFileAtomic } from '../config.mjs';
 import { log } from '../log.mjs';
+import { assertCleartextAllowed } from '../net.mjs';
 
 const dav = log.child('[caldav]');
 
@@ -851,6 +852,29 @@ export function invalidate({ url = null, user = null } = {}) {
  * Public API
  * ------------------------------------------------------------------ */
 
+/*
+ * Sending the password in the clear. (QA, 2026-10-10, TT-3425)
+ *
+ * `basicAuth` puts the username and password on every request to the typed
+ * origin, base64'd — readable by anybody on the path — and an account typed as
+ * `http://` used to send it that way without a word. Each entry point below now
+ * runs `assertCleartextAllowed` (core/net.mjs) on the normalised URL before it
+ * opens a single connection: mail's `requireTls` rule, read off the calendar's
+ * own `requireTls`.
+ *
+ * Only the typed URL is checked because only the typed origin ever gets the
+ * credential — the origin pin above sends every other hop anonymously, so an
+ * `http://` href the server hands back carries nothing worth refusing.
+ *
+ * It is NOT inside `request()`, though that looks like the one place that would
+ * catch everything. `request()`'s callers swallow every error that is not a
+ * credential verdict — that is how discovery falls through its candidate roots
+ * — so a refusal thrown there would come back as "no calendars here", the walk
+ * would end empty, `targetsFor` would `forgetLayout` on every sweep, and the
+ * user would be told nothing. Thrown here, before any of that, it reaches the
+ * sweep and the Test button as itself.
+ */
+
 /**
  * Walk current-user-principal -> calendar-home-set -> calendar collections.
  * -> {principal, homeSet, listRoot, calendars:[{href, name, color, ctag, components}]}
@@ -863,8 +887,11 @@ export function invalidate({ url = null, user = null } = {}) {
  * `listRoot` is the URL whose Depth:1 listing produced the calendars — the one
  * hop worth repeating on its own later, and null when nothing produced any.
  */
-export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+export async function discover({ url, user, pass, requireTls = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
   const base = normalizeUrl(url);
+  // Before the first request, and on the typed URL only — see "Sending the
+  // password in the clear", below. `request()` is the wrong place for it.
+  assertCleartextAllowed(base, { user, requireTls });
   // Every URL followed from here on is one the server chose. Pinning the
   // credential scope to the address the user typed is what keeps a hostile
   // `href` from turning discovery into password delivery.
@@ -1069,9 +1096,12 @@ async function targetsFor(base, key, opts) {
  * disagree, and the ICS parser downstream filters to the caller's real window
  * regardless.
  */
-export async function fetchRange({ url, user, pass, from, to, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+export async function fetchRange({ url, user, pass, requireTls = null, from, to, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
   const base = normalizeUrl(url);
-  const opts = { user, pass, timeoutMs, signal, authOrigin: originOf(base) };
+  // Here as well as in `discover`, because a remembered layout means a sweep
+  // can reach a REPORT without ever calling it.
+  assertCleartextAllowed(base, { user, requireTls });
+  const opts = { user, pass, requireTls, timeoutMs, signal, authOrigin: originOf(base) };
   const now = Date.now();
   const start = floorDay(msOf(from, now - 30 * DAY_MS));
   const end = ceilDay(msOf(to, now + 180 * DAY_MS));
@@ -1131,16 +1161,26 @@ export async function fetchRange({ url, user, pass, from, to, timeoutMs = DEFAUL
 
 /**
  * Probe a calendar account without changing anything.
- * -> {ok, calendars:[{href, name}], error}
+ * -> {ok, calendars:[{href, name}], error, cleartextRefused?}
+ *
+ * `requireTls` is taken so the probe runs under the rule the sweep will, and
+ * `cleartextRefused` is handed back as a flag rather than left in the wording,
+ * so `zelos doctor` and the Settings route can tell "nothing was sent, on
+ * purpose" from "the server said no" without matching a sentence.
  */
-export async function testConnection({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+export async function testConnection({ url, user, pass, requireTls = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
   try {
-    const { calendars } = await discover({ url, user, pass, timeoutMs, signal });
+    const { calendars } = await discover({ url, user, pass, requireTls, timeoutMs, signal });
     if (!calendars.length) {
       return { ok: false, calendars: [], error: `Connected to ${hostOf(normalizeUrl(url))} but found no calendars.` };
     }
     return { ok: true, calendars: calendars.map((c) => ({ href: c.href, name: c.name })), error: null };
   } catch (err) {
-    return { ok: false, calendars: [], error: err?.message || String(err) };
+    return {
+      ok: false,
+      calendars: [],
+      error: err?.message || String(err),
+      ...(err?.cleartextRefused ? { cleartextRefused: true } : {}),
+    };
   }
 }
