@@ -728,7 +728,11 @@ export async function runSweep({
       return nothing;
     }
 
-    const stillRefused = authResting(state, secret, startedMs);
+    /* A source with no credential cannot be resting on a refused one. Since
+       TT-3459 the transport never says so for one, but a feed rested by the
+       old rule (before the upgrade) would otherwise sit out its six hours: its
+       secret is always null, so the hash that lifts a rest can never change. */
+    const stillRefused = connector.credential ? authResting(state, secret, startedMs) : null;
     if (stillRefused) {
       /* Reported, unlike the rests above. A rate-limit rest is minutes and
          fixes itself; a refused credential rests for six hours and fixes
@@ -752,6 +756,13 @@ export async function runSweep({
       // that predate this interface declare no limits and return no cursor, so
       // they leave `kv` exactly as they found it.
       const next = { ...state, lastAt: startedMs, spent: meter.spent, windowStartedAt: meter.windowStartedAt, ...patch };
+      // A rest left on a source with no credential (by the rule before
+      // TT-3459) is cleared on its next read, whatever the outcome, so neither
+      // the sweep nor Settings' "can retry after" goes on reading it.
+      if (!connector.credential && next.authBlockedUntil) {
+        next.authBlockedUntil = 0;
+        next.secretHash = null;
+      }
       if (keepsState(connector) || Object.keys(state).length || patch.authBlockedUntil || patch.notBefore) {
         writeSourceState(db, source.id, next);
       }
