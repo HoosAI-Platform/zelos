@@ -1547,6 +1547,177 @@ test('a 401 while explaining a failed calendar URL is the password verdict', asy
   assert.match(probe.error, /rejected the credentials/);
 });
 
+/* ------------------------------------------------------------------ *
+ * A 403 is a refusal, not a wrong password
+ * ------------------------------------------------------------------ */
+
+/**
+ * 401 asks who you are; 403 says it knows, and not this. Radicale answers 403
+ * for another user's calendar with a perfectly good password, and Zelos used to
+ * read that as a verdict on the password — "iCloud and Fastmail need an
+ * app-specific password" — and stop the walk on the spot (QA, 2026-10-10,
+ * TT-3455). Now it is a refusal: it names the address, it does not end a walk
+ * that has other roots to try, and it is never swallowed into an empty result.
+ */
+const radicaleWithRoot = (extra = {}) => ({
+  ...radicaleRoutes(),
+  'PROPFIND /': ({ body }) => (body.includes('current-user-principal') ? radDoc(radResponse('/', `<resourcetype><collection/></resourcetype>${RAD_WHOAMI}`)) : radDoc()),
+  ...extra,
+});
+
+test('another user\'s calendar is refused by address, and Test names what this account can read', async (t) => {
+  const mock = await startServer(radicaleWithRoot({ 'PROPFIND /alice/cal/': { status: 403, body: 'Forbidden' } }));
+  t.after(() => mock.close());
+  const url = `${mock.origin}/alice/cal/`;
+
+  const probe = await testConnection({ url, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.refused, true);
+  assert.match(probe.error, /refused access to \/alice\/cal\/ \(HTTP 403\)/);
+  assert.match(probe.error, /usually not a wrong password/);
+  assert.doesNotMatch(probe.error, /app-specific|rejected the credentials/);
+  assert.match(probe.error, /this account can read: Personal, Work\./);
+  assert.deepEqual(reports(mock), []);
+
+  mock.requests.length = 0;
+  await assert.rejects(() => fetchRange({ url, user: USER, pass: PASS }), (err) => {
+    assert.match(err.message, /refused access to \/alice\/cal\//);
+    assert.doesNotMatch(err.message, /can read/, 'the sweep explains nothing');
+    return true;
+  });
+  assert.equal(mock.requests.length, 1, 'a refused calendar URL costs the sweep one request');
+  assert.deepEqual(reports(mock), []);
+});
+
+test('a 403 at the account address still lets /.well-known find the account', async (t) => {
+  const mock = await startServer({
+    ...NEXTCLOUD_ROUTES,
+    'PROPFIND /': { status: 403, body: 'Forbidden' },
+    'PROPFIND /.well-known/caldav': NEXTCLOUD_PRINCIPAL,
+  });
+  t.after(() => mock.close());
+
+  const found = await discover({ url: mock.origin, user: USER, pass: PASS });
+  assert.deepEqual(found.calendars.map((c) => c.name), ['Personal & family', 'work']);
+});
+
+test('a 403 everywhere is thrown as a refusal naming the address typed', async (t) => {
+  const mock = await startServer({ 'PROPFIND *': { status: 403, body: 'Forbidden' } });
+  t.after(() => mock.close());
+
+  for (const typed of ['/', '/dav/calendars/mine/']) {
+    const probe = await testConnection({ url: `${mock.origin}${typed}`, user: USER, pass: PASS });
+    assert.equal(probe.ok, false, typed);
+    assert.equal(probe.refused, true, typed);
+    assert.ok(probe.error.includes(`refused access to ${typed} (HTTP 403)`), probe.error);
+  }
+});
+
+test('a 401 from a fallback after a 403 is still the password verdict', async (t) => {
+  const mock = await startServer({
+    'PROPFIND /': { status: 403, body: 'Forbidden' },
+    'PROPFIND /.well-known/caldav': { status: 401, body: 'Unauthorized' },
+  });
+  t.after(() => mock.close());
+
+  const probe = await testConnection({ url: mock.origin, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /rejected the credentials/);
+  assert.equal(probe.refused, undefined);
+});
+
+test('a 403 with no username configured asks for one', async (t) => {
+  const mock = await startServer({ 'PROPFIND *': { status: 403, body: 'Forbidden' } }, { requireAuth: false });
+  t.after(() => mock.close());
+
+  const probe = await testConnection({ url: `${mock.origin}/dav/calendars/mine/`, user: '', pass: null });
+  assert.equal(probe.refused, true);
+  assert.match(probe.error, /needs a username and password/);
+  assert.equal(mock.requests[0].auth, null);
+});
+
+test('a 403 on a remembered listing walks the next rung instead of ending the sweep as a password error', async (t) => {
+  let homeRefuses = false;
+  const mock = await startServer({
+    ...NEXTCLOUD_ROUTES,
+    'PROPFIND /remote.php/dav/calendars/nemo/': () => (homeRefuses ? { status: 403, body: 'Forbidden' } : NEXTCLOUD_COLLECTIONS),
+  });
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: mock.origin, user: USER, pass: PASS });
+  await sweep();
+
+  homeRefuses = true;
+  mock.requests.length = 0;
+  await assert.rejects(sweep, (err) => {
+    assert.match(err.message, /refused access to \/remote\.php\/dav\/calendars\/nemo\//);
+    assert.doesNotMatch(err.message, /rejected the credentials/);
+    return true;
+  });
+  assert.deepEqual(
+    propfinds(mock).slice(0, 2),
+    ['/remote.php/dav/calendars/nemo/', '/remote.php/dav/principals/users/nemo/'],
+    'the remembered principal is the next rung',
+  );
+});
+
+test('a 403 at / that /.well-known got past does not stand in for "no calendars"', async (t) => {
+  const mock = await startServer({
+    'PROPFIND /': { status: 403, body: 'Forbidden' },
+    'PROPFIND /.well-known/caldav': NEXTCLOUD_PRINCIPAL,
+    'PROPFIND /remote.php/dav/principals/users/nemo/': NEXTCLOUD_HOME,
+    'PROPFIND /remote.php/dav/calendars/nemo/': NO_COLLECTIONS,
+  });
+  t.after(() => mock.close());
+
+  const probe = await testConnection({ url: mock.origin, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /found no calendars/);
+  assert.doesNotMatch(probe.error, /refused/);
+  assert.equal(probe.refused, undefined);
+  assert.equal(
+    mock.requests.some((r) => r.path === '/' && r.depth === '1'),
+    false,
+    'the root that refused its probe was listed anyway',
+  );
+});
+
+test('an account record refused everywhere costs a sweep at most three requests', async (t) => {
+  let refuse = false;
+  const forbidden = { status: 403, body: 'Forbidden' };
+  const routes = Object.fromEntries(Object.entries(NEXTCLOUD_ROUTES).map(([k, v]) => [k, (req) => (refuse ? forbidden : typeof v === 'function' ? v(req) : v)]));
+  const mock = await startServer({ ...routes, 'PROPFIND *': () => forbidden });
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: mock.origin, user: USER, pass: PASS });
+  await sweep();
+
+  refuse = true;
+  for (let i = 0; i < 2; i++) {
+    mock.requests.length = 0;
+    await assert.rejects(sweep, /refused access/);
+    assert.ok(mock.requests.length <= 3, `sweep ${i + 1} made ${mock.requests.length} requests`);
+  }
+});
+
+test('a remembered calendar that starts refusing is re-scoped, then reported as refused', async (t) => {
+  let refuses = false;
+  const mock = await startServer(radicaleRoutes({ personal: () => (refuses ? { status: 403, body: 'Forbidden' } : RAD_PERSONAL) }));
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS });
+  await sweep();
+
+  refuses = true;
+  mock.requests.length = 0;
+  await assert.rejects(sweep, /refused access to \/nemo\/personal\//);
+  assert.deepEqual(propfinds(mock), ['/nemo/personal/', '/nemo/personal/'], 'the record, then the URL typed');
+
+  mock.requests.length = 0;
+  await assert.rejects(sweep, /refused access/);
+  assert.equal(mock.requests.length, 1, 'the stale record was not kept');
+});
+
 /**
  * Records written before TT-3513 hold the home set as the listing root of a
  * typed calendar URL, which is the widening itself. Bumping the schema changes

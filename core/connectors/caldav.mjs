@@ -77,6 +77,19 @@ export default calendarConnector({
       timeoutMs: ctx.timeoutMs,
       signal: ctx.signal,
     });
+    if (result?.refused) {
+      // A 403 is the server saying no to this *address* (QA, 2026-10-10,
+      // TT-3455). Sending the reader off to make an app-specific password is
+      // advice for a different problem; the URL, or a missing username, is what
+      // to change.
+      return {
+        status: 'fail',
+        detail: `${source.url}: ${result.error || 'the server refused access'}`,
+        action: source.user
+          ? 'Check the calendar URL in Settings → Calendars: the server answered, but this account may not read that address. Use the address of one of your own calendars, or the server address to read them all.'
+          : 'Add the username and password for this calendar in Settings → Calendars — the server will not show it to an anonymous caller.',
+      };
+    }
     if (!result?.ok) {
       return {
         status: 'fail',

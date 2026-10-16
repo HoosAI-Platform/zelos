@@ -233,7 +233,7 @@ function textOf(node) {
  * ------------------------------------------------------------------ */
 
 class CalDavError extends Error {
-  constructor(message, { status = 0, host = '', anonymous = false, transport = false } = {}) {
+  constructor(message, { status = 0, host = '', anonymous = false, transport = false, refused = false } = {}) {
     super(message);
     this.name = 'CalDavError';
     this.status = status;
@@ -253,11 +253,18 @@ class CalDavError extends Error {
      * (QA, 2026-10-10, TT-3513).
      */
     this.transport = transport;
+    /**
+     * Set on a 403 that the pin did not cause: the server knew who was asking
+     * — or that nobody had said — and would not show this address. That is an
+     * answer about the address, not the password, and the remedy is a different
+     * calendar URL (QA, 2026-10-10, TT-3455).
+     */
+    this.refused = refused;
   }
 }
 
 /**
- * Is this 401/403 an answer *about the credential*?
+ * Is this 401 an answer *about the credential*?
  *
  * It is when the request carried the credential and the server refused it, and
  * it is when there was no credential to carry — both mean the walk cannot get
@@ -270,9 +277,20 @@ class CalDavError extends Error {
  * yet. Servers that partition an account across hosts (iCloud answers an
  * unauthenticated PROPFIND with `x-apple-user-partition`) hand back exactly this
  * shape as their ordinary layout, not as an attack.
+ *
+ * And a 403 is never one (QA, 2026-10-10, TT-3455). 401 means "who are you?";
+ * 403 means "I know, and not this" — Radicale answers it for another user's
+ * calendar with a perfectly good password. Read as a verdict it told people to
+ * mint an app-specific password for an address they had simply mistyped, and
+ * it ended the walk before the fallbacks that would have found their own
+ * calendars. A 403 is a refusal: kept like a declined hop, and thrown only if
+ * nothing else was found — see `walkState`.
  */
 const isCredentialVerdict = (err) =>
-  err instanceof CalDavError && (err.status === 401 || err.status === 403) && !err.anonymous;
+  err instanceof CalDavError && err.status === 401 && !err.anonymous;
+
+/** A 403 about the address, not the password. */
+const wasRefused = (err) => err instanceof CalDavError && err.refused;
 
 /** The other half of that split: a hop refused because we withheld the password. */
 const wasDeclinedAnonymously = (err) => err instanceof CalDavError && err.anonymous;
@@ -395,6 +413,30 @@ async function request(method, url, { user, pass, body = null, depth = null, tim
             'Zelos will not send your calendar password to a host a server redirected it to. ' +
             `If ${hostOf(url)} really is your calendar, put its address in the calendar URL directly.`,
           { status: response.status, host: hostOf(url), anonymous: true },
+        );
+      }
+      if (response.status === 403) {
+        // Not "rejected the credentials": the server answered, and the address
+        // is the problem (QA, 2026-10-10, TT-3455). With no username configured
+        // at all, the likelier fix is to give it one.
+        const where = `${hostOf(url)} refused access to ${new URL(url).pathname} (HTTP 403).`;
+        // A REPORT comes after the collection was listed, so the address is
+        // right and the share is what stops it: a free/busy-only calendar shows
+        // up in a listing and will not hand over its events.
+        if (method === 'REPORT' && user) {
+          throw new CalDavError(
+            `${hostOf(url)} refused to show the events in ${new URL(url).pathname} (HTTP 403). ` +
+              'This account can see that calendar but not read its events — a free/busy-only share does this. ' +
+              'This is usually not a wrong password.',
+            { status: 403, host: hostOf(url), refused: true },
+          );
+        }
+        throw new CalDavError(
+          user
+            ? `${where} The server answered, but this address is not one this account may read — ` +
+                'check the calendar URL. This is usually not a wrong password.'
+            : `${where} This calendar needs a username and password — add them in Settings → Calendars.`,
+          { status: 403, host: hostOf(url), refused: true },
         );
       }
       throw new CalDavError(
@@ -1065,6 +1107,12 @@ export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS
   // not whatever /.well-known said afterwards — so this is only ever set once.
   let probeError = null;
   const walk = walkState();
+  // Roots whose own probe was refused. They are not listed afterwards — a root
+  // that would not say who is asking will not say what it holds — and their
+  // refusal is not the walk's answer once another root has led somewhere: a
+  // 403 at `/` that /.well-known got past is not news about the account (QA,
+  // 2026-10-10, TT-3455).
+  const refusedRoots = new Set();
 
   for (const root of candidateRoots(base)) {
     try {
@@ -1076,7 +1124,8 @@ export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS
     } catch (err) {
       if (!probeError) probeError = err;
       if (isCredentialVerdict(err)) throw err;
-      walk.note(err);
+      if (wasRefused(err)) refusedRoots.add(root);
+      else walk.note(err);
     }
   }
 
@@ -1086,7 +1135,8 @@ export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS
 
   // Depth:1 on a collection includes the collection itself, so a root that
   // happens to be one calendar is listed by exactly the same call.
-  return listFrom(distinct([homeSet, base, reached]), { base, principal, homeSet, probeError, walk, opts });
+  const searchRoots = distinct([homeSet, base, reached]).filter((root) => !refusedRoots.has(root));
+  return listFrom(searchRoots, { base, principal, homeSet, probeError, walk, opts });
 }
 
 /**
@@ -1223,8 +1273,14 @@ async function explainFailure(err, base, opts) {
 function walkState() {
   const walk = {
     declined: null,
+    // The first 403 refusal, kept the same way and for the same reason: one
+    // refused root must not cost the walk the roots after it, and a walk that
+    // finds nothing must say it was refused rather than come back empty (QA,
+    // 2026-10-10, TT-3455).
+    refused: null,
     note(err) {
       if (!walk.declined && wasDeclinedAnonymously(err)) walk.declined = err;
+      if (!walk.refused && wasRefused(err)) walk.refused = err;
     },
   };
   return walk;
@@ -1281,11 +1337,19 @@ async function listFrom(searchRoots, { base, principal, homeSet, probeError = nu
   // an empty list makes the source contribute nothing for ever and say nothing
   // about why. `declined` comes first in both throws because it is the error
   // this walk used to raise on the spot, and the one that carries the fix.
+  //
+  // A refusal is the same kind of answer (QA, 2026-10-10, TT-3455) when it hit
+  // the principal, the home set or a root that was listed: what was refused may
+  // be where the calendars are, so "none" would be a guess. A probe refused at a
+  // root the walk then got past is not on that list (see `refusedRoots`) — it
+  // only answers when nothing could be listed at all, and then the refusal at
+  // the URL typed is the one that names it.
   if (!listed) {
-    throw walk.declined || listError || probeError
+    throw walk.declined || (wasRefused(probeError) ? probeError : walk.refused) || listError || probeError
       || new CalDavError(`No DAV collections at ${hostOf(base)}`, { host: hostOf(base) });
   }
   if (walk.declined) throw walk.declined;
+  if (walk.refused) throw walk.refused;
   const calendars = [];
   // An empty fallback root does not prove that a home set which failed to
   // answer has no calendars. Keep that uncertainty through to the sweep.
@@ -1303,7 +1367,7 @@ async function listFrom(searchRoots, { base, principal, homeSet, probeError = nu
  * a partition host, refused because the origin pin sent no password, is exactly
  * that: the next rung down still has to be tried.
  */
-async function listCalendarsAt(root, opts) {
+async function listCalendarsAt(root, opts, refusals = []) {
   try {
     const res = await request('PROPFIND', root, { ...opts, body: BODY_COLLECTIONS, depth: 1 });
     const calendars = calendarsFrom(discoveryDocument(res), res.url);
@@ -1311,6 +1375,7 @@ async function listCalendarsAt(root, opts) {
     dav.debug(`the remembered listing at ${hostOf(root)} holds no calendars any more`);
   } catch (err) {
     if (isCredentialVerdict(err)) throw err;
+    if (wasRefused(err)) refusals.push(err);
     dav.debug(`the remembered listing at ${hostOf(root)} failed: ${err.message}`);
   }
   return null;
@@ -1334,8 +1399,11 @@ async function readCollection(url, opts) {
   try {
     res = await request('PROPFIND', url, { ...opts, body: BODY_COLLECTIONS, depth: 0 });
   } catch (err) {
-    if (err instanceof CalDavError && (err.status === 404 || err.status === 410)) {
-      dav.debug(`the remembered calendar at ${hostOf(url)} has gone (HTTP ${err.status})`);
+    // A refusal re-scopes too (QA, 2026-10-10, TT-3455): the account may no
+    // longer read this calendar, and asking the URL typed again is what turns
+    // that into the refusal message rather than a sweep stuck on a stale record.
+    if (err instanceof CalDavError && (err.status === 404 || err.status === 410 || wasRefused(err))) {
+      dav.debug(`the remembered calendar at ${hostOf(url)} ${wasRefused(err) ? 'refused access' : 'has gone'} (HTTP ${err.status})`);
       return null;
     }
     throw err;
@@ -1388,10 +1456,22 @@ async function targetsFor(base, key, opts) {
     forgetLayout(key);
   } else if (known) {
     const tried = new Set();
+    // Two refusals in a row and the sweep stops here, keeping the record (QA,
+    // 2026-10-10, TT-3455). An account that has stopped letting this login in
+    // used to cost every sweep the whole ladder and then the whole walk — eight
+    // or so credentialed requests every five minutes, each one a failed
+    // attempt in the server's eyes, which is how accounts get locked. The
+    // remembered rungs are still worth one try each: a refusal at the listing
+    // root alone may only mean a collection moved behind a permission.
+    const refusals = [];
+    const refusedTwice = () => {
+      if (refusals.length >= 2) throw refusals[0];
+    };
     for (const root of [known.listRoot, known.homeSet]) {
       if (!root || tried.has(root)) continue;
       tried.add(root);
-      const found = await listCalendarsAt(root, opts);
+      const found = await listCalendarsAt(root, opts, refusals);
+      refusedTwice();
       if (!found) continue;
       if (found.listRoot !== known.listRoot) {
         writeLayout(key, { ...known, listRoot: found.listRoot, at: Date.now() });
@@ -1408,10 +1488,13 @@ async function targetsFor(base, key, opts) {
         homeSet = hrefUnder(discoveryDocument(res), res.url, 'calendar-home-set');
       } catch (err) {
         if (isCredentialVerdict(err)) throw err;
+        if (wasRefused(err)) refusals.push(err);
+        refusedTwice();
         dav.debug(`the remembered principal at ${hostOf(known.principal)} failed: ${err.message}`);
       }
       if (homeSet && !tried.has(homeSet)) {
-        const found = await listCalendarsAt(homeSet, opts);
+        const found = await listCalendarsAt(homeSet, opts, refusals);
+        refusedTwice();
         if (found) {
           writeLayout(key, { ...known, homeSet, listRoot: found.listRoot, at: Date.now() });
           return found.calendars;
@@ -1535,6 +1618,14 @@ export async function testConnection({ url, user, pass, timeoutMs = DEFAULT_TIME
     }
     return { ok: true, calendars: calendars.map((c) => ({ href: c.href, name: c.name })), error: null };
   } catch (err) {
-    return { ok: false, calendars: [], error: err?.message || String(err), ...(err?.suggestions ? { suggestions: err.suggestions } : {}) };
+    return {
+      ok: false,
+      calendars: [],
+      error: err?.message || String(err),
+      ...(err?.suggestions ? { suggestions: err.suggestions } : {}),
+      // The address, not the password — doctor's advice turns on it (QA,
+      // 2026-10-10, TT-3455).
+      ...(wasRefused(err) ? { refused: true } : {}),
+    };
   }
 }
