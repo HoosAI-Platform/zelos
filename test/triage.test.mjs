@@ -244,24 +244,65 @@ test('a privacy value present but unusable fails closed, not to the default', ()
      and a sendBodies of 0 or "false" meant on. */
   const secret = 'BODY-ONLY-MARKER-3424';
   const msg = message({ id: 'closed1', snippet: 'ordinary snippet', body: `Private: ${secret}.` });
-  for (const privacy of [
-    { ...PRIVACY, sendBodies: 0 },
-    { ...PRIVACY, sendBodies: 'false' },
-    { ...PRIVACY, sendBodies: null },
-    { ...PRIVACY, bodyChars: null },
-    { ...PRIVACY, bodyChars: '' },
-    { ...PRIVACY, bodyChars: 0 },
-    null,
-    'off',
+  // `snippet`: whether the snippet still goes. A bad switch alone leaves it,
+  // as bodies off always has; a cap read as 0 holds it too (TT-3447).
+  for (const [privacy, snippet] of [
+    [{ ...PRIVACY, sendBodies: 0 }, true],
+    [{ ...PRIVACY, sendBodies: 'false' }, true],
+    [{ ...PRIVACY, sendBodies: null }, true],
+    [{ ...PRIVACY, bodyChars: null }, false],
+    [{ ...PRIVACY, bodyChars: '' }, false],
+    [{ ...PRIVACY, bodyChars: 0 }, false],
+    [null, false],
+    ['off', false],
   ]) {
     const { messages } = buildSweepPrompt({ identity: IDENTITY, now: NOW, messages: [msg], privacy });
     assert.ok(!messages[0].content.includes(secret), `a body was sent with privacy ${JSON.stringify(privacy)}`);
-    assert.ok(messages[0].content.includes('ordinary snippet'), 'the snippet still goes');
+    assert.equal(messages[0].content.includes('ordinary snippet'), snippet,
+      `snippet ${snippet ? 'missing' : 'sent under a 0 cap'} with privacy ${JSON.stringify(privacy)}`);
+    if (!snippet) {
+      assert.match(messages[0].content, /the privacy setting says only headers may be sent/,
+        'the model is told to expect snippets that were withheld');
+    }
   }
   // Absent is not the same as unusable: a config written before the setting
   // existed keeps the default.
   const { messages } = buildSweepPrompt({ identity: IDENTITY, now: NOW, messages: [msg], privacy: {} });
   assert.ok(messages[0].content.includes(secret), 'an absent setting should take the default');
+});
+
+test('"Characters of each email" holds the snippet and the event notes too (TT-3447)', () => {
+  /* QA, 2026-10-10: at 200–239 the body block was dropped, but every email
+     still sent its 240-character snippet, and event notes went at 240. */
+  // Both under 240, so the old fixed cap would have sent the tails whole.
+  const snippet = `${'s'.repeat(214)}SNIPPET-TAIL`;
+  const notes = `${'n'.repeat(214)}NOTES-TAIL`;
+  const msg = message({ id: 'cap200', snippet, body: 'irrelevant' });
+  const evt = {
+    id: 'capevt', uid: 'e-cap', title: 'Cap check', description: notes,
+    starts_at: '2026-08-09T14:00:00-04:00', ends_at: '2026-08-09T15:00:00-04:00', all_day: 0, attendees: [],
+  };
+  for (const sendBodies of [true, false]) {
+    const { messages } = buildSweepPrompt({
+      identity: IDENTITY, now: NOW, messages: [msg], events: [evt],
+      privacy: { ...PRIVACY, sendBodies, bodyChars: 200 },
+    });
+    const content = messages[0].content;
+    const line = content.split('\n').find((l) => l.trim().startsWith('snippet:'));
+    assert.ok(line, 'the snippet line is gone, so this proves nothing');
+    assert.ok(line.trim().length - 'snippet: '.length <= 200, `snippet longer than the cap: ${line.length}`);
+    assert.ok(!content.includes('SNIPPET-TAIL'), 'the snippet went past 200 characters');
+    assert.ok(!content.includes('NOTES-TAIL'), 'event notes went past 200 characters');
+  }
+  // The model is told the cap is the privacy setting's, not the context's.
+  const capped = buildSweepPrompt({
+    identity: IDENTITY, now: NOW, messages: [msg], privacy: { ...PRIVACY, bodyChars: 200 },
+  }).messages[0].content;
+  assert.match(capped, /bodies omitted — the privacy setting says only headers and snippets may be sent/);
+  assert.doesNotMatch(capped, /to fit the context window/);
+  // At the usual cap the snippet goes whole.
+  const { messages } = buildSweepPrompt({ identity: IDENTITY, now: NOW, messages: [msg], privacy: PRIVACY });
+  assert.ok(messages[0].content.includes('SNIPPET-TAIL'), 'at the default cap the snippet goes whole');
 });
 
 test('privacy.bodyChars caps how much of a body is sent', () => {

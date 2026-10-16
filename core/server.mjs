@@ -2384,7 +2384,10 @@ function askContext(db, question, privacy) {
       title = row.subject || '(no subject)';
       facts.push(`from: ${row.from_name || ''} <${row.from_email || ''}>`.trim());
       facts.push(`sent: ${row.sent_at || 'unknown'}`);
-      facts.push(privacy.sendBodies ? cap(row.body || row.snippet, privacy.bodyChars) : cap(row.snippet, 240));
+      // The snippet is held under "Characters of each email" too (TT-3447).
+      facts.push(privacy.sendBodies
+        ? cap(row.body || row.snippet, privacy.bodyChars)
+        : cap(row.snippet, Math.min(240, privacy.bodyChars)));
     } else if (hit.kind === 'event') {
       title = row.title || '(untitled event)';
       facts.push(`when: ${row.starts_at || 'unknown'}${row.ends_at ? ` to ${row.ends_at}` : ''}`);
@@ -2394,7 +2397,7 @@ function askContext(db, question, privacy) {
          the sweep treats it (triage.mjs renderEvent): with "Send message
          bodies" off it does not travel at all. Ask sent it anyway (QA,
          2026-10-10, TT-3416). */
-      if (privacy.sendBodies) facts.push(cap(row.description, ASK_CONTEXT_CHARS));
+      if (privacy.sendBodies) facts.push(cap(row.description, Math.min(ASK_CONTEXT_CHARS, privacy.bodyChars)));
     } else if (hit.kind === 'item') {
       title = row.headline || '(no headline)';
       facts.push(`bucket: ${row.bucket}`, `state: ${row.state}`, cap(row.why, ASK_CONTEXT_CHARS));

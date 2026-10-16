@@ -1114,6 +1114,55 @@ test('Ask keeps event descriptions out of the prompt with "Send message bodies" 
   assert.ok(!mistyped.includes(BODY), 'a body was sent with sendBodies "false"');
 });
 
+test('Ask holds the snippet and event notes under "Characters of each email" (TT-3447)', async (t) => {
+  const upstream = await startMockUpstream(t);
+  const ctx = await startServer(t, {
+    config: baseConfig({
+      model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' },
+      privacy: { maxItemsPerSweep: 150, sendBodies: false, bodyChars: 200 },
+    }),
+  });
+  db.upsertMessage(ctx.db, {
+    sourceId: 'm_1', uid: 4, messageId: '<quarry@test>',
+    from: { name: 'Marcus', email: 'marcus@example.com' },
+    subject: 'Quarry permit', date: '2026-08-10T09:00:00-04:00',
+    snippet: `Quarry ${'q'.repeat(220)} SNIPPET-TAIL`, text: 'Quarry permit body.', folder: 'INBOX',
+  });
+  const response = await fetch(`${ctx.base}/api/ask`, {
+    method: 'POST',
+    headers: { 'X-Zelos-Token': ctx.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: 'What about the quarry permit?' }),
+  });
+  await readStream(response, null, { until: (f) => f.startsWith('event: done') });
+  const sent = upstream.received.find((r) => r.url.startsWith('/chat/completions'));
+  const prompt = sent.body.messages.map((m) => m.content).join('\n');
+  assert.match(prompt, /Quarry q/, 'the message was not in the grounding, so this proves nothing');
+  assert.doesNotMatch(prompt, /SNIPPET-TAIL/, 'the snippet went past the 200-character setting');
+
+  // Event notes, with bodies on: held to the setting, not to Ask's 1,200.
+  const upstream2 = await startMockUpstream(t);
+  const ctx2 = await startServer(t, {
+    config: baseConfig({
+      model: { protocol: 'openai', baseUrl: upstream2.baseUrl, model: 'mock-model' },
+      privacy: { maxItemsPerSweep: 150, sendBodies: true, bodyChars: 200 },
+    }),
+  });
+  db.upsertEvent(ctx2.db, {
+    calendarId: 'c_1', uid: 'quarry-visit', startsAt: '2026-08-11T14:00:00-04:00',
+    title: 'Quarry inspection', description: `Quarry ${'n'.repeat(220)} NOTES-TAIL`,
+  });
+  const response2 = await fetch(`${ctx2.base}/api/ask`, {
+    method: 'POST',
+    headers: { 'X-Zelos-Token': ctx2.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: 'When is the quarry inspection?' }),
+  });
+  await readStream(response2, null, { until: (f) => f.startsWith('event: done') });
+  const sent2 = upstream2.received.find((r) => r.url.startsWith('/chat/completions'));
+  const prompt2 = sent2.body.messages.map((m) => m.content).join('\n');
+  assert.match(prompt2, /Quarry n/, 'the event notes were not in the grounding, so this proves nothing');
+  assert.doesNotMatch(prompt2, /NOTES-TAIL/, 'event notes went past the 200-character setting');
+});
+
 test('/api/ask streams a grounded answer and names its sources', async (t) => {
   const upstream = await startMockUpstream(t);
   const ctx = await startServer(t, {

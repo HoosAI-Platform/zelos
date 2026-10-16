@@ -505,7 +505,9 @@ true.
 This is a real switch, not a label.
 
 - `sendBodies: true` (default) — the model receives message bodies, truncated
-  to `privacy.bodyChars` characters (default 4000).
+  to `privacy.bodyChars` characters (default 4000). The same number also caps
+  each email's snippet (never more than 240) and each event's notes, so below
+  240 nothing of an email's or an event's text goes past the setting.
 - `sendBodies: false` — the model receives **headers and the snippet only**:
   sender, recipients, subject, date, and the short plain-text preview stored in
   the database. Full bodies are never placed in the prompt, and neither are
