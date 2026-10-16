@@ -500,8 +500,7 @@ sqlite3 -json ~/.zelos/zelos.db "SELECT * FROM drafts"    > drafts.json
 rm -rf ~/.zelos
 ```
 
-On Windows, delete the `.zelos` folder in your user folder, and the
-`Zelos` folder inside `%LOCALAPPDATA%`.
+On Windows, delete the `.zelos` folder in your user folder.
 
 That removes the database, the settings and the logs. **Whether it also removes
 the passwords depends on which secret store this home was on** — if there was
@@ -516,7 +515,8 @@ those too:
   entries, or run `secret-tool clear service com.zelos.app account <name>`.
 - **Windows** — there is no keychain entry: delete the `Zelos` folder in
   `%LOCALAPPDATA%`, which is where the encrypted blobs live
-  (`Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Zelos"` in PowerShell).
+  (`Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Zelos') -Recurse -Force`
+  in PowerShell).
 
 Doing it in that order costs you the ability to check: once `~/.zelos` is gone
 so is `secrets.backend.json`, which is the file that would have told you which

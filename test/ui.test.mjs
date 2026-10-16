@@ -7688,8 +7688,8 @@ test('on Windows, erasing everything names the second folder, the Recycle Bin an
   assert.doesNotMatch(seen, JARGON, `the Your data card: ${seen.match(JARGON)?.[0]}`);
   const all = anywhere(view);
   assert.doesNotMatch(all, /rm -rf|keychain tool|com\.zelos\.app/);
-  assert.match(all, /Remove-Item -Recurse -Force "C:\\Users\\nemo\\\.zelos"/);
-  assert.match(all, /Remove-Item -Recurse -Force "\$env:LOCALAPPDATA\\Zelos"/);
+  assert.match(all, /Remove-Item -LiteralPath 'C:\\Users\\nemo\\\.zelos' -Recurse -Force/);
+  assert.match(all, /Remove-Item -LiteralPath \(Join-Path \$env:LOCALAPPDATA 'Zelos'\) -Recurse -Force/);
 
   const notes = settings.secretStoreNotes('windows-dpapi');
   for (const [slot, text] of Object.entries(notes)) {
@@ -7704,4 +7704,13 @@ test('on Windows, erasing everything names the second folder, the Recycle Bin an
   assert.match(settings.eraseSteps('', 'windows-dpapi').command('x'), /^Remove-Item/);
   assert.match(settings.eraseSteps('MacIntel', 'macos-keychain').plain, /Trash/);
   assert.equal(settings.eraseSteps('linux', 'libsecret').command('/h'), 'rm -rf "/h"');
+  assert.equal(settings.eraseSteps('win32').command("C:\\Users\\o'brien $x [1]\\.zelos"),
+    "Remove-Item -LiteralPath 'C:\\Users\\o''brien $x [1]\\.zelos' -Recurse -Force",
+    'a quote, a dollar and a bracket in the path are taken literally');
+
+  // The second folder is only offered where it exists: Windows on DPAPI.
+  store.state.health = { ...store.state.health, backend: { name: 'encrypted-file' } };
+  const fileStore = anywhere(settings.renderSettings({ sub: 'data', navigate() {}, rerender() {} }));
+  assert.match(fileStore, /Recycle Bin/, 'the platform alone decides the words');
+  assert.doesNotMatch(fileStore, /LOCALAPPDATA/);
 });

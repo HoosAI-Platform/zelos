@@ -586,7 +586,7 @@ export function secretStoreNotes(backendName) {
      after they had "erased everything" (QA, 2026-10-10, TT-3461). */
   if (backendName === 'windows-dpapi') {
     return {
-      field: 'It is encrypted by Windows for your account alone and saved under %LOCALAPPDATA%\\Zelos\\secrets: never into config.json, never into a log, and there is no route that reads it back.',
+      field: 'Windows encrypts it for your account alone, and it is saved as a file under %LOCALAPPDATA%\\Zelos\\secrets. It never goes into config.json or a log, and there is no route that reads it back.',
       password: 'Encrypted by Windows (DPAPI) for your account alone and saved under %LOCALAPPDATA%\\Zelos\\secrets. It is never written to config.json, never passed on a command line, and never logged.',
       data: 'On Windows the stored passwords and API keys are not in that directory, and there is no keychain entry to remove: each one is a DPAPI-encrypted file under %LOCALAPPDATA%\\Zelos\\secrets. Deleting the folder above leaves them behind, so delete that one too — it holds the passwords of every Zelos folder on this Windows account:',
     };
@@ -618,7 +618,7 @@ export function plainSecretNotes(backendName) {
   if (backendName === 'windows-dpapi') {
     return {
       field,
-      data: 'Your saved passwords are not in this folder. Windows keeps them, locked to your account, in a second Zelos folder: paste %LOCALAPPDATA%\\Zelos into the File Explorer address bar to find it, and delete that folder too.',
+      data: 'Your saved passwords are not in this folder. Windows keeps them, locked to your account, in a second Zelos folder: paste %LOCALAPPDATA%\\Zelos into the File Explorer address bar to find it, and delete that folder too. It holds the passwords for any other Zelos folder on this computer as well.',
       about: 'Your passwords are locked to your Windows account, in files on this computer.',
     };
   }
@@ -3521,7 +3521,12 @@ export function eraseSteps(platform = '', backendName = '') {
   return windows
     ? {
       plain: 'To erase everything: quit Zelos, then delete this folder and empty the Recycle Bin.',
-      command: (dir) => `Remove-Item -Recurse -Force "${dir}"`,
+      // -LiteralPath and single quotes: in double quotes PowerShell expands `$`
+      // and backticks, and -Path reads `[` `]` as wildcards.
+      command: (dir) => `Remove-Item -LiteralPath '${String(dir).replace(/'/g, "''")}' -Recurse -Force`,
+      /* Join-Path refuses a missing LOCALAPPDATA rather than turning
+         "$env:LOCALAPPDATA\Zelos" into "\Zelos" at the root of the drive. */
+      secrets: "Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Zelos') -Recurse -Force",
     }
     : {
       plain: 'To erase everything: quit Zelos, then drag this folder to the Trash and empty the Trash.',
@@ -3682,7 +3687,7 @@ function dataPanel() {
         el('p', { class: 'quiet-note', text: 'Zelos deliberately has no route that wipes your data — a local server that can destroy the database on request is a local server a stray web page can point at. Done by hand, with the app closed, it is one command:' }),
         el('pre', { class: 'code' }, el('code', { text: erase.command(home) })),
         el('p', { class: 'quiet-note', text: secretStoreNotes(state.health?.backend?.name).data }),
-        backendName === 'windows-dpapi' ? el('pre', { class: 'code' }, el('code', { text: erase.command('$env:LOCALAPPDATA\\\\Zelos') })) : null,
+        backendName === 'windows-dpapi' ? el('pre', { class: 'code' }, el('code', { text: erase.secrets })) : null,
       ], { id: 'data.experts' }),
     ]),
     status.node,
