@@ -1088,7 +1088,11 @@ export async function serveMcp(flags, io = {}) {
     app.exit?.(0);
     return { ok: true, mcp: true };
   } catch (err) {
-    process.stderr.write(`zelos mcp: ${err?.stack ?? err}\n`);
+    // The refusal's sentence for a runtime without FTS5, a stack otherwise.
+    const { fatalText } = await load('db.mjs').catch(() => ({}));
+    const said = fatalText ? fatalText('zelos mcp', err) : `zelos mcp: ${err?.stack ?? err}\n`;
+    // Flushed before exit, for the reason stdout is above: app.exit does not wait.
+    await new Promise((resolve) => process.stderr.write(said, resolve));
     app.exit?.(1);
     return { ok: false, mcp: true, error: err };
   }
