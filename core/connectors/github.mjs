@@ -685,6 +685,7 @@ export function tokenUrlOf(settings) {
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return TOKEN_URL;
   const onPath = url.pathname === '/api' || url.pathname.startsWith('/api/');
   const host = !onPath && url.hostname.startsWith('api.') ? url.hostname.slice(4) : url.hostname;
+  if (!host || host.startsWith('.')) return TOKEN_URL;
   return `${url.protocol}//${host}${url.port ? `:${url.port}` : ''}/settings/tokens`;
 }
 

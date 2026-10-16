@@ -477,6 +477,7 @@ test('REGRESSION: a GitHub Enterprise user is told to mint a token on their own 
     'https://api.ghe.corp.example:8443/settings/tokens', 'an Enterprise host that happens to start with api. is kept');
   assert.equal(tokenUrlOf({ apiBase: 'https://api.acme.ghe.com' }), 'https://acme.ghe.com/settings/tokens');
   assert.equal(tokenUrlOf({ apiBase: 'not a url' }), 'https://github.com/settings/tokens');
+  assert.equal(tokenUrlOf({ apiBase: 'https://api.' }), 'https://github.com/settings/tokens');
 
   const { origin } = await githubServer(t, (req, res) => {
     res.writeHead(401, { 'content-type': 'application/json' });
