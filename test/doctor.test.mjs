@@ -719,3 +719,17 @@ describe('where doctor looks for the home', () => {
     }
   });
 });
+
+test('on a fresh home, doctor names a runtime without FTS5 rather than "not created yet" (TT-3467)', async (t) => {
+  const sqlite = await import('node:sqlite');
+  const exec = sqlite.DatabaseSync.prototype.exec;
+  sqlite.DatabaseSync.prototype.exec = function (sql) {
+    if (/using\s+fts5/i.test(String(sql))) throw new Error('no such module: fts5');
+    return exec.call(this, sql);
+  };
+  t.after(() => { sqlite.DatabaseSync.prototype.exec = exec; });
+  freshHome({});
+  const database = byId(await diagnose({ deps: SILENT_DEPS }), 'database');
+  assert.equal(database.status, 'fail', database.detail);
+  assert.match(database.detail, /without the FTS5 extension/);
+});
