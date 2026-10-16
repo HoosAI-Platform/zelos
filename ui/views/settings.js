@@ -3632,7 +3632,7 @@ function dataPanel() {
         : button('Copy the folder path', { class: 'btn solid', onClick: copyPath }),
       button('Save board snapshot', { class: 'btn quiet', onClick: exportSnapshot }),
     ]),
-    el('p', { class: 'quiet-note', text: 'The snapshot includes the current board and settings, without passwords. Web addresses in your settings, calendars and feeds included, are cut back to the site they are on, because the full address is often a key in itself. It does not include your full mail archive, captures or complete item history. Use a backup to restore your data.' }),
+    el('p', { class: 'quiet-note', text: 'The snapshot includes the current board and settings, without passwords. Every web address in your settings, calendar and feed addresses among them, is cut back to the site it is on, because the full address is often a key in itself. It does not include your full mail archive, captures or complete item history. Use a backup to restore your data.' }),
     canShowFolder() ? null : el('p', { class: 'quiet-note', text: folderHint(platform) }),
     section('Erasing everything', {}, [
       el('p', { class: 'quiet-note', text: 'To erase everything: quit Zelos, then drag this folder to the Trash and empty the Trash.' }),
