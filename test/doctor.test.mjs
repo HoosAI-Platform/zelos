@@ -719,3 +719,55 @@ describe('where doctor looks for the home', () => {
     }
   });
 });
+
+describe('a model that answers 401 or 403', () => {
+  /* QA, 2026-10-10 (TT-3451): a keyless local model that answered 401 or 403
+     was told it "refused the stored key", and to paste a fresh one — but no
+     key was stored or sent, and the advice could not be followed. The real
+     case is a runtime started with --api-key. */
+  const refusing = (status, seen) => ({
+    ...SILENT_DEPS,
+    listModels: async (req) => {
+      seen.push(req);
+      throw Object.assign(new Error(`HTTP ${status}`), { status });
+    },
+  });
+
+  test('with no key sent, it says the program wants one and where to paste it', async () => {
+    for (const status of [401, 403]) {
+      freshHome({ config: { version: 1, model: { protocol: 'openai', baseUrl: 'http://127.0.0.1:8000/v1', model: 'qwen' } } });
+      const seen = [];
+      const model = byId(await diagnose({ deps: refusing(status, seen) }), 'model');
+      assert.ok(seen.length, 'the model was never asked, so this proves nothing');
+      assert.ok(!seen[0].apiKey, 'a key was sent, so this is the other case');
+      assert.equal(model.status, 'fail');
+      assert.doesNotMatch(model.detail, /refused the stored key/, 'it blamed a key that does not exist');
+      assert.match(model.detail, /wants a key, and none is saved for it/);
+      assert.match(model.action, /--api-key/);
+      assert.match(model.action, /Settings → AI → Advanced/);
+      assert.match(model.action, /API key \(optional\)/);
+    }
+  });
+
+  test('a local runtime with its key saved is sent that key, and a refusal says it does not match', async () => {
+    freshHome({ config: { version: 1, model: { protocol: 'openai', baseUrl: 'http://127.0.0.1:8000/v1', model: 'qwen' } } });
+    const seen = [];
+    const deps = { ...refusing(401, seen), getSecret: async (ref) => (String(ref).startsWith('model.') ? 'sk-local' : null) };
+    const report = await diagnose({ deps });
+    assert.equal(seen[0]?.apiKey, 'sk-local', 'doctor did not send the key saved for a local runtime, as the app does');
+    assert.match(byId(report, 'model.key').detail, /a key is saved for it, and is sent/);
+    const model = byId(report, 'model');
+    assert.doesNotMatch(model.detail, /none is saved/, 'it told someone who saved the key to save it');
+    assert.match(model.detail, /refused the key saved for it/);
+    assert.doesNotMatch(model.action, /website/, 'a local runtime has no website to make a key on');
+  });
+
+  test('with a stored key sent, it still says the key was refused', async () => {
+    freshHome({ config: { version: 1, model: { protocol: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'gpt' } } });
+    const seen = [];
+    const deps = { ...refusing(401, seen), getSecret: async (ref) => (String(ref).startsWith('model.') ? 'sk-test' : null) };
+    const model = byId(await diagnose({ deps }), 'model');
+    assert.equal(seen[0]?.apiKey, 'sk-test', 'the stored key was not sent, so this proves nothing');
+    assert.match(model.detail, /refused the stored key/);
+  });
+});
