@@ -357,12 +357,21 @@ Get these right:
 
 ```js
 // caldav.mjs  — reuses the ics parser
-export async function discover({url, user, pass})   // PROPFIND current-user-principal -> calendar-home-set -> calendar list
+export async function discover({url, user, pass})   // reads what the URL names: `/` walks principal -> home set -> list; a calendar URL is that calendar
 export async function fetchRange({url, user, pass, from, to})  // REPORT calendar-query -> [icsText]
 export async function testConnection({url,user,pass})          // -> {ok, calendars:[{href,name}], error}
 ```
 Hand-rolled minimal XML parsing is fine (namespace-agnostic: match on local names). Basic auth.
 Follow one redirect. iCloud/Fastmail/Nextcloud shapes are the targets.
+
+**Discovery reads what the typed URL names, never wider** (TT-3513). Only the account address — the
+origin root or `/.well-known/caldav` — walks to the home set and falls back through the other of the
+two. Any deeper URL gets one Depth:0 PROPFIND: a calendar is that calendar alone (and the sweep then
+re-reads only it, at Depth:0); a task list is an error that says so; the principal, the home set or a
+path above the home set reads the account; anything else is listed for what it holds itself. A failure
+at a deep URL is thrown, never read at a wider one; only Test walks the account address then, to
+name in the error what the account can read (`suggestions`), and never returns or caches it. Servers send `current-user-principal` on every
+resource (RFC 5397), so its presence never decides any of this.
 
 **Basic auth is pinned to the origin the user typed**, and iCloud is why that has a visible cost.
 Discovery is driven by the server's own answers — a `Location`, or an `href` naming the principal

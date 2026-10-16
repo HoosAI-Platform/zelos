@@ -155,6 +155,52 @@ test('malformed and partially refused CalDAV snapshots cannot erase cached appoi
   }
 });
 
+/**
+ * TT-3513 (QA, 2026-10-10): the address of one Radicale calendar used to read
+ * every calendar in the account, so a person already hit by it has appointments
+ * from other calendars stored under this source. The first sweep after the fix
+ * returns a complete snapshot of the one calendar, and the replace semantics
+ * above are what take the others out — no migration needed, and none written.
+ * A task list is the opposite case: its empty answer must be an error, or the
+ * same replace would empty the source.
+ */
+test('a typed CalDAV calendar replaces what was stored from the rest of its account', async (t) => {
+  const { invalidate } = await import('../core/sources/caldav.mjs');
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; invalidate(); });
+  const work = calendarText().replace('UID:weekly', 'UID:work-standup').replace('Moonstone appointment', 'Work standup');
+  const ns = 'xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"';
+  const calendar = (href, comp) => `<response><href>${href}</href><propstat><prop><resourcetype><collection/><C:calendar/></resourcetype><C:supported-calendar-component-set><C:comp name="${comp}"/></C:supported-calendar-component-set><current-user-principal><href>/nemo/</href></current-user-principal></prop><status>HTTP/1.1 200 OK</status></propstat></response>`;
+  const multistatus = (inner) => new Response(`<multistatus ${ns}>${inner}</multistatus>`, { status: 207, headers: { 'Content-Type': 'application/xml' } });
+  const report = (text) => multistatus(`<response><href>/e.ics</href><propstat><prop><C:calendar-data><![CDATA[${text}]]></C:calendar-data></prop><status>HTTP/1.1 200 OK</status></propstat></response>`);
+  globalThis.fetch = async (url, opts) => {
+    const at = new URL(url).pathname;
+    if (opts.method === 'REPORT') return report(at === '/nemo/work/' ? work : calendarText());
+    if (at === '/nemo/personal/') return multistatus(calendar('/nemo/personal/', 'VEVENT'));
+    if (at === '/nemo/tasks/') return multistatus(calendar('/nemo/tasks/', 'VTODO'));
+    if (opts.body.includes('calendar-home-set')) return multistatus('<response><href>/nemo/</href><propstat><prop><C:calendar-home-set><href>/nemo/</href></C:calendar-home-set></prop><status>HTTP/1.1 200 OK</status></propstat></response>');
+    if (opts.headers.Depth === '0') return multistatus('<response><href>/nemo/</href><propstat><prop><resourcetype><collection/><principal/></resourcetype><current-user-principal><href>/nemo/</href></current-user-principal></prop><status>HTTP/1.1 200 OK</status></propstat></response>');
+    return multistatus(calendar('/nemo/personal/', 'VEVENT') + calendar('/nemo/work/', 'VEVENT'));
+  };
+
+  const db = fresh();
+  for (let i = 0; i < 2; i++) {
+    upsertEvent(db, { calendarId: 'dav', uid: `work-standup-${i}`, title: 'Work standup', startsAt: new Date(start + i * 7 * 86400000).toISOString(), endsAt: new Date(start + i * 7 * 86400000 + 3600000).toISOString() });
+  }
+  const sweepOf = (url) => runSweep({ db, mode: 'light', deps: { getSecret: async () => null }, config: { ...structuredClone(DEFAULTS), mail: [], calendars: [{ id: 'dav', kind: 'caldav', enabled: true, url, label: 'DAV' }] } });
+
+  const result = await sweepOf('http://127.0.0.1:9967/nemo/personal/');
+  assert.equal(result.stats.sourcesFailed, 0);
+  const titles = listEvents(db).map((e) => e.title);
+  assert.equal(titles.includes('Work standup'), false, 'appointments from a calendar nobody named are still stored');
+  assert.equal(titles.filter((title) => title === 'Moonstone appointment').length, 2);
+
+  invalidate();
+  const tasks = await sweepOf('http://127.0.0.1:9967/nemo/tasks/');
+  assert.equal(tasks.stats.sourcesFailed, 1, 'a task list was read as an empty calendar');
+  assert.equal(listEvents(db).length, 2, 'and what was stored for the source is kept');
+});
+
 test('ignored or invalid recurrence modifiers preserve the previous calendar snapshot', () => {
   for (const modifier of ['BYHOUR=9,15', 'BYMINUTE=30', 'BYSECOND=0', 'BYYEARDAY=1', 'BYWEEKNO=2', 'BYDAY=ZZ', 'COUNT=abc', 'UNTIL=broken', 'INTERVAL=0', 'BYMONTH=13']) {
     const result = eventsFrom(calendarText().replace('FREQ=WEEKLY;COUNT=2', `FREQ=DAILY;${modifier}`), {

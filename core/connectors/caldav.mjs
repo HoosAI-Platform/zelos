@@ -59,6 +59,11 @@ export default calendarConnector({
    * reporting it twice sends the reader to fix the calendar. Trying the
    * connection unauthenticated instead lets the server's answer be the
    * diagnosis, which is the more useful of the two.
+   *
+   * `testCalDav` is `testConnection`, so a calendar URL deeper than the account
+   * address that fails here also walks the account address once, to name in
+   * the detail what the account can read (QA, 2026-10-10, TT-3513). That is a
+   * one-off for each doctor run; the sweep never does it.
    */
   async check(source, ctx) {
     let pass = null;
