@@ -153,10 +153,64 @@ const MAX_TEXT_CHARS = 512 * 1024;
  * After the XML layer is decoded, "x&lt;y" is "x<y", and `stripTags` reads an
  * unterminated `<y` as a tag running to the end of the input — the rest of a
  * title gone. Escaping it again lets `htmlToText` hand it back as the character
- * it was. Each `<` looks ahead only as far as the next `<` or `>`, so this is
- * linear.
+ * it was.
+ *
+ * "Complete" is decided by mime.mjs's own tag rules, quotes included: a quote
+ * directly after `=` runs to its partner, so `<a title="x<y">` is one tag. A
+ * regex that knew about quotes was measured quadratic (72 s on 512 KB of
+ * `'='a<a`), so this is a scan. Every (position, just-after-`=`) state a failed
+ * scan passes through is recorded, and a later scan that reaches one fails
+ * there — the outcome from a state does not depend on where the scan began —
+ * so each state is visited once and the whole thing is linear.
  */
-const escapeStrayLt = (s) => s.replace(/<(?![A-Za-z/!?][^<>]*>)/g, '&lt;');
+function escapeStrayLt(s) {
+  let i = s.indexOf('<');
+  if (i < 0) return s;
+  const n = s.length;
+  const dead = [new Uint8Array(n + 1), new Uint8Array(n + 1)];
+  const opensTag = (code) => (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)
+    || code === 0x2f /* / */ || code === 0x21 /* ! */ || code === 0x3f /* ? */;
+
+  /* The index of the `>` that closes the tag opened at `at`, or -1. */
+  const tagEnd = (at) => {
+    if (!opensTag(s.charCodeAt(at + 1))) return -1;
+    const seen = [];
+    let j = at + 1;
+    let afterEq = 0;
+    while (j < n && !dead[afterEq][j]) {
+      seen.push(j, afterEq);
+      const code = s.charCodeAt(j);
+      if (code === 0x3e /* > */) return j;
+      if (code === 0x3c /* < */) break;
+      if (afterEq && (code === 0x22 || code === 0x27)) {
+        const close = s.indexOf(s[j], j + 1);
+        if (close < 0) break;
+        j = close + 1;
+        afterEq = 0;
+        continue;
+      }
+      if (code === 0x3d /* = */) afterEq = 1;
+      else if (!isSpace(code) && code !== 0x0c) afterEq = 0;
+      j += 1;
+    }
+    for (let k = 0; k < seen.length; k += 2) dead[seen[k + 1]][seen[k]] = 1;
+    return -1;
+  };
+
+  let out = '';
+  let plain = 0;
+  while (i >= 0) {
+    const end = tagEnd(i);
+    if (end >= 0) {
+      i = s.indexOf('<', end + 1);
+      continue;
+    }
+    out += `${s.slice(plain, i)}&lt;`;
+    plain = i + 1;
+    i = s.indexOf('<', i + 1);
+  }
+  return out + s.slice(plain);
+}
 
 /**
  * The text of one element, markup removed and entities decoded.
@@ -201,7 +255,8 @@ function textOf(raw, type = 'html') {
 function textTypeOf(attrs) {
   const type = attr(attrs, 'type').trim().toLowerCase();
   if (type === 'xhtml' || type === 'application/xhtml+xml') return 'xhtml';
-  if (type === 'text' || type === 'text/plain') return 'text';
+  // `plain` is Media RSS's word for it (`<media:title type="plain">`).
+  if (type === 'text' || type === 'text/plain' || type === 'plain') return 'text';
   return 'html';
 }
 
