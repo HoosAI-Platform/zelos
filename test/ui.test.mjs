@@ -5763,3 +5763,37 @@ test('Your data counts what Zelos is holding, and stands unchanged when the rout
   assert.match(onScreen(bare), /Your board and saved history live in one folder on this computer\./);
   assert.doesNotMatch(onScreen(bare), /on disk/, 'a panel with no answer must not claim a size');
 });
+
+test('a calendar Test names the calendars it will read, not "0 appointments" (TT-3456)', async () => {
+  /* QA, 2026-10-10: CalDAV "Test it" said "Site visits: 0 appointments found"
+     for a calendar holding two — the route lists calendars and has no count,
+     and the page printed `result.events ?? 0`. */
+  for (const dir of [UI, path.join(ROOT, 'website', 'try')]) {
+    const { calendarTestSummary } = await import(fileUrl(dir, 'lib/format.js'));
+    const at = path.relative(ROOT, dir);
+    // CalDAV: no count, the calendars it found.
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Site visits' }] }),
+      'Connected. Zelos will read 1 calendar: Site visits.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Home' }, { name: 'Work' }, { name: 'Site visits' }] }),
+      'Connected. Zelos will read 3 calendars: Home, Work and Site visits.', at);
+    const seven = Array.from({ length: 7 }, (_, i) => ({ name: `C${i + 1}` }));
+    assert.equal(calendarTestSummary({ ok: true, calendars: seven }),
+      'Connected. Zelos will read 7 calendars: C1, C2, C3, C4, C5 and 2 more.', at);
+    assert.doesNotMatch(calendarTestSummary({ ok: true, calendars: [{ name: 'Site visits' }] }), /appointment/, at);
+    // A .ics link or a file does count, and keeps saying so — 0 included.
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Team' }], events: 2 }), 'Team: 2 appointments found.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Empty' }], events: 0 }), 'Empty: 0 appointments found.', at);
+    // The edges of the list.
+    assert.equal(calendarTestSummary({ ok: true, calendars: [] }), 'Connected.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{}] }), 'Connected. Zelos will read 1 calendar: a calendar without a name.', at);
+    const names = (n) => Array.from({ length: n }, (_, i) => ({ name: `C${i + 1}` }));
+    assert.equal(calendarTestSummary({ ok: true, calendars: names(5) }), 'Connected. Zelos will read 5 calendars: C1, C2, C3, C4 and C5.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: names(6) }), 'Connected. Zelos will read 6 calendars: C1, C2, C3, C4, C5 and 1 more.', at);
+  }
+  // And the pages use it, not the old line.
+  for (const file of [path.join(UI, 'views', 'settings.js'), path.join(ROOT, 'website', 'try', 'views', 'settings.js')]) {
+    const src = fs.readFileSync(file, 'utf8');
+    assert.match(src, /status\.good\(calendarTestSummary\(result\)\)/, file);
+    assert.doesNotMatch(src, /result\.events \?\? 0/, file);
+  }
+});
