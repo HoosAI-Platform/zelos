@@ -290,10 +290,18 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    including one an attacker on the path has *stripped* from the capability
    list — aborts the connection instead of falling back to cleartext. Set to
    `false` it is a standing permission to use cleartext for that account, which
-   exists for a local bridge (Proton Mail Bridge and friends) where the traffic
-   never leaves the machine. Set to `true` it is enforced everywhere, loopback
-   included. Zelos refuses *before* `LOGIN`, so a stripped connection costs you
-   a sweep and never a password.
+   exists for a local bridge where the traffic never leaves the machine. Set to
+   `true` it is enforced everywhere, loopback included. Zelos refuses *before*
+   `LOGIN`, so a stripped connection costs you a sweep and never a password.
+
+   Certificates are verified everywhere except loopback. Proton Bridge encrypts
+   (STARTTLS on `127.0.0.1:1143` by default) with a self-signed certificate it
+   generates per install, so on loopback an unverified certificate is accepted:
+   that session is no weaker than the cleartext one loopback is already allowed,
+   and anything that can answer there is already running on the machine. Both
+   halves are checked — the host name you configured *and* the address the
+   socket actually reached — so a `*.localhost` name that a hostile resolver
+   points elsewhere is verified like any other host.
 2. **Your calendar URL** — an `.ics` feed or a CalDAV server.
 3. **Your model endpoint** — the `model.baseUrl` you chose. If you point that
    at Ollama, LM Studio, llama.cpp, vLLM or LocalAI on `127.0.0.1`, then
