@@ -1073,6 +1073,45 @@ test('REGRESSION: a signature part and an inline logo are not attachments', asyn
   );
 });
 
+test('REGRESSION: an attached email is not read as the message body', async () => {
+  /* "Forward as attachment" from a client that writes HTML only. The parts
+     inside the attached message/rfc822 carry no disposition of their own, so
+     chooseTextPart's plain-before-HTML rule picked the ATTACHED email's text
+     (BODY.PEEK[2.1]) and the model never saw a word the sender wrote. */
+  const envelope = '("Thu, 06 Aug 2026 09:00:00 -0400" "Original" NIL NIL NIL NIL NIL NIL NIL NIL)';
+  const inner = '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 40 1 NIL NIL NIL NIL)';
+  const attached = (disposition) =>
+    `("MESSAGE" "RFC822" NIL NIL NIL "7BIT" 400 ${envelope} ${inner} 12 NIL ${disposition} NIL NIL)`;
+  const forwarded = (disposition) =>
+    '(("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 60 2 NIL NIL NIL NIL)' +
+    `${attached(disposition)} "MIXED" ("BOUNDARY" "b10") NIL NIL NIL)`;
+  // Nothing of its own to read: the attached email is better than nothing.
+  const onlyEnclosed = `(${attached('("attachment" ("FILENAME" "original.eml"))')} "MIXED" ("BOUNDARY" "b11") NIL NIL NIL)`;
+  const headers = (uid) => `Subject: Fwd ${uid}\r\nFrom: Kit <kit@alder.example>\r\nDate: Sat, 08 Aug 2026 12:00:00 -0400\r\n\r\n`;
+  const parts = { 1: '<p>See below, Nemo &mdash; the <b>sender</b> wrote this.</p>', '2.1': 'Words from the attached email.\r\n' };
+
+  await withServer(
+    {
+      onCommand: session({
+        extra: mailbox([
+          { uid: 501, internalDate: '08-Aug-2026 12:00:00 -0400', structure: forwarded('("attachment" ("FILENAME" "original.eml"))'), headers: headers(501), parts },
+          { uid: 502, internalDate: '08-Aug-2026 11:00:00 -0400', structure: forwarded('NIL'), headers: headers(502), parts },
+          { uid: 503, internalDate: '08-Aug-2026 10:00:00 -0400', structure: onlyEnclosed, headers: headers(503), parts: { '1.1': 'Only the original.\r\n' } },
+        ]),
+      }),
+    },
+    async ({ port }) => {
+      const messages = await fetchRecent({ host: '127.0.0.1', port, secure: false, user: 'u', pass: 'p', timeoutMs: 5000 });
+      const byUid = new Map(messages.map((m) => [m.uid, m]));
+      assert.equal(byUid.get(501).text, 'See below, Nemo — the sender wrote this.');
+      assert.equal(byUid.get(502).text, 'See below, Nemo — the sender wrote this.',
+        'an inline-disposed attached email is still someone else\'s words');
+      assert.equal(byUid.get(503).text, 'Only the original.');
+      assert.equal(byUid.get(501).hasAttachments, true);
+    },
+  );
+});
+
 test('a message with no usable BODYSTRUCTURE falls back to the TEXT section', async () => {
   await withServer(
     {
