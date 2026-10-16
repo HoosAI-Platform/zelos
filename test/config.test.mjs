@@ -10,7 +10,7 @@ process.env.ZELOS_LOG_LEVEL = 'silent';
 const HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-config-'));
 process.env.ZELOS_HOME = path.join(HOME_ROOT, 'home');
 
-const { DEFAULTS, MAIL_ACCOUNT_DEFAULTS, paths, loadConfig, saveConfig, validateConfig, newId, isValidRef } =
+const { DEFAULTS, MAIL_ACCOUNT_DEFAULTS, paths, loadConfig, saveConfig, validateConfig, privacyLimits, newId, isValidRef } =
   await import('../core/config.mjs');
 const { modelKeyRef } = await import('../core/model-key.mjs');
 
@@ -374,7 +374,8 @@ test('a config hand-edited into nonsense loads with defaults instead of killing 
       assert.ok(cfg.identity.timezone.length > 0, `${where}: the timezone still resolves`);
       assert.equal(cfg.model.protocol, 'anthropic', where);
       assert.equal(cfg.ui.accent, DEFAULTS.ui.accent, where);
-      assert.equal(cfg.privacy.sendBodies, true, where);
+      // Privacy alone is repaired CLOSED: its defaults send bodies (TT-3424).
+      assert.equal(cfg.privacy.sendBodies, section !== 'privacy', where);
       assert.deepEqual(cfg.sweep, DEFAULTS.sweep, where);
 
       // The next save repairs the file rather than being blocked by it — the
@@ -383,7 +384,11 @@ test('a config hand-edited into nonsense loads with defaults instead of killing 
       assert.equal(saved.identity.name, 'Rescued', where);
       const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
       assert.deepEqual(malformed(onDisk), [], `${where}: the section is repaired on disk`);
-      assert.equal(validateConfig(saved).ok, true, `${where}: ${JSON.stringify(validateConfig(saved).errors)}`);
+      // A closed privacy section is named in Settings until it is saved again;
+      // everything else comes back whole.
+      const errors = validateConfig(saved).errors.filter((e) => section !== 'privacy' || !e.path.startsWith('privacy'));
+      assert.deepEqual(errors, [], where);
+      if (section === 'privacy') assert.equal(saved.privacy.sendBodies, false, `${where}: the save turned bodies on`);
     }
   }
 });
@@ -626,4 +631,43 @@ test('oauth.clients is the operator\'s own registrations, checked by shape, and 
     .map((file) => fs.readFileSync(file, 'latin1'));
   assert.ok(onDisk.length > 0, 'the save wrote something');
   assert.ok(onDisk.every((text) => !text.includes('GOCSPX-never-on-disk')), 'the secret reached the disk');
+});
+
+test('privacyLimits() fails closed on a value that is there but unusable (TT-3424)', () => {
+  const closed = { sendBodies: false, bodyChars: 0, maxItemsPerSweep: 1 };
+  // Absent takes the default: a config from before the setting, or a test.
+  assert.deepEqual(privacyLimits(undefined), { ...DEFAULTS.privacy });
+  assert.deepEqual(privacyLimits({}), { ...DEFAULTS.privacy });
+  // Present but unusable takes the most private reading.
+  assert.deepEqual(privacyLimits(null), closed);
+  assert.deepEqual(privacyLimits('off'), closed);
+  assert.deepEqual(privacyLimits({ sendBodies: null, bodyChars: null, maxItemsPerSweep: null }), closed);
+  assert.deepEqual(privacyLimits({ sendBodies: 0, bodyChars: '', maxItemsPerSweep: '' }), closed);
+  assert.equal(privacyLimits({ sendBodies: 'true' }).sendBodies, false, 'only true sends bodies');
+  assert.equal(privacyLimits({ sendBodies: 'false' }).sendBodies, false);
+  assert.equal(privacyLimits({ bodyChars: 0 }).bodyChars, 0, '0 characters is 0, not the default');
+  assert.equal(privacyLimits({ sendBodies: true, bodyChars: null }).sendBodies, false,
+    'no body characters means no descriptions either');
+  assert.equal(privacyLimits({ maxItemsPerSweep: 0 }).maxItemsPerSweep, 1);
+  // Usable values pass through, held inside their range.
+  assert.deepEqual(privacyLimits({ sendBodies: true, bodyChars: 600.7, maxItemsPerSweep: 40 }),
+    { sendBodies: true, bodyChars: 600, maxItemsPerSweep: 40 });
+  assert.equal(privacyLimits({ bodyChars: 1e9 }).bodyChars, 100_000);
+  assert.equal(privacyLimits({ maxItemsPerSweep: 5000 }).maxItemsPerSweep, 1000);
+});
+
+test('a privacy section hand-edited into a scalar is repaired closed, on load and on save (TT-3424)', () => {
+  freshHome('privacy-closed');
+  const { configFile } = paths();
+  fs.writeFileSync(configFile, JSON.stringify({ privacy: null }));
+  const loaded = loadConfig();
+  assert.equal(loaded.privacy.sendBodies, false, 'a broken privacy section came back sending bodies');
+  assert.ok(validateConfig(loaded).errors.some((e) => e.path.startsWith('privacy')),
+    'the repair is silent: Settings would never name it');
+
+  // Saving a different section must not let the defaults show through.
+  fs.writeFileSync(configFile, JSON.stringify({ privacy: 'off' }));
+  const saved = saveConfig({ sweep: { intervalMinutes: 45 } });
+  assert.equal(saved.privacy.sendBodies, false, 'saving Schedule turned bodies on');
+  assert.equal(JSON.parse(fs.readFileSync(configFile, 'utf8')).privacy.sendBodies, false);
 });

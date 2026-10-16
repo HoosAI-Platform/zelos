@@ -168,6 +168,16 @@ export const SOURCE_DEFAULTS = deepFreeze({
   settings: {},
 });
 
+/**
+ * The ranges validateConfig holds the privacy numbers to. Settings → Privacy
+ * (ui/views/settings.js) keeps its own copy, since the page cannot import
+ * core/; test/ui.test.mjs checks the two agree.
+ */
+export const PRIVACY_RANGES = deepFreeze({ bodyChars: [200, 100_000], maxItemsPerSweep: [1, 1000] });
+
+/** The most private reading of the privacy settings: what an unusable value means. */
+export const PRIVACY_CLOSED = deepFreeze({ sendBodies: false, bodyChars: 0, maxItemsPerSweep: 1 });
+
 export const DEFAULTS = deepFreeze({
   version: 1,
   identity: { name: '', email: '', timezone: '' },
@@ -426,7 +436,11 @@ export function loadConfig() {
       section: key,
       found: cfg[key] === null ? 'null' : typeof cfg[key],
     });
-    cfg[key] = structuredClone(DEFAULTS[key]);
+    /* Privacy is put back CLOSED, not to its defaults: the defaults send
+       bodies, and a section nobody can read says nothing about whether its
+       owner wanted that. The closed values fail validateConfig, so Settings
+       names the section until it is saved again (TT-3424). */
+    cfg[key] = structuredClone(key === 'privacy' ? PRIVACY_CLOSED : DEFAULTS[key]);
   }
   // Resolved at read time, not persisted: a machine that moves should follow.
   if (!cfg.identity.timezone) cfg.identity.timezone = localTimezone();
@@ -494,7 +508,10 @@ export function saveConfig(patch = {}) {
   for (const key of SECTIONS) {
     if (!Object.hasOwn(raw, key) || isPlainObject(raw[key])) continue;
     log.warn('config: dropping a malformed section from the file on disk', { section: key });
-    delete raw[key];
+    // Privacy is repaired closed, as loadConfig repairs it: dropping it would
+    // let the defaults, which send bodies, show through (TT-3424).
+    if (key === 'privacy') raw[key] = structuredClone(PRIVACY_CLOSED);
+    else delete raw[key];
   }
   const merged = normalizeAccounts(
     deepMerge(deepMerge(structuredClone(DEFAULTS), raw), stripSecrets(patch)),
@@ -890,10 +907,48 @@ export function validateConfig(cfg) {
   const p = cfg.privacy;
   if (!isPlainObject(p)) errors.push({ path: 'privacy', message: 'must be an object' });
   else {
-    if (!isInt(p.maxItemsPerSweep, 1, 1000)) errors.push({ path: 'privacy.maxItemsPerSweep', message: 'must be an integer between 1 and 1000' });
+    const [itemsMin, itemsMax] = PRIVACY_RANGES.maxItemsPerSweep;
+    const [charsMin, charsMax] = PRIVACY_RANGES.bodyChars;
+    if (!isInt(p.maxItemsPerSweep, itemsMin, itemsMax)) errors.push({ path: 'privacy.maxItemsPerSweep', message: `must be an integer between ${itemsMin} and ${itemsMax}` });
     if (!isBool(p.sendBodies)) errors.push({ path: 'privacy.sendBodies', message: 'must be a boolean' });
-    if (!isInt(p.bodyChars, 200, 100_000)) errors.push({ path: 'privacy.bodyChars', message: 'must be an integer between 200 and 100000' });
+    if (!isInt(p.bodyChars, charsMin, charsMax)) errors.push({ path: 'privacy.bodyChars', message: `must be an integer between ${charsMin} and ${charsMax}` });
   }
 
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * The privacy settings as the engine must honour them, failing CLOSED.
+ *
+ * A PUT is saved first and reported second, so a value validateConfig refuses
+ * can still be on disk: `bodyChars: null`, `sendBodies: 0`, `"false"`. The
+ * readers used to fall back to the default for anything that was not a
+ * number, and to send bodies for anything that was not exactly `false`, so a
+ * blank cap meant 4,000 characters and a mistyped switch meant "on" (QA,
+ * 2026-10-10, TT-3424). Now an ABSENT value takes the default, as a config
+ * written before the setting existed must, and a value that is PRESENT but
+ * not usable takes the most private reading the setting allows: bodies off,
+ * no body characters, one item. A number past the top of its range is held
+ * to that top. The "Still incomplete" banner names the bad value meanwhile.
+ */
+export function privacyLimits(privacy) {
+  const fallback = DEFAULTS.privacy;
+  if (privacy === undefined) return { ...fallback };
+  // A section that is there but is not an object (null, a string) is a value
+  // present but unusable, the same as each setting inside it.
+  if (!isPlainObject(privacy)) return { ...PRIVACY_CLOSED };
+  const given = (key) => Object.hasOwn(privacy, key) && privacy[key] !== undefined;
+  const within = (key) => {
+    const [, top] = PRIVACY_RANGES[key];
+    const value = privacy[key];
+    if (!given(key)) return fallback[key];
+    if (!Number.isFinite(value)) return PRIVACY_CLOSED[key];
+    return Math.min(top, Math.max(PRIVACY_CLOSED[key], Math.floor(value)));
+  };
+  const bodyChars = within('bodyChars');
+  // No body characters means no body content of any kind, event descriptions
+  // included: a zeroed cap is read as the switch off, not as "a body too
+  // short to send, but the notes still go".
+  const sendBodies = bodyChars > 0 && (given('sendBodies') ? privacy.sendBodies === true : fallback.sendBodies);
+  return { sendBodies, bodyChars, maxItemsPerSweep: within('maxItemsPerSweep') };
 }

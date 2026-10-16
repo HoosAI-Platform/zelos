@@ -5010,6 +5010,67 @@ test('the schedule speaks am/pm and stores the 24-hour numbers config validates'
   assert.equal(saved.intervalMinutes, 30);
 });
 
+test('Privacy refuses a blank or 0 cap instead of saving the default (TT-3424)', async (t) => {
+  withPlainDom(t);
+  const calls = [];
+  globalThis.fetch = plainFetch({ calls });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+
+  assert.equal(settings.wholeNumberIn('600', 200, 20000), 600);
+  for (const bad of ['', ' ', '0', '199', '20001', '600.5', '6e2', '-600', 'abc', null, undefined]) {
+    assert.equal(settings.wholeNumberIn(bad, 200, 20000), null, `${JSON.stringify(bad)} was read as a number`);
+  }
+  // The page's copy of the ranges is validateConfig's, or a value the server
+  // accepts could not be saved back from the panel.
+  const { PRIVACY_RANGES } = await import('../core/config.mjs');
+  assert.deepEqual(settings.PRIVACY_RANGES, PRIVACY_RANGES);
+
+  // A "false" on disk is off to the engine, so the box is not ticked: a ticked
+  // box would write `true` at the next Save.
+  for (const onDisk of ['false', 0, null]) {
+    store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [], privacy: { maxItemsPerSweep: 150, sendBodies: onDisk, bodyChars: 4000 } };
+    const shown = settings.renderSettings({ sub: 'privacy', navigate() {}, rerender() {} });
+    const box = plainWalk(shown).find((n) => n.tag === 'input' && n.attributes.type === 'checkbox');
+    assert.equal(box.checked, false, `sendBodies ${JSON.stringify(onDisk)} on disk showed the box ticked`);
+  }
+
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [], privacy: { maxItemsPerSweep: 150, sendBodies: false, bodyChars: 4000 } };
+  store.state.health = { model: { configured: false } };
+  store.state.configErrors = [];
+  const view = settings.renderSettings({ sub: 'privacy', navigate() {}, rerender() {} });
+  const [chars, max] = plainWalk(view).filter((n) => n.tag === 'input' && n.attributes.type === 'number');
+  const puts = () => calls.filter((c) => c.method === 'PUT' && c.path === '/api/config');
+
+  for (const [field, value, said] of [
+    [chars, '', /Characters of each email sent to the AI” needs a whole number from 200 to 100000\. Nothing was saved\./],
+    [chars, '0', /Characters of each email/],
+    [max, '', /“Most items per check” needs a whole number from 1 to 1000\. Nothing was saved\./],
+    [max, '0', /Most items per check/],
+  ]) {
+    chars.value = '4000';
+    max.value = '150';
+    field.value = value;
+    findButton(view, 'Save').fire('click');
+    await settle();
+    assert.equal(puts().length, 0, `a ${JSON.stringify(value)} was saved`);
+    assert.match(anywhere(view), said);
+  }
+
+  chars.value = '600';
+  max.value = '40';
+  findButton(view, 'Save').fire('click');
+  await settle();
+  assert.deepEqual(puts().at(-1).body.privacy, { sendBodies: false, bodyChars: 600, maxItemsPerSweep: 40 });
+  // A hand-set value validateConfig accepts saves back as it is.
+  chars.value = '50000';
+  max.value = '5';
+  findButton(view, 'Save').fire('click');
+  await settle();
+  assert.deepEqual(puts().at(-1).body.privacy, { sendBodies: false, bodyChars: 50000, maxItemsPerSweep: 5 });
+});
+
 test('Your data shows the folder and says "drag it to the Trash"; the command is under For experts', async (t) => {
   withPlainDom(t);
   globalThis.fetch = plainFetch({});

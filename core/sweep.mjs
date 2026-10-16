@@ -934,7 +934,7 @@ export async function runSweep({
     captures: promptInput.captures,
     priorItems: promptInput.priorItems,
     resolvedItems: promptInput.resolvedItems,
-    privacy: config.privacy ?? {},
+    privacy: config.privacy,
   });
 
   emit('think', `Asking ${config?.model?.label || 'the model'} to read ${promptInput.messages.length} messages`,
