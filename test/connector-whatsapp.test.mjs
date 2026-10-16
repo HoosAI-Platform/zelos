@@ -323,6 +323,41 @@ test('a folder with nothing new to read is a quiet read, not a failure (TT-3442)
   assert.equal(again.parts.reduce((n, p) => n + p.rows.length, 0), 0);
 });
 
+test('doctor says how old a folder\'s exports are, as it does for one file (TT-3444)', async (t) => {
+  /* QA, 2026-10-10: for a folder, check() printed only the count. The age is
+     the one question only doctor can usefully ask. */
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-whatsapp-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const line = '[9/8/26, 9:14:02 AM] Kit Alder: Retainage schedule is posted\n';
+  const daysAgo = (n) => new Date(Date.now() - n * 86_400_000 - 3_600_000);
+  const write = (name, days) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, line);
+    fs.utimesSync(file, daysAgo(days), daysAgo(days));
+    return file;
+  };
+
+  const kit = write('WhatsApp Chat with Kit Alder.txt', 3);
+  const one = await whatsapp.check({ settings: { path: dir } });
+  assert.equal(one.status, 'pass', one.detail);
+  assert.match(one.detail, /1 export · exported 3 days ago/);
+
+  write('WhatsApp Chat - Alder family.txt', 40);
+  const two = await whatsapp.check({ settings: { path: dir } });
+  assert.match(two.detail, /2 exports · newest exported 3 days ago, oldest 40 days ago/);
+
+  // Past the 20 a sweep reads, the ages still cover every export, and the
+  // line says only the newest are read: a stale chat cannot hide behind them.
+  for (let i = 0; i < 20; i += 1) write(`WhatsApp Chat with Crew ${i}.txt`, 2);
+  write('WhatsApp Chat with Old Supplier.txt', 400);
+  const many = await whatsapp.check({ settings: { path: dir } });
+  assert.match(many.detail, /23 exports · newest exported 2 days ago, oldest 400 days ago, and Zelos reads only the newest 20/);
+
+  // The single file it always covered still says so.
+  const single = await whatsapp.check({ settings: { path: kit } });
+  assert.match(single.detail, /exported 3 days ago/);
+});
+
 test('the manifest says out loud that this is an archive, not a connection', () => {
   /* The most important line in the connector is not code. WhatsApp offers no
      way to read a personal account live, so a user who reads "WhatsApp" in a
