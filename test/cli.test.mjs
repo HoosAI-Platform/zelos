@@ -1926,3 +1926,59 @@ test('a command that gives up prints the refusal sentence for a runtime without 
   // The desktop path, where this is reachable, is driven end to end in
   // test/desktop.test.mjs; the CLI's own launcher refuses before commandMcp.
 });
+
+describe('zelos doctor sees the data folder as it is (TT-3484)', () => {
+  /* QA, 2026-10-10: the launcher called paths() — which creates the home and
+     sets it to 0700 — before doctor ran, so a missing or world-readable home
+     was silently fixed, then reported as fine; a home that is a file printed a
+     stack trace; and a hand-broken config.json was renamed aside, then reported
+     as "No settings file has been written yet… Nothing to do", with exit 0. */
+  const doctorIn = (home) => run(['doctor'], { home, env: { ZELOS_SECRETS_BACKEND: 'encrypted-file' } });
+
+  test('a missing home is reported, and left missing', async () => {
+    const home = path.join(SCRATCH, `doctor-missing-${homeCounter += 1}`);
+    const result = await doctorIn(home);
+    assert.equal(result.code, 0, 'a home that is not made yet is worth knowing, not broken');
+    assert.match(result.stdout, /does not exist yet/);
+    assert.doesNotMatch(result.stderr, /\n\s+at /);
+    assert.equal(fs.existsSync(home), false, `doctor made the home: ${fs.existsSync(home) ? fs.readdirSync(home).join(', ') : ''}`);
+  });
+
+  test('a world-readable home is reported, not quietly locked down', { skip: process.platform === 'win32' }, async () => {
+    const home = freshHome();
+    fs.chmodSync(home, 0o755);
+    const result = await doctorIn(home);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stdout, /readable by other accounts/);
+    assert.equal(fs.statSync(home).mode & 0o777, 0o755, 'doctor changed the mode it was reporting');
+  });
+
+  test('a home that is a file gets the sentence, not a stack trace', async () => {
+    const home = path.join(SCRATCH, `doctor-file-${homeCounter += 1}`);
+    fs.writeFileSync(home, 'not a folder');
+    const result = await doctorIn(home);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stdout, /is a file, not a folder/);
+    assert.doesNotMatch(result.stderr, /\n\s+at /, 'a stack trace');
+  });
+
+  test('a config.json that is valid JSON but not an object is not "valid"', async () => {
+    const home = freshHome();
+    fs.writeFileSync(path.join(home, 'config.json'), '[]', { mode: 0o600 });
+    const result = await doctorIn(home);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stdout, /not\s+a\s+JSON\s+object/);
+  });
+
+  test('a broken config.json is reported and left where it is', async () => {
+    const home = freshHome();
+    const file = path.join(home, 'config.json');
+    fs.writeFileSync(file, '{ "identity": ', { mode: 0o600 });
+    const result = await doctorIn(home);
+    assert.notEqual(result.code, 0, 'a broken settings file passed');
+    assert.match(result.stdout, /not\s+valid JSON/);
+    assert.doesNotMatch(result.stdout, /No settings file has been written yet/);
+    assert.equal(fs.readFileSync(file, 'utf8'), '{ "identity": ', 'doctor moved or changed the file it was reporting');
+    assert.deepEqual(fs.readdirSync(home).filter((f) => f.includes('corrupt')), [], 'doctor moved the file aside');
+  });
+});
