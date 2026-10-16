@@ -5071,6 +5071,53 @@ test('Privacy refuses a blank or 0 cap instead of saving the default (TT-3424)',
   assert.deepEqual(puts().at(-1).body.privacy, { sendBodies: false, bodyChars: 50000, maxItemsPerSweep: 5 });
 });
 
+test('Schedule refuses a blank, 0 or out-of-range interval instead of saving 30 (TT-3489)', async (t) => {
+  withPlainDom(t);
+  const calls = [];
+  globalThis.fetch = plainFetch({ calls });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  const { SWEEP_INTERVAL_RANGE } = await import('../core/config.mjs');
+  assert.deepEqual(settings.SWEEP_INTERVAL_RANGE, SWEEP_INTERVAL_RANGE, 'the page and validateConfig disagree on the range');
+
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [], sweep: { intervalMinutes: 45, activeHours: [6, 23], auto: true } };
+  store.state.health = { model: { configured: false } };
+  store.state.configErrors = [];
+  const view = settings.renderSettings({ sub: 'sweep', navigate() {}, rerender() {} });
+  const every = plainWalk(view).find((n) => n.tag === 'input' && n.attributes.type === 'number');
+  const puts = () => calls.filter((c) => c.method === 'PUT' && c.path === '/api/config');
+
+  for (const typed of ['', '0', '3', '2000', '12.5']) {
+    every.value = typed;
+    findButton(view, 'Save').fire('click');
+    await settle();
+    assert.equal(puts().length, 0, `an interval of ${JSON.stringify(typed)} was saved`);
+    assert.match(anywhere(view), /“Check my mail every \(minutes\)” needs a whole number from 5 to 1440\. Nothing was saved\./);
+  }
+
+  // The hours: a range that wraps midnight, or an hour missing from the list
+  // (what a real select reads as '' for a hand-edited 24), is refused too.
+  every.value = '15';
+  const [fromSelect, toSelect] = plainWalk(view).filter((n) => n.tag === 'select');
+  for (const [from, to] of [['22', '6'], ['9', '9'], ['6', '']]) {
+    fromSelect.value = from;
+    toSelect.value = to;
+    findButton(view, 'Save').fire('click');
+    await settle();
+    assert.equal(puts().length, 0, `hours ${from}–${to} were saved`);
+    assert.match(anywhere(view), /“Between” needs a start hour before the end hour, on the same day\. Nothing was saved\./);
+  }
+
+  fromSelect.value = '7';
+  toSelect.value = '20';
+  findButton(view, 'Save').fire('click');
+  await settle();
+  assert.deepEqual(puts().at(-1).body.sweep, { intervalMinutes: 15, activeHours: [7, 20], auto: true });
+  assert.match(anywhere(view), /Saved\. The new times apply from the next check\./, 'the refusal should give way to the save');
+  assert.doesNotMatch(anywhere(view), /Nothing was saved/, 'the refusal is still on screen after a good save');
+});
+
 test('Your data shows the folder and says "drag it to the Trash"; the command is under For experts', async (t) => {
   withPlainDom(t);
   globalThis.fetch = plainFetch({});

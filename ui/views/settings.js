@@ -3050,7 +3050,8 @@ function sweepPanel() {
   const cfg = state.config?.sweep || { intervalMinutes: 30, activeHours: [6, 23], auto: true };
   const status = statusLine();
 
-  const intervalInput = input({ type: 'number', value: String(cfg.intervalMinutes), min: '5', max: '1440' });
+  const [everyMin, everyMax] = SWEEP_INTERVAL_RANGE;
+  const intervalInput = input({ type: 'number', value: String(cfg.intervalMinutes), min: String(everyMin), max: String(everyMax) });
   const fromSelect = select(HOUR_CHOICES, { value: String(cfg.activeHours?.[0] ?? 6) });
   const toSelect = select(END_HOUR_CHOICES, { value: String(cfg.activeHours?.[1] ?? 23) });
   let auto = cfg.auto !== false;
@@ -3066,12 +3067,29 @@ function sweepPanel() {
       button('Save', {
         class: 'btn solid',
         onClick: async () => {
+          /* A blank or 0 used to save 30 without a word, and 3 or 2000 were
+             stored and flagged afterwards (QA, 2026-10-10, TT-3489). The
+             same check as Privacy's: nothing is saved until it reads. */
+          const intervalMinutes = wholeNumberIn(intervalInput.value, everyMin, everyMax);
+          if (intervalMinutes === null) {
+            status.bad(`“Check my mail every (minutes)” needs a whole number from ${everyMin} to ${everyMax}. Nothing was saved.`);
+            return;
+          }
+          /* The hours had the same shape: 10 pm to 6 am was stored, flagged and
+             run as 6 am to 11 pm, and an hour missing from the list (a
+             hand-edited 24) saved as 0 or 23 without a word. */
+          const from = wholeNumberIn(fromSelect.value, 0, 23);
+          const to = wholeNumberIn(toSelect.value, 1, 23);
+          if (from === null || to === null || from >= to) {
+            status.bad('“Between” needs a start hour before the end hour, on the same day. Nothing was saved.');
+            return;
+          }
           status.working('Saving…');
           try {
             await saveConfig({
               sweep: {
-                intervalMinutes: Number(intervalInput.value) || 30,
-                activeHours: [Number(fromSelect.value) || 0, Number(toSelect.value) || 23],
+                intervalMinutes,
+                activeHours: [from, to],
                 auto,
               },
             });
@@ -3098,6 +3116,9 @@ function sweepPanel() {
  * refused a hand-set 50,000 or 5 even on a Save that only turned bodies off.
  */
 export const PRIVACY_RANGES = Object.freeze({ bodyChars: [200, 100000], maxItemsPerSweep: [1, 1000] });
+
+/** core/config.mjs's SWEEP_INTERVAL_RANGE, copied for the same reason (TT-3489). */
+export const SWEEP_INTERVAL_RANGE = Object.freeze([5, 1440]);
 
 /**
  * The whole number typed in a field, if it lies from `min` to `max`, else
