@@ -22,7 +22,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-const github = (await import('../core/connectors/github.mjs')).default;
+const { default: github, tokenUrlOf } = await import('../core/connectors/github.mjs');
 const { createHttp } = await import('../core/connectors/http.mjs');
 const { upsertMessages, listMessages, open, close, migrate } = await import('../core/db.mjs');
 
@@ -465,6 +465,32 @@ test('an auth failure is an error, never an empty day', async (t) => {
         `the error does not say the token is the problem: ${err?.message}`);
       return true;
     });
+});
+
+test('REGRESSION: a GitHub Enterprise user is told to mint a token on their own server', async (t) => {
+  /* TOKEN_URL was fixed to github.com, so the 401 message and doctor's advice
+     sent an Enterprise user somewhere their server has never heard of. */
+  assert.equal(tokenUrlOf({}), 'https://github.com/settings/tokens');
+  assert.equal(tokenUrlOf({ apiBase: 'https://api.github.com/' }), 'https://github.com/settings/tokens');
+  assert.equal(tokenUrlOf({ apiBase: 'https://ghe.corp.example/api/v3' }), 'https://ghe.corp.example/settings/tokens');
+  assert.equal(tokenUrlOf({ apiBase: 'https://api.ghe.corp.example:8443/api/v3' }),
+    'https://api.ghe.corp.example:8443/settings/tokens', 'an Enterprise host that happens to start with api. is kept');
+  assert.equal(tokenUrlOf({ apiBase: 'https://api.acme.ghe.com' }), 'https://acme.ghe.com/settings/tokens');
+  assert.equal(tokenUrlOf({ apiBase: 'not a url' }), 'https://github.com/settings/tokens');
+
+  const { origin } = await githubServer(t, (req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ message: 'Bad credentials' }));
+  });
+  await assert.rejects(() => github.collect(ctxFor(origin)), (err) => {
+    assert.ok(err.message.includes(`${origin}/settings/tokens`), err.message);
+    assert.doesNotMatch(err.message, /github\.com/);
+    return true;
+  });
+  const ctx = ctxFor(origin);
+  const verdict = await github.check(ctx.source, ctx);
+  assert.equal(verdict.status, 'fail');
+  assert.ok(verdict.action.includes(`${origin}/settings/tokens`), verdict.action);
 });
 
 test('a 200 that is not a list of notifications is a failure, not zero rows', async (t) => {

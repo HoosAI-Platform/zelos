@@ -1091,7 +1091,11 @@ async function checkSource(source, deps, { timeoutMs, signal, timezone }) {
      missing. */
   if (connector.credential?.required && !secret) {
     const what = connector.credential.label;
-    const mint = connector.credential.url ? ` You create one at ${connector.credential.url}.` : '';
+    // A connector whose token comes from a host the user typed (GitHub Enterprise)
+    // says where, rather than sending them to the public default.
+    let mintAt = connector.credential.url;
+    try { mintAt = connector.credential.urlFor?.(settings) || mintAt; } catch { /* keep the default */ }
+    const mint = mintAt ? ` You create one at ${mintAt}.` : '';
     return check(
       id, label, 'fail',
       `No ${what.toLowerCase()} is stored for ${name}, so Zelos cannot read it.`,
