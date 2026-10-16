@@ -40,6 +40,7 @@ import { Buffer } from 'node:buffer';
 import { paths, writeFileAtomic } from '../config.mjs';
 import { log } from '../log.mjs';
 import { fetchFailureReason } from '../fetch-error.mjs';
+import { assertCleartextAllowed } from '../net.mjs';
 
 const dav = log.child('[caldav]');
 
@@ -1055,6 +1056,29 @@ export function invalidate({ url = null, user = null } = {}) {
  * Public API
  * ------------------------------------------------------------------ */
 
+/*
+ * Sending the password in the clear. (QA, 2026-10-10, TT-3425)
+ *
+ * `basicAuth` puts the username and password on every request to the typed
+ * origin, base64'd — readable by anybody on the path — and an account typed as
+ * `http://` used to send it that way without a word. Each entry point below now
+ * runs `assertCleartextAllowed` (core/net.mjs) on the normalised URL before it
+ * opens a single connection: mail's `requireTls` rule, read off the calendar's
+ * own `requireTls`.
+ *
+ * Only the typed URL is checked because only the typed origin ever gets the
+ * credential — the origin pin above sends every other hop anonymously, so an
+ * `http://` href the server hands back carries nothing worth refusing.
+ *
+ * It is NOT inside `request()`, though that looks like the one place that would
+ * catch everything. `request()`'s callers swallow every error that is not a
+ * credential verdict — that is how discovery falls through its candidate roots
+ * — so a refusal thrown there would come back as "no calendars here", the walk
+ * would end empty, `targetsFor` would `forgetLayout` on every sweep, and the
+ * user would be told nothing. Thrown here, before any of that, it reaches the
+ * sweep and the Test button as itself.
+ */
+
 /**
  * Discover the calendars the URL a person typed names — and only those.
  * -> {principal, homeSet, listRoot, scope, calendars:[{href, name, color, ctag, components}]}
@@ -1091,12 +1115,16 @@ export function invalidate({ url = null, user = null } = {}) {
  * walked as well, purely to name in the error what this account *can* read.
  * See `explainFailure`.
  */
-export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS, signal, explain = false } = {}) {
+export async function discover({ url, user, pass, requireTls = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal, explain = false } = {}) {
   const base = normalizeUrl(url);
+  // Before the first request, and on the typed URL only — see "Sending the
+  // password in the clear", above. `request()` is the wrong place for it.
+  assertCleartextAllowed(base, { user, requireTls });
   // Every URL followed from here on is one the server chose. Pinning the
   // credential scope to the address the user typed is what keeps a hostile
   // `href` from turning discovery into password delivery.
-  const opts = { user, pass, timeoutMs, signal, authOrigin: originOf(base) };
+  // `requireTls` rides along so the explain walk re-checks under the same rule.
+  const opts = { user, pass, requireTls, timeoutMs, signal, authOrigin: originOf(base) };
 
   // Fallbacks exist to find an account from a bare host. Run for a deeper URL
   // they find the *whole* account behind an address that named part of it, so
@@ -1537,9 +1565,12 @@ async function targetsFor(base, key, opts) {
  * disagree, and the ICS parser downstream filters to the caller's real window
  * regardless.
  */
-export async function fetchRange({ url, user, pass, from, to, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+export async function fetchRange({ url, user, pass, requireTls = null, from, to, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
   const base = normalizeUrl(url);
-  const opts = { user, pass, timeoutMs, signal, authOrigin: originOf(base) };
+  // Here as well as in `discover`, because a remembered layout means a sweep
+  // can reach a REPORT without ever calling it.
+  assertCleartextAllowed(base, { user, requireTls });
+  const opts = { user, pass, requireTls, timeoutMs, signal, authOrigin: originOf(base) };
   const now = Date.now();
   const start = floorDay(msOf(from, now - 30 * DAY_MS));
   const end = ceilDay(msOf(to, now + 180 * DAY_MS));
@@ -1602,18 +1633,23 @@ export async function fetchRange({ url, user, pass, from, to, timeoutMs = DEFAUL
 
 /**
  * Probe a calendar account without changing anything.
- * -> {ok, calendars:[{href, name}], error, suggestions?}
+ * -> {ok, calendars:[{href, name}], error, suggestions?, refused?, cleartextRefused?}
  * `suggestions` ([{href, name}]) comes back only when a calendar URL deeper
  * than the account address failed and the account address could name what it
  * reads instead (QA, 2026-10-10, TT-3513). `zelos doctor` calls this too, so
  * it gets that explain walk as well — a one-off per failing calendar, at the
  * person's request, never something a sweep repeats.
+ *
+ * `requireTls` is taken so the probe runs under the rule the sweep will, and
+ * `cleartextRefused` is handed back as a flag rather than left in the wording,
+ * so `zelos doctor` and the Settings route can tell "nothing was sent, on
+ * purpose" from "the server said no" without matching a sentence.
  */
-export async function testConnection({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+export async function testConnection({ url, user, pass, requireTls = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
   try {
     // `explain`: a failing calendar URL names what the account can read instead.
     // Test only — the sweep never pays for it (QA, 2026-10-10, TT-3513).
-    const { calendars } = await discover({ url, user, pass, timeoutMs, signal, explain: true });
+    const { calendars } = await discover({ url, user, pass, requireTls, timeoutMs, signal, explain: true });
     if (calendars.notEvents) throw taskListError(normalizeUrl(url));
     if (!calendars.length) {
       return { ok: false, calendars: [], error: `Connected to ${hostOf(normalizeUrl(url))} but found no calendars.` };
@@ -1628,6 +1664,7 @@ export async function testConnection({ url, user, pass, timeoutMs = DEFAULT_TIME
       // The address, not the password — doctor's advice turns on it (QA,
       // 2026-10-10, TT-3455).
       ...(wasRefused(err) ? { refused: true } : {}),
+      ...(err?.cleartextRefused ? { cleartextRefused: true } : {}),
     };
   }
 }

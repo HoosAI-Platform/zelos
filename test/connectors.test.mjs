@@ -1541,3 +1541,106 @@ test('oauthFor resolves an empty clientId to the configured client, and carries 
   assert.equal(registered.clientId, '22222222-2222-3333-4444-555555555555');
   assert.equal(oauthFor({ keyRef: 'mail.m_5' }, config), null);
 });
+
+/* ================================================================== *
+ * A calendar password over plain http://
+ *
+ * QA, 2026-10-10, TT-3425. Both calendar readers that sign in — CalDAV and a
+ * protected .ics link — sent `Authorization: Basic` to any http:// address
+ * they were given. Each now runs mail's `requireTls` rule (core/net.mjs) on the
+ * URL it is about to fetch, before the first request. `fetch` is stubbed here
+ * and asserted never called, on `.test` hosts that resolve nowhere.
+ * ================================================================== */
+
+/** A `fetch` that records and refuses. */
+function recordingFetch(t) {
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const headers = init.headers ?? {};
+    calls.push({ url: String(input?.url ?? input), auth: headers.authorization ?? headers.Authorization ?? null });
+    throw new Error('stubbed: no network in this test');
+  };
+  t.after(() => { globalThis.fetch = real; });
+  return calls;
+}
+
+const CAL_WINDOW = { from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z', tzid: 'UTC', email: null, max: 100 };
+
+test("the sweep's .ics reader refuses a username on http:// before any request — empty password too", async (t) => {
+  const calls = recordingFetch(t);
+  for (const pass of ['a-password', '', undefined]) {
+    await assert.rejects(() => fetchIcsText('http://cal.example.test/feed.ics', { user: 'nemo', pass }), (err) => {
+      assert.equal(err.cleartextRefused, true);
+      assert.match(err.message, /^Zelos stopped before your calendar password left this machine: cal\.example\.test is a plain http:\/\/ address\./);
+      return true;
+    });
+  }
+  assert.deepEqual(calls, [], 'the password was on the wire before the refusal');
+});
+
+test("the sweep's .ics reader checks the scheme it will actually fetch, and lets the allowed shapes through", async (t) => {
+  const calls = recordingFetch(t);
+  const allowed = [
+    // webcal: is rewritten to https: BEFORE the check — the rewrite is what
+    // decides the scheme on the wire, so a webcal link with a username is fine.
+    ['webcal://cal.example.test/feed.ics', { user: 'nemo', pass: 'p' }, 'https://cal.example.test/feed.ics'],
+    ['http://cal.example.test/feed.ics', { user: 'nemo', pass: 'p', requireTls: false }, 'http://cal.example.test/feed.ics'],
+    ['http://localhost:5232/feed.ics', { user: 'nemo', pass: 'p' }, 'http://localhost:5232/feed.ics'],
+    ['http://[::1]:5232/feed.ics', { user: 'nemo', pass: 'p' }, 'http://[::1]:5232/feed.ics'],
+    ['http://cal.example.test/feed.ics', {}, 'http://cal.example.test/feed.ics'],
+  ];
+  for (const [url, opts, fetched] of allowed) {
+    await assert.rejects(() => fetchIcsText(url, opts), /stubbed/, `${url} ${JSON.stringify(opts)} was refused`);
+    assert.equal(calls.at(-1).url, fetched);
+  }
+  assert.equal(calls.length, allowed.length);
+});
+
+test('both calendar connectors forward the calendar’s requireTls to the reader', async (t) => {
+  const calls = recordingFetch(t);
+  for (const type of ['ics', 'caldav']) {
+    const connector = registry.get(type);
+    const source = { id: `c_${type}`, kind: type, url: 'http://cal.example.test/cal/', user: 'nemo', keyRef: `calendar.c_${type}` };
+
+    // Unset is "decide from the host", and this host is not loopback.
+    const before = calls.length;
+    await assert.rejects(() => connector.read({ source, pass: 'p', window: CAL_WINDOW }), { cleartextRefused: true }, type);
+    assert.equal(calls.length, before, `${type}: a request was made before the refusal`);
+
+    // `false` is a standing permission for this one server, and has to reach
+    // the reader as `false` — `|| null` here would quietly refuse it again.
+    await assert.rejects(() => connector.read({ source: { ...source, requireTls: false }, pass: 'p', window: CAL_WINDOW }), (err) => {
+      assert.equal(err.cleartextRefused, undefined, `${type}: the permission did not reach the reader`);
+      return true;
+    });
+    assert.ok(calls.length > before, `${type}: the excused server was never asked`);
+    assert.ok(calls.at(-1).auth?.startsWith('Basic '), `${type}: the permitted request went without its credential`);
+  }
+});
+
+test('the CalDAV doctor check reports a refused http:// password as itself, not as a wrong password', async (t) => {
+  recordingFetch(t);
+  const { testConnection } = await import('../core/sources/caldav.mjs');
+  const connector = registry.get('caldav');
+  const asked = [];
+  const ctx = {
+    getSecret: async () => 'a-password',
+    testCalDav: async (spec) => { asked.push(spec); return testConnection(spec); },
+    timeoutMs: 1_000,
+    signal: undefined,
+  };
+  const source = { id: 'c_plain', kind: 'caldav', url: 'http://cal.example.test/dav/', user: 'nemo', keyRef: 'calendar.c_plain' };
+
+  const verdict = await connector.check(source, ctx);
+  assert.equal(verdict.status, 'fail');
+  assert.match(verdict.detail, /stopped before your calendar password left this machine/);
+  assert.match(verdict.action, /https:\/\//);
+  assert.match(verdict.action, /Sending the password/);
+  assert.doesNotMatch(verdict.action, /username and the password|app-specific password/,
+    'nothing was rejected — nothing was sent — so password advice sends the reader the wrong way');
+  assert.equal(asked[0].requireTls, null, 'the check must run under the rule the sweep reads');
+
+  await connector.check({ ...source, requireTls: false }, ctx);
+  assert.equal(asked[1].requireTls, false, 'a standing permission must reach the probe as false');
+});

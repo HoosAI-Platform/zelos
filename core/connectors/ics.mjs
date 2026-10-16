@@ -17,6 +17,7 @@
 import { calendarConnector, eventsFrom } from './calendar.mjs';
 import { readCapped } from './http.mjs';
 import { fetchFailureReason } from '../fetch-error.mjs';
+import { assertCleartextAllowed } from '../net.mjs';
 
 const ICS_TIMEOUT_MS = 20_000;
 const ICS_MAX_BYTES = 8 * 1024 * 1024;
@@ -27,12 +28,22 @@ const ICS_MAX_BYTES = 8 * 1024 * 1024;
  * At most one redirect is followed, and credentials are never carried across an
  * origin change — a calendar URL that redirects elsewhere must not hand that
  * host the user's password.
+ *
+ * Nor are they sent over plain http:// unless this calendar's `requireTls`
+ * says they may be (QA, 2026-10-10, TT-3425). A protected link typed as
+ * `http://` used to put `Authorization: Basic` — the password, readable — on
+ * the wire every sweep. The check runs on the URL AFTER `webcal:` has become
+ * `https:`, because that rewrite is what decides the scheme that is actually
+ * fetched, and before the first request, so a refused calendar costs no
+ * connection at all. Only the typed URL is checked: the redirect below drops
+ * the credential on any change of origin, http:// or not.
  */
-export async function fetchIcsText(rawUrl, { user, pass, signal, timeoutMs = ICS_TIMEOUT_MS } = {}) {
+export async function fetchIcsText(rawUrl, { user, pass, requireTls = null, signal, timeoutMs = ICS_TIMEOUT_MS } = {}) {
   const url = new URL(String(rawUrl).replace(/^webcal:/i, 'https:'));
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`calendar URL must be http, https or webcal (got ${url.protocol})`);
   }
+  assertCleartextAllowed(url, { user, requireTls });
 
   const headers = { accept: 'text/calendar, text/plain;q=0.8, */*;q=0.5' };
   if (user) {
@@ -92,7 +103,10 @@ export default calendarConnector({
     required: false,
   },
   async read({ source, pass, signal, window }) {
-    const text = await fetchIcsText(source.url, { user: source.user, pass, signal });
+    // `??` and not `||`: `false` is a standing permission for this one host,
+    // and collapsing it into "not set" would refuse a server the user excused.
+    // Same reasoning as core/connectors/imap.mjs.
+    const text = await fetchIcsText(source.url, { user: source.user, pass, requireTls: source.requireTls ?? null, signal });
     return eventsFrom(text, window);
   },
 });

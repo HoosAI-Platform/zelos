@@ -733,6 +733,61 @@ describe('the calendar probes that belong to a connector', () => {
     assert.equal(check.status, 'pass', check.detail);
     assert.equal(asked[0].pass, null);
   });
+
+  /**
+   * QA, 2026-10-10, TT-3425. A protected .ics link has no `check` of its own, so
+   * doctor reads it itself — with the stored password attached — and that made
+   * it the one calendar reader left that would still send the password over
+   * plain http://, and call the calendar healthy on the morning the sweep
+   * refused it. `SILENT_DEPS.fetchImpl` throws, so reaching the network fails
+   * the test.
+   */
+  test('a protected .ics link on http:// is refused by the sweep’s rule, before the password is read or sent', async () => {
+    let secretReads = 0;
+    const deps = { ...SILENT_DEPS, getSecret: async (ref) => { if (ref === 'calendar.c_1') secretReads += 1; return 'hunter2'; } };
+
+    // A username with no stored password is still refused: the sweep sends
+    // `Basic me:` for it, and the diagnosis is of what the sweep will do.
+    for (const keyRef of ['calendar.c_1', null]) {
+      freshHome({ config: { calendars: [calendar({ kind: 'ics', url: 'http://cal.example.test/feed.ics', user: 'me', keyRef })] } });
+      const refused = byId(await diagnose({ deps }), 'calendar.c_1');
+      assert.equal(refused.status, 'fail', refused.detail);
+      assert.match(refused.detail, /stopped before your calendar password left this machine: cal\.example\.test is a plain http:\/\/ address/);
+      assert.match(refused.action, /https:\/\//);
+      assert.match(refused.action, /Sending the password/);
+    }
+    assert.equal(secretReads, 0, 'the password was read for a request that was never going to be made');
+
+    // A standing permission reaches the request, credential and all.
+    const sent = [];
+    freshHome({ config: { calendars: [calendar({ kind: 'ics', url: 'http://cal.example.test/feed.ics', user: 'me', keyRef: 'calendar.c_1', requireTls: false })] } });
+    const allowed = byId(await diagnose({
+      deps: { ...deps, fetchImpl: async (url, init) => { sent.push({ url: String(url), auth: init.headers.Authorization ?? null }); throw new Error('stubbed'); } },
+    }), 'calendar.c_1');
+    assert.equal(allowed.status, 'fail');
+    assert.doesNotMatch(allowed.detail, /stopped before your calendar password/);
+    assert.equal(sent.length, 1, 'the excused server was never asked');
+    assert.ok(sent[0].auth?.startsWith('Basic '));
+  });
+
+  test('the CalDAV check hands the sweep’s requireTls to the probe and reports a refusal in its own words', async () => {
+    freshHome({ config: { calendars: [calendar({ kind: 'caldav', url: 'http://dav.example.test/', user: 'me', keyRef: 'calendar.c_1' })] } });
+    const asked = [];
+    const check = byId(await diagnose({
+      deps: {
+        ...SILENT_DEPS,
+        getSecret: async () => 'hunter2',
+        testCalDav: async (spec) => {
+          asked.push(spec);
+          return { ok: false, calendars: [], error: 'Zelos stopped before your calendar password left this machine: dav.example.test is a plain http:// address.', cleartextRefused: true };
+        },
+      },
+    }), 'calendar.c_1');
+    assert.equal(asked[0].requireTls, null);
+    assert.equal(check.status, 'fail');
+    assert.match(check.action, /https:\/\//);
+    assert.doesNotMatch(check.action, /app-specific password/);
+  });
 });
 
 /* ================================================================== *

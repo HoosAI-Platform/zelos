@@ -38,6 +38,7 @@ import { guessImapHost, testConnection as testImapConnection } from './sources/i
 import { testConnection as testCalDavConnection } from './sources/caldav.mjs';
 import { parseICS } from './sources/ics.mjs';
 import { safeUrl } from './safety.mjs';
+import { assertCleartextAllowed } from './net.mjs';
 import { localTimezone, nowISO } from './time.mjs';
 /* The registry, for the same reason core/sweep.mjs reads it: a diagnostic that
    keeps its own list of source kinds is a second list, and the one that goes
@@ -1019,6 +1020,22 @@ async function checkCalendar(calendar, deps, { timeoutMs, signal, timezone }) {
   if (!url || !/^https?:/i.test(url)) {
     return check(id, label, 'fail', `${calendar.url} is not an http, https or webcal address.`,
       'Open Settings → Calendars and paste the subscription link your calendar provider gives you — it starts with https:// or webcal:// and usually ends in .ics.');
+  }
+
+  /* The sweep's rule, before the stored password is even read (QA, 2026-10-10,
+     TT-3425). This fallback signs in with that password, so without the check
+     it would be the one reader left that still sent it over plain http:// —
+     and it would report a calendar healthy that the sweep refuses to read.
+     "A username is set" is the trigger, as it is in `fetchIcsText`, even though
+     the request below only attaches a header when a password is stored too: the
+     diagnosis is of what the sweep will do, and the sweep sends `user:` with an
+     empty password. */
+  try {
+    assertCleartextAllowed(url, { user: calendar.user, requireTls: calendar.requireTls ?? null });
+  } catch (err) {
+    if (!err?.cleartextRefused) throw err;
+    return check(id, label, 'fail', `${calendar.url}: ${err.message}`,
+      'Change the address in Settings → Calendars to its https:// form. If this server is on your own network and really has no https, set “Sending the password” to “Let this one server take it unencrypted” for this calendar instead.');
   }
 
   const headers = { Accept: 'text/calendar, text/plain;q=0.5' };
