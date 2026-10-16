@@ -104,20 +104,20 @@ const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex'
  * replaces did by not matching it — except that the regex took 22 ms to decide
  * so for 64 KB of openers and four times that per doubling.
  */
-function unwrapCdata(input) {
+function unwrapCdata(input, outside = (text) => text) {
   const s = String(input ?? '');
   let start = s.indexOf('<![CDATA[');
-  if (start < 0) return s;
+  if (start < 0) return outside(s);
   let out = '';
   let plain = 0;
   while (start >= 0) {
     const end = s.indexOf(']]>', start + 9);
     if (end < 0) break;
-    out += s.slice(plain, start) + s.slice(start + 9, end);
+    out += outside(s.slice(plain, start)) + s.slice(start + 9, end);
     plain = end + 3;
     start = s.indexOf('<![CDATA[', plain);
   }
-  return out + s.slice(plain);
+  return out + outside(s.slice(plain));
 }
 
 /**
@@ -147,8 +147,16 @@ function stripComments(xml) {
  * mail part into something a model can read: a feed's `<description>` is HTML
  * inside XML about half the time, and re-deriving a tag stripper here would be a
  * second answer to a question this repo has already answered carefully.
+ *
+ * The XML layer is decoded first, and only outside CDATA. RSS 2.0's own form
+ * for markup in a `<description>` is entity-encoded HTML, and Atom's
+ * `type="html"` is the same: `&lt;b&gt;cash&lt;/b&gt;` is the tag `<b>`, not the
+ * text "<b>". Stripping tags before decoding handed the model — and the stored
+ * row — the markup itself. Inside CDATA the text is already the HTML, so
+ * decoding it there would turn an escaped `&amp;lt;` into a tag that was never
+ * one.
  */
-const textOf = (raw) => htmlToText(unwrapCdata(raw ?? ''));
+const textOf = (raw) => htmlToText(unwrapCdata(raw ?? '', decodeXmlEntities));
 
 const collapse = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
