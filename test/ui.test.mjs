@@ -2476,7 +2476,7 @@ test('REGRESSION: the secrets copy names the store in use — on the encrypted-f
   }
 
   // A real keychain keeps the wording it had; so does "not loaded yet".
-  for (const name of ['macos-keychain', 'windows-credential-manager', 'libsecret', undefined, 'unknown']) {
+  for (const name of ['macos-keychain', 'libsecret', undefined, 'unknown']) {
     const notes = settings.secretStoreNotes(name);
     assert.match(notes.data, /OS keychain/, String(name));
     assert.match(notes.data, /not in that directory/, String(name));
@@ -5762,4 +5762,56 @@ test('Your data counts what Zelos is holding, and stands unchanged when the rout
   await settle();
   assert.match(onScreen(bare), /Your board and saved history live in one folder on this computer\./);
   assert.doesNotMatch(onScreen(bare), /on disk/, 'a panel with no answer must not claim a size');
+});
+
+/*
+ * TT-3461. On Windows the store is DPAPI: one encrypted file per secret under
+ * %LOCALAPPDATA%\Zelos\secrets, outside the home. The panel told Windows users
+ * the passwords were in a keychain entry to remove, to drag the home to "the
+ * Trash", and gave them `rm -rf` — so erasing everything left every password.
+ */
+test('on Windows, erasing everything names the second folder, the Recycle Bin and PowerShell', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; delete globalThis.window.zelos; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [] };
+  store.state.health = { model: { configured: false }, home: 'C:\\Users\\nemo\\.zelos', backend: { name: 'windows-dpapi' } };
+  store.state.configErrors = [];
+  globalThis.window.zelos = { desktop: true, platform: 'win32', showHome: async () => true };
+
+  const view = settings.renderSettings({ sub: 'data', navigate() {}, rerender() {} });
+  const seen = onScreen(view);
+  assert.match(seen, /delete this folder and empty the Recycle Bin/);
+  assert.doesNotMatch(seen, /Trash/);
+  assert.match(seen, /second Zelos folder: paste %LOCALAPPDATA%\\Zelos into the File Explorer address bar/);
+  assert.doesNotMatch(seen, JARGON, `the Your data card: ${seen.match(JARGON)?.[0]}`);
+  const all = anywhere(view);
+  assert.doesNotMatch(all, /rm -rf|keychain tool|com\.zelos\.app/);
+  assert.match(all, /Remove-Item -LiteralPath 'C:\\Users\\nemo\\\.zelos' -Recurse -Force/);
+  assert.match(all, /Remove-Item -LiteralPath \(Join-Path \$env:LOCALAPPDATA 'Zelos'\) -Recurse -Force/);
+
+  const notes = settings.secretStoreNotes('windows-dpapi');
+  for (const [slot, text] of Object.entries(notes)) {
+    assert.doesNotMatch(text, /OS keychain/, `${slot} still sends a Windows user to a keychain`);
+    assert.match(text, /%LOCALAPPDATA%\\Zelos\\secrets/, `${slot} does not say where the secret goes`);
+  }
+  for (const text of Object.values(settings.plainSecretNotes('windows-dpapi'))) assert.doesNotMatch(text, JARGON);
+
+  // The platform alone decides the words when the store is not DPAPI, and the
+  // store alone when a browser tab cannot see the platform.
+  assert.match(settings.eraseSteps('Win32', 'encrypted-file').plain, /Recycle Bin/);
+  assert.match(settings.eraseSteps('', 'windows-dpapi').command('x'), /^Remove-Item/);
+  assert.match(settings.eraseSteps('MacIntel', 'macos-keychain').plain, /Trash/);
+  assert.equal(settings.eraseSteps('linux', 'libsecret').command('/h'), 'rm -rf "/h"');
+  assert.equal(settings.eraseSteps('win32').command("C:\\Users\\o'brien $x [1]\\.zelos"),
+    "Remove-Item -LiteralPath 'C:\\Users\\o''brien $x [1]\\.zelos' -Recurse -Force",
+    'a quote, a dollar and a bracket in the path are taken literally');
+
+  // The second folder is only offered where it exists: Windows on DPAPI.
+  store.state.health = { ...store.state.health, backend: { name: 'encrypted-file' } };
+  const fileStore = anywhere(settings.renderSettings({ sub: 'data', navigate() {}, rerender() {} }));
+  assert.match(fileStore, /Recycle Bin/, 'the platform alone decides the words');
+  assert.doesNotMatch(fileStore, /LOCALAPPDATA/);
 });
