@@ -2303,6 +2303,44 @@ describe('the shell as a stdio MCP server', () => {
     }
   });
 
+  it('on a runtime without FTS5, says so in one sentence, writes nothing to stdout and makes no home (TT-3502)', async () => {
+    /* QA, 2026-10-10: `Zelos mcp` printed a stack trace where the server and
+       doctor print the one-sentence refusal. The desktop app has no launcher
+       check, so serveStdio's own open (now before paths() makes the home) and
+       serveMcp's catch are what say it. */
+    const sqlite = await import('node:sqlite');
+    const exec = sqlite.DatabaseSync.prototype.exec;
+    sqlite.DatabaseSync.prototype.exec = function (sql) {
+      if (/using\s+fts5/i.test(String(sql))) throw new Error('no such module: fts5');
+      return exec.call(this, sql);
+    };
+    const realWrite = process.stderr.write;
+    let errors = '';
+    process.stderr.write = (chunk, ...rest) => {
+      errors += chunk;
+      const done = rest.find((r) => typeof r === 'function');
+      done?.();
+      return true;
+    };
+    const home = path.join(sandbox, 'never-made');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let written = '';
+    output.on('data', (chunk) => { written += chunk; });
+    let result;
+    try {
+      result = await main.serveMcp(main.parseShellArgs(['mcp', `--home=${home}`]), { input, output });
+    } finally {
+      sqlite.DatabaseSync.prototype.exec = exec;
+      process.stderr.write = realWrite;
+    }
+    assert.equal(result.ok, false);
+    assert.match(errors, /built without SQLite's FTS5 extension/);
+    assert.doesNotMatch(errors, /\n\s+at /, 'a stack trace instead of the sentence');
+    assert.equal(written, '', 'the refusal reached the JSON-RPC stream');
+    assert.equal(fs.existsSync(home), false, 'the home was made before the refusal');
+  });
+
   it('answers the handshake on the streams it is handed, and stdout stays pure JSON-RPC', async () => {
     const input = new PassThrough();
     const output = new PassThrough();

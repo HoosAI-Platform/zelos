@@ -123,6 +123,18 @@ export function assertRuntimeSupported() {
   );
 }
 
+/**
+ * What a command prints when it gives up. A runtime that cannot run Zelos is
+ * a fact about the machine, not a crash, so it gets the refusal's sentence and
+ * nothing else; anything else gets its stack, prefixed. `zelos mcp` printed
+ * the stack for both, burying the one line that says what to install (QA,
+ * 2026-10-10, TT-3502) — the server and doctor already printed the sentence.
+ */
+export function fatalText(prefix, err) {
+  if (err?.code === 'ZELOS_NO_FTS5') return `\n  ${err.message}\n\n`;
+  return `${prefix}: ${err?.stack ?? err}\n`;
+}
+
 export class UnsupportedRuntimeError extends Error {
   constructor(message) {
     super(message);
