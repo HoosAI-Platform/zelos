@@ -925,6 +925,20 @@ async function inflateTail(handle, at, compSize, label) {
 }
 
 /**
+ * The stat an export's signature is made from, without reading a byte of it.
+ * `lstat`, so a symlink is never followed here either: it is not a file, so it
+ * goes on to readExport, which refuses it as it always has. Null if it vanished.
+ */
+async function statExport(file) {
+  try {
+    return await fs.lstat(file);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
  * One export file -> its text and the name of the chat it holds.
  *
  * A file over the ceiling is read FROM THE END. A chat log only ever grows at
@@ -1137,8 +1151,24 @@ export default {
       if (ctx?.signal?.aborted) break;
       const base = path.basename(file);
 
+      /* AN UNCHANGED EXPORT IS NOT RE-READ, and this is where the connector's
+         honesty about itself is enforced rather than merely stated: an archive
+         that has not changed has nothing new in it, so the source reports a
+         successful read of nothing instead of re-reading the same file every
+         thirty minutes. The check is made from a stat, BEFORE the read: it
+         used to come after readExport, so every unchanged export was read in
+         full, and every .zip inflated, on every sweep (QA, 2026-10-10,
+         TT-3443). */
       let read;
       try {
+        const stat = await statExport(file);
+        // Vanished between the listing and the stat. Next sweep, or never.
+        if (!stat) continue;
+        const sig = signature(base, stat);
+        if (stat.isFile() && seen.has(sig)) {
+          kept.push({ sig, mtimeMs: stat.mtimeMs });
+          continue;
+        }
         read = await readExport(file);
       } catch (err) {
         if (err instanceof ExportError) {
@@ -1151,13 +1181,10 @@ export default {
       // Vanished between the listing and the open. Next sweep, or never.
       if (!read) continue;
 
+      // Signed from the stat taken with the read, so a file that changed
+      // between the two is remembered as what was actually parsed.
       const sig = signature(base, read.stat);
       kept.push({ sig, mtimeMs: read.mtimeMs });
-      /* AN UNCHANGED EXPORT IS NOT RE-READ, and this is where the connector's
-         honesty about itself is enforced rather than merely stated: an archive
-         that has not changed has nothing new in it, so the source reports a
-         successful read of nothing instead of re-parsing the same file every
-         thirty minutes and republishing the same rows. */
       if (seen.has(sig)) continue;
       fresh += 1;
 

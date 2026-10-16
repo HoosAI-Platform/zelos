@@ -258,6 +258,43 @@ test('REGRESSION: collect reads a plain .txt export — the binary guard must no
   assert.match(String(refused.error), /NUL bytes/, 'a real binary must still be refused by name');
 });
 
+test('an unchanged export is not read again at all, only stat-ed (TT-3443)', async (t) => {
+  /* QA, 2026-10-10: the signature check came after readExport, so every
+     unchanged export was read in full, and a .zip inflated, on every sweep.
+     Proved without a spy: after the first read the file's bytes are replaced
+     by same-length junk with the same mtime. Its signature is unchanged, so a
+     connector that only stats it reports nothing; one that reads it trips the
+     NUL-byte guard. */
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-whatsapp-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'WhatsApp Chat with Kit Alder.txt');
+  const text = '[9/8/26, 9:14:02 AM] Kit Alder: Retainage schedule is posted\n';
+  fs.writeFileSync(file, text);
+  const when = new Date('2026-09-08T12:00:00Z');
+  fs.utimesSync(file, when, when);
+
+  const collect = (target, cursor) => whatsapp.collect({
+    source: { id: 's_wa', settings: { path: target, yourName: 'Nemo Hale' } },
+    label: 'WhatsApp', cursor, timezone: 'UTC', identityEmail: '',
+    emit() {}, signal: null, log: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+
+  for (const target of [file, dir]) {
+    const first = await collect(target, null);
+    assert.equal(first.parts[0].rows.length, 1, 'the first read should deliver the message');
+
+    fs.writeFileSync(file, Buffer.alloc(Buffer.byteLength(text), 0));
+    fs.utimesSync(file, when, when);
+    const second = await collect(target, first.cursor);
+    assert.ok(second.parts.every((p) => !p.error), `the unchanged export was read again: ${second.parts.map((p) => p.error).join('; ')}`);
+    assert.equal(second.parts.reduce((n, p) => n + p.rows.length, 0), 0);
+    assert.deepEqual(second.cursor.seen, first.cursor.seen, 'the skipped export must stay remembered');
+
+    fs.writeFileSync(file, text);
+    fs.utimesSync(file, when, when);
+  }
+});
+
 test('the manifest says out loud that this is an archive, not a connection', () => {
   /* The most important line in the connector is not code. WhatsApp offers no
      way to read a personal account live, so a user who reads "WhatsApp" in a
