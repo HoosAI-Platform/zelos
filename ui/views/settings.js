@@ -249,6 +249,24 @@ export const MAIL_AUTH_CHOICES = [
   { value: 'xoauth2', label: 'Sign in with Microsoft' },
 ];
 
+/** What an AI address speaks — the two protocols core/llm.mjs knows. */
+export const MODEL_PROTOCOL_CHOICES = [
+  { value: 'openai', label: 'OpenAI-compatible' },
+  { value: 'anthropic', label: 'Anthropic' },
+];
+
+export const CUSTOM_OPENAI_LABEL = 'Custom (OpenAI-compatible)';
+
+/** An address on Anthropic's own service, the one place its protocol is spoken. */
+export function isAnthropicAddress(baseUrl) {
+  try {
+    const host = new URL(String(baseUrl)).hostname.toLowerCase();
+    return host === 'anthropic.com' || host.endsWith('.anthropic.com');
+  } catch {
+    return false;
+  }
+}
+
 export const TLS_CHOICES = [
   { value: 'auto', label: 'Decide from the address (recommended)' },
   { value: 'require', label: 'Never send my password unencrypted' },
@@ -734,6 +752,10 @@ export function pickDefaultModel(preset, preferred = GUIDED_PROVIDERS[preset?.id
  */
 export function modelPanel({ compact = false, onDone = null } = {}) {
   const cfg = state.config?.model || {};
+  /* Whether "It speaks" was set on purpose — then a changed address does not
+     flip it. A saved config already speaking Anthropic's protocol to another
+     host (a proxy) counts as picked. (TT-3450) */
+  let protocolPicked = cfg.protocol === 'anthropic' && Boolean(cfg.baseUrl) && !isAnthropicAddress(cfg.baseUrl);
   const draft = {
     protocol: cfg.protocol || 'anthropic',
     label: cfg.label || '',
@@ -803,10 +825,40 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
 
     const baseInput = input({ value: draft.baseUrl, placeholder: 'https://…' });
     baseInput.addEventListener('input', () => { draft.baseUrl = baseInput.value.trim(); });
+    /* Which API the address speaks. It could not be chosen: an address typed
+       here on a fresh home went out with the default's protocol, Anthropic's,
+       so an OpenAI-compatible server answered POST /v1/messages with a 404
+       that blamed the address (QA, 2026-10-10, TT-3450). */
+    const protocolSelect = select(MODEL_PROTOCOL_CHOICES, { value: draft.protocol });
+    /* An address or a protocol of one's own is no longer the brand a card
+       was chosen for: the card goes, and so does its name, or "Claude" is
+       what gets saved for a vLLM box on the LAN. */
+    const goCustom = () => {
+      draft.guide = null;
+      draft.label = draft.protocol === 'openai' ? CUSTOM_OPENAI_LABEL : 'Custom endpoint';
+    };
+    protocolSelect.addEventListener('change', () => {
+      draft.protocol = protocolSelect.value;
+      protocolPicked = true;
+      const hadGuide = Boolean(draft.guide);
+      goCustom();
+      // A key typed for a brand's card is that brand's: it is not carried to
+      // an endpoint of one's own.
+      drawForm({ keepKey: !hadGuide });
+    });
     // A new address may have a key of its own, or none: redraw once it is known.
     baseInput.addEventListener('change', async () => {
       const address = draft.baseUrl;
-      if (await learnKeyStored() && draft.baseUrl === address) drawForm({ keepKey: true });
+      // Anthropic's protocol is spoken by Anthropic. Any other address left on
+      // it — which is what a fresh home's default is — is moved to the API
+      // nearly every other server speaks; the picker can move it back.
+      // Unless the protocol was picked on purpose, for an Anthropic-compatible
+      // proxy say.
+      if (!protocolPicked && draft.protocol === 'anthropic' && !isAnthropicAddress(address)) draft.protocol = 'openai';
+      const hadGuide = Boolean(draft.guide);
+      goCustom();
+      await learnKeyStored();
+      if (draft.baseUrl === address) drawForm({ keepKey: !hadGuide });
     });
 
     // One key box. It sits in the guided card when there is one and in the
@@ -1024,6 +1076,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
         isLocal() ? el('span', { class: 'badge-local', text: isThisMachine(draft.baseUrl || '') ? 'on this machine' : 'on your network' }) : null,
       ]),
       field('Base URL', baseInput, { hint: 'Where the requests go. Nothing else is contacted.' }),
+      field('It speaks', protocolSelect, { hint: 'llama.cpp, vLLM, LocalAI, Ollama and most others speak OpenAI’s API. Only Anthropic’s own service speaks Anthropic’s.' }),
       field('Model', modelInput, {
         hint: isLocal() ? 'Whatever your runtime has pulled.' : 'The provider’s model id, exactly as they spell it.',
       }),
@@ -1075,6 +1128,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
 
   function choose(next, { scroll = true } = {}) {
     Object.assign(draft, next);
+    protocolPicked = false;
     drawForm();
     if (scroll) (draft.guide ? guidedWrap : formWrap).scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     // The chosen service's own key, if one was saved for it before.
@@ -1122,6 +1176,21 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     probeNote.textContent = `Could not look for an AI program on this computer: ${err.message}`;
   });
 
+  /* The choice docs/README.md tells people to pick for a server Zelos did not
+     find. It did not exist, so the only way in was to pick an unrelated
+     brand's card and overwrite its address, and that brand's name was what got
+     saved (QA, 2026-10-10, TT-3450). Built here, not from the presets, so it is
+     offered even when the list of services cannot be loaded. */
+  const customChoice = el('button', {
+    type: 'button',
+    class: 'preset',
+    onclick: () => choose({ protocol: 'openai', label: CUSTOM_OPENAI_LABEL, baseUrl: '', model: '', guide: null }),
+  }, [
+    el('span', { class: 'preset-label', text: CUSTOM_OPENAI_LABEL }),
+    el('span', { class: 'preset-note', text: 'llama.cpp, vLLM, LocalAI or any other server with an OpenAI-compatible API. Type the address it prints, ending in /v1.' }),
+  ]);
+  moreWrap.replaceChildren(customChoice);
+
   api.presets().then((presets) => {
     const hosted = (presets || []).filter((p) => !p.local);
     const guided = hosted.filter((p) => GUIDED_PROVIDERS[p.id]);
@@ -1158,7 +1227,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     }, [
       el('span', { class: 'preset-label', text: p.label }),
       el('span', { class: 'preset-note', text: PLAIN_PROVIDER_NOTES[p.id] || p.note || '' }),
-    ])));
+    ])), customChoice);
 
     // A saved provider that has a guided card gets it back on open, model and
     // all, so Settings › AI says "Claude" to someone who chose Claude rather
@@ -1171,6 +1240,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     if (current) choose({ guide: guideFor(current), model: draft.model || pickDefaultModel(current) }, { scroll: false });
   }).catch(() => {
     choiceWrap.replaceChildren(el('p', { class: 'quiet-note', text: 'Could not load the list of AI services.' }));
+    moreWrap.replaceChildren(customChoice);
   });
 
   drawForm();
