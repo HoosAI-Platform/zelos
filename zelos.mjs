@@ -624,7 +624,8 @@ async function commandMcp() {
     await serveStdio({ logger: log });
     return 0;
   } catch (err) {
-    process.stderr.write(`zelos mcp: ${err?.stack ?? err}\n`);
+    const { fatalText } = await import('./core/db.mjs');
+    process.stderr.write(fatalText('zelos mcp', err));
     return 1;
   }
 }
