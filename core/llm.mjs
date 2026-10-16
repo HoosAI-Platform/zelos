@@ -21,6 +21,7 @@
 
 import { log } from './log.mjs';
 import { screenContent, SafetyError } from './safety.mjs';
+import { fetchFailureReason } from './fetch-error.mjs';
 
 const llog = log.child('[llm]');
 
@@ -822,7 +823,8 @@ function transportError(err, address) {
       cause: err,
     });
   }
-  const reason = err?.cause?.code || err?.code || err?.message || 'connection failed';
+  // In words, as every other reader now says it (core/fetch-error.mjs, TT-3514).
+  const reason = err?.cause || err?.code ? fetchFailureReason(err) : err?.message || 'connection failed';
   return new LLMError(
     `Could not reach the model at ${address} (${reason}) — is it running, and is the base URL right?`,
     { address, retriable: true, cause: err },

@@ -35,6 +35,7 @@ import tls from 'node:tls';
 
 import { imapDate, instant } from '../time.mjs';
 import { log as defaultLog } from '../log.mjs';
+import { fetchFailureReason } from '../fetch-error.mjs';
 import { getSecret, setSecret, deleteSecret } from '../secrets.mjs';
 import { isModelKeyRef } from '../model-key.mjs';
 /* The one provider table. Google's authorization and token endpoints are
@@ -1881,7 +1882,7 @@ async function postForm(url, form, {
       redirect: 'error',
     });
   } catch (err) {
-    throw new ImapOAuthError(`oauth: could not reach the sign-in endpoint (${err.message})`, {
+    throw new ImapOAuthError(`oauth: could not reach the sign-in endpoint (${fetchFailureReason(err)})`, {
       code: err?.name === 'TimeoutError' ? 'timeout' : 'network',
     });
   }

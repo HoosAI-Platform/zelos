@@ -51,6 +51,7 @@
  */
 
 import crypto from 'node:crypto';
+import { fetchFailureReason } from '../fetch-error.mjs';
 
 /** A credential that will not work again until the user does something. */
 export class AuthError extends Error {
@@ -300,13 +301,23 @@ export function createHttp({
     // redirect cannot buy a second full timeout.
     const deadline = AbortSignal.any(signals);
 
-    const once = (url, sendAuth) => doFetch(url, {
-      method,
-      headers: sendAuth ? withAuth : base,
-      body,
-      redirect: 'manual',
-      signal: deadline,
-    });
+    const once = async (url, sendAuth) => {
+      try {
+        return await doFetch(url, {
+          method,
+          headers: sendAuth ? withAuth : base,
+          body,
+          redirect: 'manual',
+          signal: deadline,
+        });
+      } catch (err) {
+        // A deadline or a cancel is the caller's to word; anything else is a
+        // connection that never happened, and used to arrive as a bare "fetch
+        // failed" with neither the host nor the reason (TT-3514).
+        if (deadline.aborted || err?.name === 'AbortError' || err?.name === 'TimeoutError') throw err;
+        throw new Error(`could not reach ${url.host}: ${fetchFailureReason(err)}`, { cause: err });
+      }
+    };
 
     let res = await once(target, true);
     let finalUrl = target;

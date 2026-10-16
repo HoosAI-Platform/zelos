@@ -78,6 +78,7 @@ import { sampleStatus, seedSampleData, clearSampleData } from './sample-data.mjs
 import { complete, stream, listModels, probeLocal, isLocalAddress, PRESETS } from './llm.mjs';
 import { helpLinks, platformName, HELP_STEPS } from './help.mjs';
 import { safeUrl, screenContent, cap, wrapUntrusted, scrubForPrompt, SafetyError } from './safety.mjs';
+import { fetchFailureReason } from './fetch-error.mjs';
 import {
   testConnection as testMailConnection,
   connectDeviceCode,
@@ -2305,7 +2306,8 @@ async function handleCalendarTest(ctx) {
       error: null,
     });
   } catch (err) {
-    sendJSON(ctx.res, 200, { ok: false, calendars: [], error: `${url}: ${err.message}` });
+    // The reason, not undici's "fetch failed" (TT-3514).
+    sendJSON(ctx.res, 200, { ok: false, calendars: [], error: `${url}: ${fetchFailureReason(err)}` });
   }
 }
 
