@@ -3091,12 +3091,37 @@ function sweepPanel() {
 
 /* ---------------------------------------------------------------- privacy */
 
+/**
+ * The ranges core/config.mjs validateConfig holds the two privacy numbers to
+ * (its PRIVACY_RANGES; the page cannot import core/, and test/ui.test.mjs
+ * checks the copies agree). The fields used to be narrower, which would have
+ * refused a hand-set 50,000 or 5 even on a Save that only turned bodies off.
+ */
+export const PRIVACY_RANGES = Object.freeze({ bodyChars: [200, 100000], maxItemsPerSweep: [1, 1000] });
+
+/**
+ * The whole number typed in a field, if it lies from `min` to `max`, else
+ * null. Blank, 0, a decimal or a word is refused rather than replaced by a
+ * default, so a cap the person cleared is never read as the generous one.
+ */
+export function wholeNumberIn(value, min, max) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text)) return null;
+  const n = Number(text);
+  return n >= min && n <= max ? n : null;
+}
+
 function privacyPanel() {
   const cfg = state.config?.privacy || { maxItemsPerSweep: 150, sendBodies: true, bodyChars: 4000 };
   const status = statusLine();
-  let sendBodies = cfg.sendBodies !== false;
-  const charsInput = input({ type: 'number', value: String(cfg.bodyChars), min: '200', max: '20000' });
-  const maxInput = input({ type: 'number', value: String(cfg.maxItemsPerSweep), min: '10', max: '1000' });
+  // Ticked only for a real `true` (or no setting at all, which is the
+  // default): a "false", 0 or null on disk is off to the engine, and a box
+  // that showed it ticked would turn bodies on at the next Save (TT-3424).
+  let sendBodies = cfg.sendBodies === undefined || cfg.sendBodies === true;
+  const [charsMin, charsMax] = PRIVACY_RANGES.bodyChars;
+  const [itemsMin, itemsMax] = PRIVACY_RANGES.maxItemsPerSweep;
+  const charsInput = input({ type: 'number', value: String(cfg.bodyChars), min: String(charsMin), max: String(charsMax) });
+  const maxInput = input({ type: 'number', value: String(cfg.maxItemsPerSweep), min: String(itemsMin), max: String(itemsMax) });
 
   return el('div', { class: 'panel' }, [
     el('p', { class: 'panel-lede', text: 'Zelos only talks to the AI service you chose. It sends nothing to us and nothing to anyone else.' }),
@@ -3116,15 +3141,22 @@ function privacyPanel() {
       button('Save', {
         class: 'btn solid',
         onClick: async () => {
+          /* A blank or a 0 used to save the default (4,000 characters, 150
+             items) without a word: a privacy cap that failed open (QA,
+             2026-10-10, TT-3424). Now nothing is saved until both read. */
+          const bodyChars = wholeNumberIn(charsInput.value, charsMin, charsMax);
+          const maxItemsPerSweep = wholeNumberIn(maxInput.value, itemsMin, itemsMax);
+          if (bodyChars === null) {
+            status.bad(`“Characters of each email sent to the AI” needs a whole number from ${charsMin} to ${charsMax}. Nothing was saved.`);
+            return;
+          }
+          if (maxItemsPerSweep === null) {
+            status.bad(`“Most items per check” needs a whole number from ${itemsMin} to ${itemsMax}. Nothing was saved.`);
+            return;
+          }
           status.working('Saving…');
           try {
-            await saveConfig({
-              privacy: {
-                sendBodies,
-                bodyChars: Number(charsInput.value) || 4000,
-                maxItemsPerSweep: Number(maxInput.value) || 150,
-              },
-            });
+            await saveConfig({ privacy: { sendBodies, bodyChars, maxItemsPerSweep } });
             status.good('Saved.');
           } catch (err) {
             status.bad(err.message);

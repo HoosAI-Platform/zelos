@@ -513,6 +513,13 @@ This is a real switch, not a label.
   titles, times, places, organisers and attendees still go. This holds for the
   sweep and for Ask alike.
 
+A privacy value that is present but not usable — a blank or `null` cap, a
+`sendBodies` that is not `true` or `false`, a `privacy` section that is not an
+object — is read as the most private setting it allows (no message bodies and
+no event descriptions, one item per check), never as the default. Settings
+refuses to save a blank or 0 in the first place, and names the bad value until
+it is fixed.
+
 What it does **not** change: subjects, sender names and recipient addresses are
 sent either way, because without them there is nothing to reason about. If you
 consider the mere fact that `lawyer@example.com` wrote to you to be sensitive,

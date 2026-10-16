@@ -238,6 +238,32 @@ test('privacy.sendBodies:false keeps body text out of the prompt entirely', () =
   assert.match(content, /event descriptions omitted/);
 });
 
+test('a privacy value present but unusable fails closed, not to the default', () => {
+  /* QA, 2026-10-10 (TT-3424): a PUT is saved first and reported second, so a
+     refused value can sit on disk. A blank cap used to mean 4,000 characters,
+     and a sendBodies of 0 or "false" meant on. */
+  const secret = 'BODY-ONLY-MARKER-3424';
+  const msg = message({ id: 'closed1', snippet: 'ordinary snippet', body: `Private: ${secret}.` });
+  for (const privacy of [
+    { ...PRIVACY, sendBodies: 0 },
+    { ...PRIVACY, sendBodies: 'false' },
+    { ...PRIVACY, sendBodies: null },
+    { ...PRIVACY, bodyChars: null },
+    { ...PRIVACY, bodyChars: '' },
+    { ...PRIVACY, bodyChars: 0 },
+    null,
+    'off',
+  ]) {
+    const { messages } = buildSweepPrompt({ identity: IDENTITY, now: NOW, messages: [msg], privacy });
+    assert.ok(!messages[0].content.includes(secret), `a body was sent with privacy ${JSON.stringify(privacy)}`);
+    assert.ok(messages[0].content.includes('ordinary snippet'), 'the snippet still goes');
+  }
+  // Absent is not the same as unusable: a config written before the setting
+  // existed keeps the default.
+  const { messages } = buildSweepPrompt({ identity: IDENTITY, now: NOW, messages: [msg], privacy: {} });
+  assert.ok(messages[0].content.includes(secret), 'an absent setting should take the default');
+});
+
 test('privacy.bodyChars caps how much of a body is sent', () => {
   const body = `${'a'.repeat(400)}TAIL-MARKER${'b'.repeat(400)}`;
   const { messages, budget } = buildSweepPrompt({

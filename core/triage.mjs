@@ -45,6 +45,7 @@ import {
   BUCKETS,
 } from './db.mjs';
 import { log } from './log.mjs';
+import { privacyLimits } from './config.mjs';
 
 const tlog = log.child('[triage]');
 
@@ -948,11 +949,9 @@ export function buildSweepPrompt({
   budgetChars = DEFAULT_CONTEXT_CHARS,
 } = {}) {
   const nowMs = instant(now) ?? Date.now();
-  const sendBodies = privacy.sendBodies !== false;
-  const bodyChars = Number.isFinite(privacy.bodyChars) ? Math.max(0, Math.floor(privacy.bodyChars)) : 4000;
-  const maxItems = Number.isFinite(privacy.maxItemsPerSweep)
-    ? Math.max(1, Math.floor(privacy.maxItemsPerSweep))
-    : 150;
+  const limits = privacyLimits(privacy);
+  const { sendBodies, bodyChars } = limits;
+  const maxItems = limits.maxItemsPerSweep;
   const budget = Number.isFinite(budgetChars) && budgetChars > 2000
     ? Math.floor(budgetChars)
     : DEFAULT_CONTEXT_CHARS;

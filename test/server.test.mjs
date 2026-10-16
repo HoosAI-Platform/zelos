@@ -1106,6 +1106,12 @@ test('Ask keeps event descriptions out of the prompt with "Send message bodies" 
   assert.ok(!off.includes(BODY), 'a message body reached the model with "Send message bodies" off');
   assert.match(off, /Site visit at the warehouse/, 'the event itself should still be in the grounding');
   assert.match(off, /Dock 4/, 'the event\'s place is a header and should still be sent');
+
+  /* TT-3424: a refused value is saved first and reported second, so a
+     sendBodies of "false" can be what the server holds. It is off. */
+  const mistyped = await askWith('false');
+  assert.ok(!mistyped.includes(NOTES), 'a description was sent with sendBodies "false"');
+  assert.ok(!mistyped.includes(BODY), 'a body was sent with sendBodies "false"');
 });
 
 test('/api/ask streams a grounded answer and names its sources', async (t) => {
