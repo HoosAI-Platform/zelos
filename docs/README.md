@@ -363,6 +363,17 @@ password does. For iCloud, use an app-specific password here too.
 > `caldav.icloud.com` does not work for every account and it used to look like
 > a wrong password.
 
+> **If Zelos says it stopped before your calendar password left this
+> machine**, the address starts `http://` and the calendar has a username — a
+> CalDAV account, or a protected `.ics` link. Basic sign-in over plain http
+> sends the password readable to anyone on the network, so Zelos refuses it
+> unless the server is on this machine, exactly as it does for mail. Use the
+> server's `https://` address. If it really is a server on your own network
+> with no https, open the calendar in **Settings → Calendars** and set
+> **Sending the password** to *Let this one server take it unencrypted*; that
+> permission is for that one calendar only. A calendar with no username is not
+> affected. ([SECURITY.md § 5](SECURITY.md#5-what-leaves-your-machine), item 2.)
+
 **A file on this computer** — point Zelos at an `.ics` file and it will read
 it. Useful for exports and for calendars that only publish downloads.
 

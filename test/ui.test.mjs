@@ -5763,3 +5763,124 @@ test('Your data counts what Zelos is holding, and stands unchanged when the rout
   assert.match(onScreen(bare), /Your board and saved history live in one folder on this computer\./);
   assert.doesNotMatch(onScreen(bare), /on disk/, 'a panel with no answer must not claim a size');
 });
+
+/**
+ * QA, 2026-10-10, TT-3425. Calendars that sign in — CalDAV, and a protected
+ * .ics link — had no rule about sending the password over plain http://, and
+ * so no control for it either. They now store mail's `requireTls`, and the
+ * calendar editor offers mail's three-way picker, labelled "Sending the
+ * password", in the sign-in block beside the password — for the kinds that
+ * take one, and nowhere else. Built and pressed here rather than pinned as
+ * text: the failure that matters is Test and Save disagreeing about what is on
+ * screen, and only pressing the buttons shows that.
+ */
+test('the calendar editor offers the password picker for kinds that sign in, and Test and Save both send it', async (t) => {
+  withPlainDom(t);
+  const calls = [];
+  const ok = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  globalThis.fetch = async (reqPath, init = {}) => {
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ method: init.method || 'GET', path: reqPath, body });
+    if (reqPath === '/api/calendar/test') return ok({ ok: true, calendars: [{ name: 'Home' }], events: 3, error: null });
+    if (reqPath === '/api/config') return ok({ config: { identity: {}, mail: [], calendars: body?.calendars ?? [], sources: [] }, errors: [], secretRefs: [] });
+    if (reqPath === '/api/secrets') return ok({ ok: true });
+    throw new Error(`unexpected ${init.method || 'GET'} ${reqPath}`);
+  };
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  const manifests = await connectorManifests();
+  store.state.config = { identity: {}, mail: [], calendars: [], sources: [] };
+  store.state.health = { model: { configured: false }, backend: { name: 'encrypted-file' } };
+  store.state.secretRefs = [];
+
+  const tlsPicker = (root) => findInput(root, (n) => n.tag === 'select'
+    && plainWalk(n).some((o) => o.tag === 'option' && o.attributes.value === 'allow'));
+  const kindPicker = (root) => findInput(root, (n) => n.tag === 'select'
+    && plainWalk(n).some((o) => o.tag === 'option' && o.attributes.value === 'caldav'));
+
+  const form = (requireTls, kind = 'caldav') => settings.calendarForm(
+    { id: 'c_1', enabled: true, label: 'Home', kind, url: 'http://cal.example.test/dav/', user: 'nemo', keyRef: 'calendar.c_1', requireTls },
+    { manifests, onSaved() {}, onCancel() {} },
+  );
+
+  // The stored value round-trips onto the control, and only a real boolean
+  // moves it off "decide".
+  for (const [stored, shown] of [[null, 'auto'], [undefined, 'auto'], [true, 'require'], [false, 'allow']]) {
+    assert.equal(tlsPicker(form(stored)).value, shown, JSON.stringify(stored));
+  }
+
+  // It sits in the sign-in block, beside the username and the password, with a
+  // label about the password.
+  const view = form(null);
+  const picker = tlsPicker(view);
+  const user = findInput(view, (n) => n.value === 'nemo');
+  assert.equal(picker.closest('.field').parentNode, user.closest('.field').parentNode,
+    'the picker is not in the sign-in block');
+  assert.match(textOf(picker.closest('.field')), /Sending the password/);
+  assert.ok(!plainHidden(picker), 'the picker is drawn but hidden');
+
+  // For each kind: present where there is a password to send, absent where
+  // there is none — and a file calendar stores null, so a picker nobody saw
+  // cannot leave a permission behind.
+  const kinds = kindPicker(view);
+  for (const kind of ['ics', 'file', 'caldav']) {
+    kinds.value = kind;
+    kinds.fire('change');
+    assert.equal(Boolean(tlsPicker(view)), kind !== 'file', `${kind}: picker ${tlsPicker(view) ? 'shown' : 'missing'}`);
+  }
+
+  // Test and Save read the same control.
+  for (const [choice, expected] of [['allow', false], ['require', true], ['auto', null]]) {
+    tlsPicker(view).value = choice;
+    calls.length = 0;
+    findButton(view, 'Test it').fire('click');
+    await settle();
+    const probe = calls.find((c) => c.path === '/api/calendar/test');
+    assert.ok(probe, 'Test sent nothing');
+    assert.ok(Object.hasOwn(probe.body, 'requireTls'), 'Test leaves the password rule out, so it tests other rules than the sweep');
+    assert.equal(probe.body.requireTls, expected, `Test with ${choice}`);
+
+    calls.length = 0;
+    findButton(view, 'Save calendar').fire('click');
+    await settle();
+    const save = calls.find((c) => c.method === 'PUT' && c.path === '/api/config');
+    assert.equal(save.body.calendars[0].requireTls, expected, `Save with ${choice}`);
+  }
+
+  kinds.value = 'file';
+  kinds.fire('change');
+  calls.length = 0;
+  findButton(view, 'Save calendar').fire('click');
+  await settle();
+  assert.equal(calls.find((c) => c.method === 'PUT').body.calendars[0].requireTls, null,
+    'a calendar with no password stored a password permission');
+});
+
+test('a new calendar opens on "decide from the address", and a guided card keeps the picker under Advanced', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({ manifests: await connectorManifests() });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, mail: [], calendars: [], sources: [] };
+  store.state.health = { model: { configured: false }, backend: { name: 'encrypted-file' } };
+  store.state.secretRefs = [];
+  const tlsPicker = (root) => findInput(root, (n) => n.tag === 'select'
+    && plainWalk(n).some((o) => o.tag === 'option' && o.attributes.value === 'allow'));
+
+  const panel = settings.calendarPanel({ rerender() {} });
+  findButtons(panel, /^Something else/)[0].fire('click');
+  await settle();
+  assert.equal(tlsPicker(panel)?.value, 'auto', 'a new calendar must start on "decide from the address"');
+  assert.equal(settings.requireTlsFor(tlsPicker(panel).value), null);
+  assert.ok(!plainHidden(tlsPicker(panel)));
+
+  // The iCloud card is for a first-timer and its address is https: the
+  // picker is there, folded away with the other expert controls.
+  findButtons(panel, /^iPhone or Mac/)[0].fire('click');
+  await settle();
+  assert.ok(tlsPicker(panel), 'the guided CalDAV card has no way to set the rule at all');
+  assert.ok(plainHidden(tlsPicker(panel)), 'the picker is on the first-timer card rather than under Advanced');
+  assert.equal(tlsPicker(panel).value, 'auto');
+});

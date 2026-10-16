@@ -2595,6 +2595,30 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
   const userInput = input({ value: draft.user || '', placeholder: guided?.userLabel ? 'you@icloud.com' : 'only for a protected address', autocomplete: 'off' });
   userInput.addEventListener('input', () => { draft.user = userInput.value.trim(); });
 
+  /* "Sending the password" — mail's three-way picker, for the calendars that
+     have a password to send (QA, 2026-10-10, TT-3425). A CalDAV account or a
+     protected .ics link typed as http:// used to put the password on the wire
+     unencrypted on every sweep, with no rule and no way to see it. The rule is
+     now `requireTls`, stored exactly as mail stores it, and this is the one
+     place a person can say "this server on my own network has no https, and
+     that is deliberate" without hand-editing config.json.
+
+     It lives in the sign-in block because it is a question about the password
+     and means nothing without one: a `file` calendar has no credential, and so
+     no picker. Read off the control when it is needed, never mirrored — the
+     mail form's rule, for the mail form's reason: Save and Test must not be
+     able to disagree about what is on screen. A calendar with no credential
+     stores null, so a picker the user never saw cannot leave a permission
+     behind. */
+  const tlsSelect = select(TLS_CHOICES, { value: tlsChoiceFor(draft.requireTls) });
+  const tlsField = field('Sending the password', tlsSelect, {
+    hint: 'Zelos will not send this calendar’s password over a connection that is not encrypted. Left to decide, it insists on that everywhere except a server running on this machine. Let one server take it unencrypted only if it is on your own network and has no https:// address — anyone sharing that network can read the password.',
+  });
+  // A guided card is for a first-timer, and every guide's address is https: the
+  // picker is there for the rare case, folded under Advanced with the rest.
+  const guidedTlsSlot = el('div', null);
+  const requireTls = () => (credential ? requireTlsFor(tlsSelect.value) : null);
+
   /* The sign-in half of the form, redrawn whenever the kind changes. Both
      controls live or die together: a username with no password to go with it
      authenticates nothing, so a connector that declares no credential gets
@@ -2615,10 +2639,11 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
       });
     }
     signIn.replaceChildren(...(credential
-      ? [field(guided?.userLabel || 'Username', userInput), credential.node]
+      ? [field(guided?.userLabel || 'Username', userInput), credential.node, ...(guided ? [] : [tlsField])]
       : guided
         ? []
         : [el('p', { class: 'quiet-note', text: `${manifest?.option || 'This kind of calendar'} needs no username and no password.` })]));
+    guidedTlsSlot.replaceChildren(...(credential && guided ? [tlsField] : []));
   }
   kindSelect.addEventListener('change', drawCredential);
   drawCredential();
@@ -2648,7 +2673,7 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
     try {
       await persistPassword();
       const others = (state.config.calendars || []).filter((c) => c.id !== draft.id);
-      await saveConfig({ calendars: [...others, { ...draft, kind: kindNow() }] });
+      await saveConfig({ calendars: [...others, { ...draft, kind: kindNow(), requireTls: requireTls() }] });
       status.good('Saved.');
       onSaved();
       return true;
@@ -2668,12 +2693,15 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
       await persistPassword();
       // The kind goes with it, from the same control the save reads, or
       // this is a test of a different calendar from the one about to be
-      // stored — the mail form makes the same point about requireTls.
+      // stored — the mail form makes the same point about requireTls, and so
+      // does this one now: the password rule is sent too, read off the same
+      // picker the save reads.
       const result = await api.testCalendar({
         kind: kindNow(),
         url: draft.url,
         user: draft.user,
         keyRef: draft.keyRef,
+        requireTls: requireTls(),
       });
       if (result.ok) {
         const name = result.calendars?.[0]?.name || 'calendar';
@@ -2715,6 +2743,7 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
         field('Kind', kindSelect),
         guided.urlLabel ? null : field('Address', urlInput, { hint: 'webcal:// links work; Zelos rewrites them to https.' }),
         guided.passLabel ? null : signIn,
+        guidedTlsSlot,
       ]),
     ]);
   }
@@ -2817,6 +2846,11 @@ export function calendarPanel({ compact = false, onDone = null, rerender, connec
         url: '',
         user: '',
         keyRef: null,
+        /* "Decide from the address" — `requireTlsFor('auto')`, which is what
+           the picker opens on and what Save stores if nobody touches it. The
+           same blank mail's new-account path starts from: a literal `false`
+           here would excuse cleartext for a host nobody has named yet. */
+        requireTls: null,
       }, {
         manifests,
         guide,
