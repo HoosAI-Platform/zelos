@@ -116,6 +116,9 @@ sends a `Content-Security-Policy` with no `unsafe-inline` for scripts. A
 `<script>` that slipped past `screenContent` would still render as visible
 characters. Screening exists so that a string trying to be markup never reaches
 the database, a log file, the clipboard, or an export in the first place.
+That includes error text a model endpoint or a source server sends back: it is
+screened before it is stored or logged, and an HTML page or markup is replaced
+by a description of what it was.
 
 ### `cap(str, n)`
 
