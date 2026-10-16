@@ -612,6 +612,91 @@ test('parseFeed reads what a feed means, not what its markup says', () => {
   }
 });
 
+test('REGRESSION: entity-encoded HTML in a feed reaches the AI as text, not markup', () => {
+  /* RSS 2.0's own form for markup in a description is entity-encoded HTML, and
+     Atom's type="html" is the same. textOf stripped tags first and decoded
+     second, so `&lt;b&gt;cash&lt;/b&gt;` came out as `<b>cash</b>` — the model
+     was shown the markup, the stored row kept it, and a search for a word only
+     the markup contained ("strong") found the entry. */
+  const rss = parseFeed('<rss><channel><title>T</title><item><guid>g1</guid>'
+    + '<title>Fish &amp;amp; chips &lt;b&gt;Friday&lt;/b&gt;</title>'
+    + '<description>Bring &lt;strong&gt;cash&lt;/strong&gt; &amp;amp; a mug. '
+    + '&lt;a href=&quot;https://x.example/menu&quot;&gt;Menu&lt;/a&gt;</description>'
+    + '</item></channel></rss>');
+  assert.equal(rss.entries[0].title, 'Fish & chips Friday');
+  assert.equal(rss.entries[0].body, 'Bring cash & a mug. Menu');
+  assert.doesNotMatch(rss.entries[0].body, /strong|href|</, 'the markup reached the body');
+
+  const atom = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom"><title>T</title><entry><id>e1</id>'
+    + '<content type="html">&lt;p&gt;Pour is &lt;em&gt;Tuesday&lt;/em&gt;, 5 &amp;lt; 6&lt;/p&gt;</content>'
+    + '</entry></feed>');
+  assert.equal(atom.entries[0].body, 'Pour is Tuesday, 5 < 6',
+    'an escaped `&lt;` inside the HTML is a character, not a tag');
+
+  /* CDATA is already the HTML, so it is decoded once, as HTML: `&amp;lt;` inside
+     it is the HTML for the literal text "&lt;", and decoding it twice would make
+     a tag the publisher escaped on purpose. And
+     Atom's xhtml content, real elements in the XML, still reads as before. */
+  const cdata = parseFeed('<rss><channel><item><guid>g2</guid>'
+    + '<description><![CDATA[<p>Use &amp;lt;b&amp;gt; for bold</p>]]></description></item></channel></rss>');
+  assert.equal(cdata.entries[0].body, 'Use &lt;b&gt; for bold');
+  const xhtml = parseFeed('<feed><entry><id>e2</id><content type="xhtml">'
+    + '<div xmlns="http://www.w3.org/1999/xhtml"><p>Cash &amp; a <b>mug</b></p></div></content></entry></feed>');
+  assert.equal(xhtml.entries[0].body, 'Cash & a mug');
+});
+
+test('decoding a feed\'s XML layer first does not cost text that only looks like markup', () => {
+  /* The other side of the fix above. Once `&lt;` is decoded, "x&lt;y" is "x<y",
+     and an unterminated `<y` used to read as a tag running to the end of the
+     field — the rest of the title gone. */
+  const rss = parseFeed('<rss><channel><title>Dev &lt; Ops</title><item><guid>g1</guid>'
+    + '<title>Why x&lt;y and more</title>'
+    + '<description>Revenue &lt;5% and before &lt;!-- not closed and after</description>'
+    + '</item></channel></rss>');
+  assert.equal(rss.title, 'Dev < Ops');
+  assert.equal(rss.entries[0].title, 'Why x<y and more');
+  assert.equal(rss.entries[0].body, 'Revenue <5% and before <!-- not closed and after');
+
+  /* Atom says how to read its text. type="text" is the characters themselves,
+     and in xhtml the elements are the markup while `&lt;` is text. */
+  const atom = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Use &lt;b&gt; for bold</title>'
+    + '<entry><id>e1</id><title type="text">Returns List&lt;T&gt;</title>'
+    + '<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Use &lt;em&gt; for <b>emphasis</b></p></div></content>'
+    + '</entry><entry><id>e2</id><summary type="text">a &amp;amp; b, &lt;i&gt;</summary></entry></feed>');
+  assert.equal(atom.title, 'Use <b> for bold');
+  assert.equal(atom.entries[0].title, 'Returns List<T>');
+  assert.equal(atom.entries[0].body, 'Use <em> for emphasis');
+  assert.equal(atom.entries[1].body, 'a &amp; b, <i>', 'text is decoded once, as XML, and never as HTML');
+
+  // A `<` inside a quoted attribute value is valid HTML and belongs to its tag.
+  const quoted = parseFeed('<rss><channel><item><guid>g1</guid><description>'
+    + '&lt;a title=&quot;x&lt;y&quot; href=&quot;u&quot;&gt;Link&lt;/a&gt; after '
+    + '&lt;button onclick=&quot;if(a&lt;b)go()&quot;&gt;Go&lt;/button&gt; end</description></item></channel></rss>');
+  assert.equal(quoted.entries[0].body, 'Link after Go end');
+
+  // A closed comment is removed whole, whatever it holds.
+  const commented = parseFeed('<rss><channel><item><guid>g2</guid><description>'
+    + '&lt;p&gt;Hi&lt;/p&gt;&lt;!-- &lt;p&gt;old&lt;/p&gt; if a &lt; b --&gt;&lt;p&gt;Bye&lt;/p&gt;'
+    + '</description></item></channel></rss>');
+  assert.doesNotMatch(commented.entries[0].body, /old|<!--|-->/);
+  assert.match(commented.entries[0].body, /^Hi\s+Bye$/);
+
+  /* An Atom element with no `type` is text by RFC 4287, and is read as HTML on
+     purpose: feeds that escape HTML there without saying so are real, and the
+     other reading hands the model the markup. See textTypeOf. */
+  const untyped = parseFeed('<feed><entry><id>e1</id><title>Bring &lt;b&gt;cash&lt;/b&gt;</title></entry></feed>');
+  assert.equal(untyped.entries[0].title, 'Bring cash');
+});
+
+test('a feed\'s stray-`<` guard stays linear on input built to defeat it', () => {
+  const unit = "'='a<a";
+  const body = unit.repeat(Math.floor(512 * 1024 / unit.length)).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const started = performance.now();
+  parseFeed(`<rss><channel><item><guid>g</guid><description>${body}</description></item></channel></rss>`);
+  const ms = performance.now() - started;
+  assert.ok(ms < 2_000, `512 KB took ${Math.round(ms)} ms — the scan has gone quadratic`);
+});
+
 test('REGRESSION: an escaped ampersand in a link is decoded, because it is a row identity', () => {
   /* Found by pointing this connector at NASA's real feed instead of a fixture.
      Two of ten entries came back as
