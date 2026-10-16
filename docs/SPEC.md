@@ -383,6 +383,13 @@ directly. So "iCloud is a target" is true, and "`caldav.icloud.com` works for ev
 not. The refusal must stay distinguishable from a wrong password, or the user retypes a password
 that was never the problem.
 
+**A 403 is a refusal, not a wrong password** (TT-3455). Only a 401 to a request that carried the
+credential is a verdict on it. A 403 — Radicale's answer for another user's calendar, with a good
+password — says the address is not one this account may read: the error names the path and says it
+is usually not a wrong password (or, with no username configured, that one is needed), carries
+`refused`, never ends a walk that has other roots to try, and is thrown rather than turned into an
+empty calendar list. Doctor sends the reader to the calendar URL for it, not to app-specific passwords.
+
 ## 6. `core/safety.mjs`
 
 ```js
