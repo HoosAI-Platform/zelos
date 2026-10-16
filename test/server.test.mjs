@@ -1874,6 +1874,30 @@ test('a draft can be edited, and markup in one is refused', async (t) => {
   });
   assert.equal(hostile.status, 400);
 
+  // TT-3429: the subject is screened too, and a refused subject takes the
+  // body sent beside it down with it.
+  const hostileSubject = await call(ctx, 'PUT', `/api/drafts/${id}`, {
+    body: { subject: 'Re: <svg onload=alert(1)>', body: 'A clean body.', state: 'pending' },
+  });
+  assert.equal(hostileSubject.status, 400);
+  assert.match(hostileSubject.json.error, /draft subject rejected/);
+  const kept = db.listDrafts(ctx.db, { states: ['pending', 'edited'] }).find((d) => d.id === id);
+  assert.ok(kept, 'the draft is gone');
+  assert.equal(kept.state, 'edited', 'the state sent beside a refused subject was written');
+  assert.equal(kept.subject, 'Budget review');
+  assert.equal(kept.body, 'Tuesday at 2 works for me.');
+
+  const retitled = await call(ctx, 'PUT', `/api/drafts/${id}`, { body: { subject: 'Re: Budget review (online)' } });
+  assert.equal(retitled.status, 200);
+  assert.equal(retitled.json.subject, 'Re: Budget review (online)');
+
+  const encoded = await call(ctx, 'PUT', `/api/drafts/${id}`, { body: { subject: 'Re: &lt;script&gt;x' } });
+  assert.equal(encoded.status, 400, 'an entity-hidden tag in a subject was stored');
+
+  const folded = await call(ctx, 'PUT', `/api/drafts/${id}`, { body: { subject: 'Hi\r\nBcc: x@example.com' } });
+  assert.equal(folded.status, 200);
+  assert.equal(folded.json.subject, 'Hi Bcc: x@example.com', 'a line break in a subject is a second header');
+
   const missing = await call(ctx, 'PUT', '/api/drafts/nope', { body: { body: 'hello' } });
   assert.equal(missing.status, 404);
 });
