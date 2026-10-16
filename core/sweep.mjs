@@ -548,6 +548,20 @@ function modelSample(text) {
  * ------------------------------------------------------------------ */
 
 /**
+ * What an unlabelled calendar is called on the board: the site its address is
+ * on, never the address. The label fell back to `source.url` whole, and for an
+ * .ics subscription that URL is the credential — Google's "Secret address in
+ * iCal format" — so it went into `runs.stats_json`, the Now banner, the log
+ * line below, and from /api/state into the board snapshot (QA, 2026-10-10,
+ * TT-3423). A local file's path is not a secret and stays as it was.
+ */
+function siteOf(address) {
+  const raw = typeof address === 'string' ? address.trim() : '';
+  if (!/^(?:https?|webcal):/i.test(raw)) return raw;
+  try { return new URL(raw).host || 'calendar'; } catch { return 'calendar'; }
+}
+
+/**
  * Run one sweep.
  *
  * -> {runId, ok, stats:{messages, events, items, now, tokensIn, tokensOut, ms}, error?}
@@ -655,11 +669,12 @@ export async function runSweep({
    * strings comes out byte-identical, so they are quoted here rather than
    * rephrased: `label` falls through the same chain (`host` is undefined on a
    * calendar and `url` is undefined on a mail account, so each lands where it
-   * always did — verified against both of the chains this replaced), and the
+   * always did — verified against both of the chains this replaced; a
+   * calendar's address now lands as its site, see `siteOf`), and the
    * no-password sentence is the sentence, not a description of one.
    */
   const sourceTasks = enabledSources(config).map(async ({ connector, source }) => {
-    const label = source.label || source.host || source.url || source.id;
+    const label = source.label || source.host || siteOf(source.url) || source.id;
     const nothing = { sink: connector.sink, rows: [], cursor: undefined, sourceId: source.id };
     const state = readSourceState(db, source.id);
     const startedMs = Date.now();
