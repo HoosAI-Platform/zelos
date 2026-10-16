@@ -337,7 +337,8 @@ export function attendeesOf(transcript) {
 export function actionItems(summary) {
   const raw = summary?.action_items;
   const lines = Array.isArray(raw) ? raw.map(str) : str(raw).split('\n');
-  return lines.map((l) => l.replace(/^\s*[-*•]\s*/, '').trim()).filter(Boolean);
+  // A lone `*` is a bullet; `**` opens a speaker heading and stays whole.
+  return lines.map((l) => l.replace(/^\s*(?:[-•]|\*(?!\*))\s*/, '').trim()).filter(Boolean);
 }
 
 /** The recap prose, in the order of how much of a meeting it explains. */
