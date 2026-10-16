@@ -668,7 +668,10 @@ export class ImapClient {
     this.host = host;
     this.secure = secure !== false;
     this.port = Number(port) || (this.secure ? 993 : 143);
-    this.requireTls = requireTls === null || requireTls === undefined
+    // Left to decide, the rule is re-read against the address the socket
+    // reached; see `#assertEncrypted`.
+    this.tlsDecidedByHost = requireTls === null || requireTls === undefined;
+    this.requireTls = this.tlsDecidedByHost
       ? tlsRequiredByDefault(this.host)
       : requireTls !== false;
     this.user = user == null ? '' : String(user);
@@ -749,8 +752,15 @@ export class ImapClient {
    * authenticate has nothing left to do on it.
    */
   #assertEncrypted() {
-    if (!this.requireTls) return;
     if (this.#socket && this.#socket.encrypted === true) return;
+    // Loopback by NAME is not enough when the account left this to Zelos:
+    // `bridge.localhost` may be resolved by DNS, and a hostile network can
+    // point it anywhere and simply not offer STARTTLS. Cleartext is excused
+    // only when the address actually reached is loopback too. An explicit
+    // `requireTls: false` is the user's standing word and is left alone.
+    const required = this.requireTls
+      || (this.tlsDecidedByHost && !isLoopbackHost(this.#socket?.remoteAddress));
+    if (!required) return;
     const err = this.#error(
       'this connection is still in the clear and the server never offered STARTTLS, '
       + 'so your password was not sent. Connect with TLS (port 993 usually), or, if a '

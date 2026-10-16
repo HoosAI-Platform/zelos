@@ -301,7 +301,9 @@ in **Settings → Sources**. All of them are ones you typed in yourself.
    and anything that can answer there is already running on the machine. Both
    halves are checked — the host name you configured *and* the address the
    socket actually reached — so a `*.localhost` name that a hostile resolver
-   points elsewhere is verified like any other host.
+   points elsewhere is verified like any other host. The same goes for the
+   cleartext allowance: left unset, `requireTls` excuses a plaintext session
+   only when the connected address is loopback as well as the name.
 2. **Your calendar URL** — an `.ics` feed or a CalDAV server.
 3. **Your model endpoint** — the `model.baseUrl` you chose. If you point that
    at Ollama, LM Studio, llama.cpp, vLLM or LocalAI on `127.0.0.1`, then

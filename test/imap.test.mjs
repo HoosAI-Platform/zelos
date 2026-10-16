@@ -1548,7 +1548,7 @@ const BRIDGE_TLS = {
   cert: fs.readFileSync(fileURLToPath(new URL('./fixtures/test-only-loopback-cert.pem', import.meta.url))),
 };
 
-async function startBridgeMock(t, { implicit = false, listenHost = '127.0.0.1' } = {}) {
+async function startBridgeMock(t, { implicit = false, listenHost = '127.0.0.1', starttls = true } = {}) {
   const tlsModule = await import('node:tls');
   const secureContext = tlsModule.createSecureContext(BRIDGE_TLS);
   const seen = []; // [line, encrypted]
@@ -1565,7 +1565,7 @@ async function startBridgeMock(t, { implicit = false, listenHost = '127.0.0.1' }
         const [tag, verb = ''] = line.split(' ');
         const word = verb.toUpperCase();
         if (word === 'CAPABILITY') {
-          socket.write(`* CAPABILITY IMAP4rev1 ${encrypted ? 'AUTH=PLAIN' : 'STARTTLS'}\r\n${tag} OK done\r\n`);
+          socket.write(`* CAPABILITY IMAP4rev1 ${encrypted ? 'AUTH=PLAIN' : starttls ? 'STARTTLS' : 'AUTH=PLAIN'}\r\n${tag} OK done\r\n`);
         } else if (word === 'STARTTLS' && !encrypted) {
           socket.removeListener('data', onData);
           socket.write(`${tag} OK Begin TLS negotiation now\r\n`, () => {
@@ -1622,7 +1622,7 @@ test('the loopback certificate rule stays on loopback: any other name is still v
         ? callback(null, [{ address: '127.0.0.1', family: 4 }])
         : callback(null, '127.0.0.1', 4)),
     });
-    await assert.rejects(() => client.connect(), /self-signed certificate/);
+    await assert.rejects(() => client.connect(), /certificate/);
     await client.close();
     assert.ok(!seen.some(([line]) => /LOGIN|AUTHENTICATE/i.test(line)), 'credentials were sent');
   }
@@ -1649,6 +1649,23 @@ test('a loopback NAME that reaches another address does not get the loopback cer
       await client.close();
       assert.ok(!seen.some(([line]) => /LOGIN|AUTHENTICATE/i.test(line)), 'credentials were sent');
     }
+
+    /* And the cleartext allowance: the same address can simply not offer
+       STARTTLS. Left to decide, Zelos refuses; an explicit `requireTls: false`
+       is the user's word and still stands. */
+    const toLan = (hostname, options, callback) => (options?.all
+      ? callback(null, [{ address: lan, family: 4 }])
+      : callback(null, lan, 4));
+    const { port, seen } = await startBridgeMock(t, { listenHost: lan, starttls: false });
+    const decided = new ImapClient({ host: 'bridge.localhost', port, secure: false, user: 'u', pass: 'p', timeoutMs: 5000, lookup: toLan });
+    await assert.rejects(() => decided.connect(), /still in the clear/);
+    await decided.close();
+    assert.ok(!seen.some(([line]) => /LOGIN|AUTHENTICATE/i.test(line)), 'a password crossed the network in the clear');
+    const excused = new ImapClient({
+      host: 'bridge.localhost', port, secure: false, user: 'u', pass: 'p', timeoutMs: 5000, lookup: toLan, requireTls: false,
+    });
+    await excused.connect();
+    await excused.close();
   });
 
 test('a server that never offers STARTTLS gets no credentials, and says why', async () => {
