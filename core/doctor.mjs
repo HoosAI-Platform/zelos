@@ -29,7 +29,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { DEFAULTS, loadConfig, paths, validateConfig } from './config.mjs';
-import { SCHEMA_VERSION, hasFts5 } from './db.mjs';
+import { SCHEMA_VERSION, runtimeHasFts5 } from './db.mjs';
 import { backend as secretBackend, getSecret as readSecret, setSecret as writeSecret, deleteSecret as removeSecret } from './secrets.mjs';
 import { readModelKey, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
 import { isLocalAddress, listModels } from './llm.mjs';
@@ -193,27 +193,6 @@ function checkHome(home) {
   return check('home', label, 'pass', detail);
 }
 
-/**
- * Whether THIS runtime's SQLite can build an FTS5 table, asked of a throwaway
- * in-memory database rather than of the user's file.
- *
- * `hasFts5()` works by creating a virtual table, so it cannot be asked of a
- * read-only handle — the CREATE fails with "attempt to write a readonly
- * database" and the answer comes back "no FTS5" about a runtime that has it.
- * The question is about the runtime anyway, not about the file, so an empty
- * database in memory is the honest place to ask it.
- */
-function runtimeHasFts5() {
-  let probe = null;
-  try {
-    probe = new DatabaseSync(':memory:');
-    return hasFts5(probe);
-  } catch {
-    return false;
-  } finally {
-    try { probe?.close(); } catch { /* it was never usable */ }
-  }
-}
 
 /**
  * The database, actually opened.
@@ -251,19 +230,22 @@ function checkDatabase(home) {
      path appears only inside the mv commands, which have to be copy-pasteable. */
   const aside = `Close Zelos and move the file aside — mv "${file}" "${file}.broken" — then start Zelos again: it writes a fresh one. Your mail and calendars are read from their servers on the next sweep; what is lost is the board history and anything you captured.`;
 
-  if (!fs.existsSync(file)) {
-    return check(
-      'database', label, 'skip',
-      'zelos.db has not been created yet.',
-      'Nothing to do: Zelos creates it, with its tables, the first time it starts.',
-    );
-  }
-
+  // The runtime first: on a first run there is no zelos.db yet, and "it has
+  // not been created yet — nothing to do" would hide that this Node can never
+  // create one (TT-3467).
   if (!runtimeHasFts5()) {
     return check(
       'database', label, 'fail',
       `This copy of Node (${process.version}) has a SQLite without the FTS5 extension, which Zelos's search index is built on — so it cannot open zelos.db at all.`,
       'Install an official Node from nodejs.org (22.16 or newer, or 24 or newer) and run zelos again. Nothing in your Zelos home has been changed.',
+    );
+  }
+
+  if (!fs.existsSync(file)) {
+    return check(
+      'database', label, 'skip',
+      'zelos.db has not been created yet.',
+      'Nothing to do: Zelos creates it, with its tables, the first time it starts.',
     );
   }
 

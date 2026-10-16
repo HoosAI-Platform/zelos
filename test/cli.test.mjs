@@ -24,7 +24,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -1848,4 +1848,39 @@ describe('the session token never reaches a command line', () => {
     }
     assert.equal(openBrowser(null, { spawn: () => { throw new Error('nothing should have been spawned'); } }), false);
   });
+});
+
+describe('a runtime without FTS5 (TT-3467)', () => {
+  /* QA, 2026-10-10: on a first run the refusal ended "nothing in your Zelos
+     home has been changed" — after the launcher had made the home, logs/,
+     cache/, .data-connections/ and an empty WAL-mode zelos.db. FTS5's absence
+     is simulated, as QA did, with a preload that makes every FTS5 table fail. */
+  let preload;
+  before(() => {
+    const file = path.join(SCRATCH, 'no-fts5.mjs');
+    fs.writeFileSync(file, [
+      "import sqlite from 'node:sqlite';",
+      'const exec = sqlite.DatabaseSync.prototype.exec;',
+      'sqlite.DatabaseSync.prototype.exec = function (sql) {',
+      "  if (/using\\s+fts5/i.test(String(sql))) throw new Error('no such module: fts5');",
+      '  return exec.call(this, sql);',
+      '};',
+    ].join('\n'));
+    preload = `--import=${pathToFileURL(file).href}`;
+  });
+
+  for (const args of [[], ['sweep'], ['mcp']]) {
+    test(`\`zelos ${args.join(' ') || '(serve)'}\` refuses before it makes a home, in one sentence`, async () => {
+      const home = path.join(SCRATCH, `never-made-${homeCounter += 1}`);
+      const result = await run(args.length ? args : ['--no-open'], {
+        home,
+        env: { NODE_OPTIONS: preload },
+      });
+      assert.equal(result.code, 1, `exit ${result.code}\n${result.stderr}`);
+      assert.match(result.stderr, /built without SQLite's FTS5 extension/);
+      assert.match(result.stderr, /nothing in your Zelos home has been changed/);
+      assert.doesNotMatch(result.stderr, /\n\s+at /, 'a stack trace instead of the sentence');
+      assert.equal(fs.existsSync(home), false, `the home was created: ${fs.existsSync(home) ? fs.readdirSync(home).join(', ') : ''}`);
+    });
+  }
 });
