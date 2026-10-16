@@ -1874,6 +1874,21 @@ test('a draft can be edited, and markup in one is refused', async (t) => {
   });
   assert.equal(hostile.status, 400);
 
+  // TT-3429: the subject is screened too, and a refused subject takes the
+  // body sent beside it down with it.
+  const hostileSubject = await call(ctx, 'PUT', `/api/drafts/${id}`, {
+    body: { subject: 'Re: <svg onload=alert(1)>', body: 'A clean body.' },
+  });
+  assert.equal(hostileSubject.status, 400);
+  assert.match(hostileSubject.json.error, /draft subject rejected/);
+  const kept = db.listDrafts(ctx.db, { states: ['pending', 'edited'] }).find((d) => d.id === id);
+  assert.equal(kept.subject, 'Budget review');
+  assert.equal(kept.body, 'Tuesday at 2 works for me.');
+
+  const retitled = await call(ctx, 'PUT', `/api/drafts/${id}`, { body: { subject: 'Re: Budget review (online)' } });
+  assert.equal(retitled.status, 200);
+  assert.equal(retitled.json.subject, 'Re: Budget review (online)');
+
   const missing = await call(ctx, 'PUT', '/api/drafts/nope', { body: { body: 'hello' } });
   assert.equal(missing.status, 404);
 });

@@ -2536,20 +2536,29 @@ async function handleAsk(ctx) {
   }
 }
 
+/* The subject is screened exactly as the body is. It used to go in unscreened,
+   so `<script>` in a subject reached the database the body had just been kept
+   out of — against docs/SECURITY.md's "never reaches the database" (QA,
+   2026-10-10, TT-3429). Both are screened before either is written, so a
+   refused subject does not let its body through on the same request. */
+function screenedDraftField(text, name) {
+  try {
+    return screenContent(text);
+  } catch (err) {
+    if (err instanceof SafetyError) throw new HttpError(400, `draft ${name} rejected: ${err.message}`);
+    throw err;
+  }
+}
+
 async function handleDraftPut(ctx, [id]) {
   const body = await readJSON(ctx.req);
   const patch = {};
   if (body.body !== undefined) {
-    const text = requireString(body, 'body', { max: MAX_DRAFT_CHARS, required: false });
-    try {
-      screenContent(text);
-    } catch (err) {
-      if (err instanceof SafetyError) throw new HttpError(400, `draft body rejected: ${err.message}`);
-      throw err;
-    }
-    patch.body = text;
+    patch.body = screenedDraftField(requireString(body, 'body', { max: MAX_DRAFT_CHARS, required: false }), 'body');
   }
-  if (body.subject !== undefined) patch.subject = requireString(body, 'subject', { max: 500, required: false });
+  if (body.subject !== undefined) {
+    patch.subject = screenedDraftField(requireString(body, 'subject', { max: 500, required: false }), 'subject');
+  }
   if (body.state !== undefined) patch.state = requireString(body, 'state', { max: 20 });
 
   let draft;
