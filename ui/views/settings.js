@@ -29,6 +29,7 @@ import { el, button, meander, section, copyText, replace } from '../lib/dom.js';
 import { api, request } from '../lib/api.js';
 import { state, saveConfig, loadConfig, setAccent, applyAccent, currentAccent, DEFAULT_ACCENT, markOnboarded, nowMark } from '../lib/store.js';
 import { plural, tokenLine } from '../lib/format.js';
+import { isLocalAddress, isThisMachine } from '../lib/local-address.js';
 import { monthName } from '../lib/time.js';
 import { aiAccessPanel } from './ai-access.js';
 import { sourceStatusLine, connectionRecovery, setupStatus } from '../lib/source-status.js';
@@ -782,7 +783,10 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       return false;
     }
   }
-  const isLocal = () => /^https?:\/\/(127\.0\.0\.1|localhost|\[?::1\]?)(:|\/|$)/i.test(draft.baseUrl || '');
+  // The engine's own rule (core/llm.mjs isLocalAddress, copied in
+  // ui/lib/local-address.js): the whole local network, not just loopback, is
+  // reached without a key (TT-3449).
+  const isLocal = () => isLocalAddress(draft.baseUrl || '');
   const friendly = () => draft.guide?.friendly || draft.label || 'this service';
 
   // The key box currently on screen, so a redraw that is not a change of
@@ -962,10 +966,17 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     const keyHint = keyStored()
       ? 'A key is saved. For safety it is never shown again.'
       : plainSecretNotes(state.health?.backend?.name).field;
-    const keyField = field(draft.guide ? 'Your key' : 'API key', keyInput, {
+    /* A local runtime usually needs no key, but one started with one (vLLM or
+       llama-server with --api-key, LM Studio with auth on) does, and the box
+       used to be hidden for every local address — which, once the whole local
+       network counted as local (TT-3449), would have left a GPU box with a
+       key no way to take it. So the box is always there, optional when local. */
+    const keyField = field(draft.guide ? 'Your key' : isLocal() ? 'API key (optional)' : 'API key', keyInput, {
       hint: draft.guide ? keyHint : (keyStored()
         ? 'A key is already stored for this address. Zelos cannot show it back to you — there is no route that reads a secret.'
-        : secretStoreNotes(state.health?.backend?.name).field),
+        : isLocal()
+          ? 'Local runtimes usually need no key. Paste one only if yours was started with one, like vLLM or llama-server with --api-key.'
+          : secretStoreNotes(state.health?.backend?.name).field),
     });
 
     // The guided card: the steps, the key box, one button.
@@ -1010,7 +1021,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       el('div', { class: 'chosen-head' }, [
         el('span', { class: 'chosen-label', text: draft.label || 'Custom endpoint' }),
         el('span', { class: 'mono chosen-proto', text: draft.protocol }),
-        isLocal() ? el('span', { class: 'badge-local', text: 'on this machine' }) : null,
+        isLocal() ? el('span', { class: 'badge-local', text: isThisMachine(draft.baseUrl || '') ? 'on this machine' : 'on your network' }) : null,
       ]),
       field('Base URL', baseInput, { hint: 'Where the requests go. Nothing else is contacted.' }),
       field('Model', modelInput, {
@@ -1023,9 +1034,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       ]),
       guide
         ? el('p', { class: 'field-hint', text: 'The key box is in the card above.' })
-        : isLocal() && !keyStored()
-          ? el('p', { class: 'field-hint', text: 'Local runtimes usually need no key, and Zelos will not invent one.' })
-          : keyField,
+        : keyField,
       el('div', { class: 'row-inline' }, [
         button('Save', {
           class: 'btn solid',
