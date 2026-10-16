@@ -2100,3 +2100,19 @@ test('a server allowed plain http:// keeps that permission through Test\'s expla
   assert.deepEqual(probe.suggestions?.map((c) => c.name), ['Personal & family', 'work'], 'the explain walk was refused as cleartext');
 });
 
+test('a webcal:// address is read over https, not refused (TT-3437)', async (t) => {
+  /* QA, 2026-10-10: CalDAV refused webcal:// with "Calendar URLs must be http
+     or https, got webcal:" — `parsed.protocol = 'https:'` is silently ignored
+     between a non-special and a special scheme. The .ics reader and the Test
+     route rewrite the string, and they work. */
+  const calls = stubFetch(t);
+  for (const url of ['webcal://cal.example.test/dav/', 'WEBCAL://cal.example.test/dav/']) {
+    await assert.rejects(() => discover({ url, user: USER, pass: PASS }), (err) => {
+      assert.doesNotMatch(err.message, /got webcal/i, 'webcal: was refused as a scheme');
+      assert.ok(!err.cleartextRefused, 'webcal: means https, so the password is not refused as cleartext');
+      return true;
+    });
+  }
+  assert.ok(calls.length > 0, 'nothing was asked, so the address never got past normalising');
+  assert.ok(calls.every((c) => c.url.startsWith('https://cal.example.test/')), `asked over something other than https: ${calls.map((c) => c.url).join(', ')}`);
+});

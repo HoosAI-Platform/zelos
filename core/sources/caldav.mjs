@@ -825,13 +825,18 @@ function normalizeUrl(url) {
   const raw = String(url || '').trim();
   if (!raw) throw new CalDavError('No calendar URL was given');
   const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+  /* webcal: is how Apple and friends publish an https address, and it is
+     rewritten in the STRING, as the .ics reader and the Test route do. It used
+     to be `parsed.protocol = 'https:'` after parsing, which the URL standard
+     ignores without a word between a non-special scheme and a special one —
+     so every webcal:// address was refused as "got webcal:" (QA, 2026-10-10,
+     TT-3437). */
   let parsed;
   try {
-    parsed = new URL(withScheme);
+    parsed = new URL(withScheme.replace(/^webcal:/i, 'https:'));
   } catch {
     throw new CalDavError(`"${raw}" is not a usable calendar URL`);
   }
-  if (parsed.protocol === 'webcal:') parsed.protocol = 'https:';
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new CalDavError(`Calendar URLs must be http or https, got ${parsed.protocol}`);
   }
