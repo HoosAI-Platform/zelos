@@ -667,6 +667,27 @@ test('decoding a feed\'s XML layer first does not cost text that only looks like
   assert.equal(atom.entries[0].title, 'Returns List<T>');
   assert.equal(atom.entries[0].body, 'Use <em> for emphasis');
   assert.equal(atom.entries[1].body, 'a &amp; b, <i>', 'text is decoded once, as XML, and never as HTML');
+
+  // A `<` inside a quoted attribute value is valid HTML and belongs to its tag.
+  const quoted = parseFeed('<rss><channel><item><guid>g1</guid><description>'
+    + '&lt;a title=&quot;x&lt;y&quot; href=&quot;u&quot;&gt;Link&lt;/a&gt; after '
+    + '&lt;button onclick=&quot;if(a&lt;b)go()&quot;&gt;Go&lt;/button&gt; end</description></item></channel></rss>');
+  assert.equal(quoted.entries[0].body, 'Link after Go end');
+
+  /* An Atom element with no `type` is text by RFC 4287, and is read as HTML on
+     purpose: feeds that escape HTML there without saying so are real, and the
+     other reading hands the model the markup. See textTypeOf. */
+  const untyped = parseFeed('<feed><entry><id>e1</id><title>Bring &lt;b&gt;cash&lt;/b&gt;</title></entry></feed>');
+  assert.equal(untyped.entries[0].title, 'Bring cash');
+});
+
+test('a feed\'s stray-`<` guard stays linear on input built to defeat it', () => {
+  const unit = "'='a<a";
+  const body = unit.repeat(Math.floor(512 * 1024 / unit.length)).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const started = performance.now();
+  parseFeed(`<rss><channel><item><guid>g</guid><description>${body}</description></item></channel></rss>`);
+  const ms = performance.now() - started;
+  assert.ok(ms < 2_000, `512 KB took ${Math.round(ms)} ms — the scan has gone quadratic`);
 });
 
 test('REGRESSION: an escaped ampersand in a link is decoded, because it is a row identity', () => {
