@@ -171,8 +171,21 @@ function escapeStrayLt(s) {
   const opensTag = (code) => (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)
     || code === 0x2f /* / */ || code === 0x21 /* ! */ || code === 0x3f /* ? */;
 
+  // Whether a `-->` exists at or after this index; once a search fails, every
+  // later one would too, so it is made once.
+  let noCommentEndFrom = n + 1;
+
   /* The index of the `>` that closes the tag opened at `at`, or -1. */
   const tagEnd = (at) => {
+    // A closed comment is one unit, `<` and all, as stripTags reads it: the
+    // publisher's commented-out markup must not reach the model as text.
+    if (s.startsWith('<!--', at)) {
+      if (at + 4 >= noCommentEndFrom) return -1;
+      const close = s.indexOf('-->', at + 4);
+      if (close >= 0) return close + 2;
+      noCommentEndFrom = at + 4;
+      return -1;
+    }
     if (!opensTag(s.charCodeAt(at + 1))) return -1;
     const seen = [];
     let j = at + 1;
