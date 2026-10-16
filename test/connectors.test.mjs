@@ -693,6 +693,39 @@ test('REGRESSION: an Atom author with a uri or email is sent by their name alone
   assert.equal(rss.entries[1].author, 'Nemo Hale');
 });
 
+test('REGRESSION: entity-encoded HTML in a feed reaches the AI as text, not markup', () => {
+  /* RSS 2.0's own form for markup in a description is entity-encoded HTML, and
+     Atom's type="html" is the same. textOf stripped tags first and decoded
+     second, so `&lt;b&gt;cash&lt;/b&gt;` came out as `<b>cash</b>` — the model
+     was shown the markup, the stored row kept it, and a search for a word only
+     the markup contained ("strong") found the entry. */
+  const rss = parseFeed('<rss><channel><title>T</title><item><guid>g1</guid>'
+    + '<title>Fish &amp;amp; chips &lt;b&gt;Friday&lt;/b&gt;</title>'
+    + '<description>Bring &lt;strong&gt;cash&lt;/strong&gt; &amp;amp; a mug. '
+    + '&lt;a href=&quot;https://x.example/menu&quot;&gt;Menu&lt;/a&gt;</description>'
+    + '</item></channel></rss>');
+  assert.equal(rss.entries[0].title, 'Fish & chips Friday');
+  assert.equal(rss.entries[0].body, 'Bring cash & a mug. Menu');
+  assert.doesNotMatch(rss.entries[0].body, /strong|href|</, 'the markup reached the body');
+
+  const atom = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom"><title>T</title><entry><id>e1</id>'
+    + '<content type="html">&lt;p&gt;Pour is &lt;em&gt;Tuesday&lt;/em&gt;, 5 &amp;lt; 6&lt;/p&gt;</content>'
+    + '</entry></feed>');
+  assert.equal(atom.entries[0].body, 'Pour is Tuesday, 5 < 6',
+    'an escaped `&lt;` inside the HTML is a character, not a tag');
+
+  /* CDATA is already the HTML, so it is decoded once, as HTML: `&amp;lt;` inside
+     it is the HTML for the literal text "&lt;", and decoding it twice would make
+     a tag the publisher escaped on purpose. And
+     Atom's xhtml content, real elements in the XML, still reads as before. */
+  const cdata = parseFeed('<rss><channel><item><guid>g2</guid>'
+    + '<description><![CDATA[<p>Use &amp;lt;b&amp;gt; for bold</p>]]></description></item></channel></rss>');
+  assert.equal(cdata.entries[0].body, 'Use &lt;b&gt; for bold');
+  const xhtml = parseFeed('<feed><entry><id>e2</id><content type="xhtml">'
+    + '<div xmlns="http://www.w3.org/1999/xhtml"><p>Cash &amp; a <b>mug</b></p></div></content></entry></feed>');
+  assert.equal(xhtml.entries[0].body, 'Cash & a mug');
+});
+
 test('REGRESSION: an escaped ampersand in a link is decoded, because it is a row identity', () => {
   /* Found by pointing this connector at NASA's real feed instead of a fixture.
      Two of ten entries came back as
