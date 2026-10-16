@@ -146,6 +146,7 @@ const MAX_ICS_BYTES = 8 * 1_048_576;
  * number in two files is the price of that; the rule it guards lives in one.
  */
 const NOW_BOARD_LIMIT = 4;
+/** Ask's ceiling on grounding sources; privacy.maxItemsPerSweep may set it lower (TT-3446). */
 const ASK_CONTEXT_HITS = 12;
 const ASK_CONTEXT_CHARS = 1_200;
 /** A grounding block's heading, on one line: the sweep's cap on a subject. */
@@ -2368,7 +2369,10 @@ function groundingHits(db, question, limit) {
 
 /** Build the grounding block for a question out of the FTS5 index. */
 function askContext(db, question, privacy) {
-  const hits = groundingHits(db, question, ASK_CONTEXT_HITS);
+  /* "Most items per check" caps how much of the user's email, calendar and
+     notes each AI request carries, Ask's included, as the Privacy panel says. Ask used to send up to 12 whatever it said
+     (QA, 2026-10-10, TT-3446). */
+  const hits = groundingHits(db, question, Math.min(ASK_CONTEXT_HITS, privacy.maxItemsPerSweep));
   const sources = [];
   const blocks = [];
 

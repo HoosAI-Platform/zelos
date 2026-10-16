@@ -1163,6 +1163,51 @@ test('Ask holds the snippet and event notes under "Characters of each email" (TT
   assert.doesNotMatch(prompt2, /NOTES-TAIL/, 'event notes went past the 200-character setting');
 });
 
+test('Ask carries no more items than "Most items per check" (TT-3446)', async (t) => {
+  /* QA, 2026-10-10: set to 10, the sweep held to 10 but Ask carried 12. */
+  async function askWith(maxItemsPerSweep, question = 'What do the gravel invoices say?') {
+    const upstream = await startMockUpstream(t);
+    const ctx = await startServer(t, {
+      config: baseConfig({
+        model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' },
+        privacy: { maxItemsPerSweep, sendBodies: true, bodyChars: 4000 },
+      }),
+    });
+    for (let i = 0; i < 8; i += 1) {
+      db.upsertMessage(ctx.db, {
+        sourceId: 'm_1', uid: 100 + i, messageId: `<invoice-${i}@test>`,
+        from: { name: 'Billing', email: 'billing@example.com' },
+        subject: `Invoice ${i} for the gravel order`, date: `2026-08-0${i + 1}T09:00:00-04:00`,
+        snippet: `Gravel invoice number ${i}.`, text: `Gravel invoice number ${i}.`, folder: 'INBOX',
+      });
+    }
+    const response = await fetch(`${ctx.base}/api/ask`, {
+      method: 'POST',
+      headers: { 'X-Zelos-Token': ctx.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const frames = (await readStream(response, null, { until: (f) => f.startsWith('event: done') }))
+      .map(parseFrame)
+      .filter((f) => f.event);
+    const sent = upstream.received.find((r) => r.url.startsWith('/chat/completions'));
+    const prompt = sent.body.messages.map((m) => m.content).join('\n');
+    const grounded = new Set(prompt.split('\n').map((line) => /^\[(msg:[0-9a-f]+)\]/.exec(line)?.[1]).filter(Boolean));
+    return { grounded: grounded.size, listed: frames.find((f) => f.event === 'sources').data.length };
+  }
+
+  const roomy = await askWith(150);
+  assert.equal(roomy.grounded, 8, 'all eight invoices should ground the answer when the cap allows, or this proves nothing');
+  assert.equal(roomy.listed, 8);
+
+  // The question as a whole matches nothing, so this goes through the
+  // per-term merge; "gravel invoice" matches whole, the first step.
+  for (const question of ['What do the gravel invoices say?', 'gravel invoice']) {
+    const tight = await askWith(3, question);
+    assert.equal(tight.grounded, 3, `Ask sent more items than "Most items per check" allows (${question})`);
+    assert.equal(tight.listed, 3, 'the sources shown should be the ones the model was given');
+  }
+});
+
 test('/api/ask streams a grounded answer and names its sources', async (t) => {
   const upstream = await startMockUpstream(t);
   const ctx = await startServer(t, {
