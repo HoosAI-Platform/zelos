@@ -1404,6 +1404,40 @@ test('an HTML response (wrong base URL) produces a legible error', async () => {
  * A failure that arrives with a success status
  * ------------------------------------------------------------------ */
 
+test('an endpoint\'s error text is screened before anything can keep it (TT-3453)', async () => {
+  /* QA, 2026-10-10: a 400 whose HTML body held <script> reached runs.error,
+     /api/state and the log verbatim, though the reply sample was screened. */
+  const call = () => complete({
+    protocol: 'openai', baseUrl: mock.origin, model: 'llama3.2',
+    messages: [{ role: 'user', content: 'hi' }], retries: 0,
+  });
+  const cases = [
+    [{ status: 400, headers: { 'content-type': 'text/html' }, body: '<html><body><script>alert(1)</script>Bad request</body></html>' }, /an HTML page/],
+    [{ status: 400, body: { error: { message: 'bad model <img src=x onerror=alert(1)>' } } }, /looked like markup/],
+    [{ status: 200, body: { error: { message: '<script>steal()</script>' } } }, /looked like markup/],
+  ];
+  for (const [reply, said] of cases) {
+    mock.plan.push(reply);
+    await assert.rejects(call, (err) => {
+      assert.doesNotMatch(err.message, /<script|<img|onerror=/i, `markup survived: ${err.message}`);
+      assert.match(err.message, said);
+      return true;
+    });
+  }
+  // A plain error page is described too, and a redirect's address is screened.
+  mock.plan.push({ status: 502, headers: { 'content-type': 'text/html' }, body: '<html><head><title>502 Bad Gateway</title></head></html>' });
+  await assert.rejects(call, /an HTML page/);
+  mock.plan.push({ status: 302, headers: { location: 'javascript:alert(1)' }, body: '' });
+  await assert.rejects(call, (err) => {
+    assert.doesNotMatch(err.message, /javascript:/i);
+    assert.match(err.message, /redirected to/);
+    return true;
+  });
+  // Plain words still come through as they were.
+  mock.plan.push({ status: 400, body: { error: { message: 'model "llama9" not found' } } });
+  await assert.rejects(call, /model "llama9" not found/);
+});
+
 test('a 200 carrying an error body is a failure, not an empty answer', async () => {
   // OpenRouter's shape for a billing problem: HTTP 200, the refusal inside the
   // envelope, no `choices` at all. Read as a success this is text:'' — which

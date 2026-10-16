@@ -20,6 +20,7 @@
  */
 
 import { log } from './log.mjs';
+import { screenContent, SafetyError } from './safety.mjs';
 
 const llog = log.child('[llm]');
 
@@ -748,6 +749,28 @@ function withoutCredentials(text, secrets) {
   return out;
 }
 
+/**
+ * An endpoint's own words, as they may be kept: in `runs.error`, `/api/state`,
+ * the log, an export. A 400 whose body was an HTML page went in verbatim,
+ * `<script>` and all, though SECURITY.md says screening keeps markup out of
+ * the database and the log files and the reply sample beside it was already
+ * screened (QA, 2026-10-10, TT-3453). Every path that keeps an endpoint's error
+ * text goes through here: the status error, a 200 carrying an error body (from
+ * `complete()` and `listModels()`), and a mid-stream error frame. A detail that is trying to be markup is
+ * replaced by what it was, which is the useful part anyway: a page is what a
+ * wrong base URL answers with.
+ */
+function screenedDetail(text) {
+  try {
+    return screenContent(text);
+  } catch (err) {
+    if (!(err instanceof SafetyError)) throw err;
+    return /<\s*(?:!doctype|html|head|body)\b/i.test(text)
+      ? 'an HTML page, not the API\'s own error (its text was not kept)'
+      : 'its text looked like markup and was not kept';
+  }
+}
+
 async function readErrorDetail(res, secrets = []) {
   let text;
   try {
@@ -761,17 +784,24 @@ async function readErrorDetail(res, secrets = []) {
     const json = JSON.parse(text);
     const message =
       json?.error?.message ?? json?.message ?? (typeof json?.error === 'string' ? json.error : null);
-    if (typeof message === 'string' && message) return message.slice(0, ERROR_DETAIL_CHARS);
+    if (typeof message === 'string' && message) return screenedDetail(message.slice(0, ERROR_DETAIL_CHARS));
   } catch {
     /* not JSON — fall through to the raw body */
   }
-  return text.replace(/\s+/g, ' ').trim().slice(0, ERROR_DETAIL_CHARS);
+  // A whole page is described, not kept, whatever is in it: the words a person
+  // needs are "this address served a web page", not its markup.
+  if (/<\s*(?:!doctype|html|head|body)\b/i.test(text)) return 'an HTML page, not the API\'s own error (its text was not kept)';
+  // Screened on twice what is kept, before the cut: a cap can split a tag and
+  // hide it, and a hostile body can be megabytes.
+  return screenedDetail(text.replace(/\s+/g, ' ').trim().slice(0, ERROR_DETAIL_CHARS * 2)).slice(0, ERROR_DETAIL_CHARS);
 }
 
 function httpError(res, detail, address) {
   const status = res.status;
   if (status >= 300 && status < 400) {
-    const location = res.headers.get('location') || 'another address';
+    // The server's own words too, so screened like the rest (TT-3453).
+    const given = (res.headers.get('location') || 'another address').slice(0, ERROR_DETAIL_CHARS);
+    const location = screenedDetail(given) === given ? given : 'an address that looked like markup (not kept)';
     // Following this would forward the API key to a host the user never chose.
     return new LLMError(
       `Model at ${address} redirected to ${location} — point the base URL there directly; Zelos will not forward your key across a redirect`,
@@ -974,7 +1004,7 @@ function completionOf(raw, req) {
     // one that interrupts a stream in flight is usually a transient overload.
     const detail = withoutCredentials(bodyError, credentialsIn(req.headers));
     throw new LLMError(
-      `Model at ${req.address} returned a success status with an error body: ${detail.slice(0, ERROR_DETAIL_CHARS)}`,
+      `Model at ${req.address} returned a success status with an error body: ${screenedDetail(detail).slice(0, ERROR_DETAIL_CHARS)}`,
       { address: req.address, retriable: false },
     );
   }
@@ -1089,7 +1119,7 @@ async function* sseFrames(webStream, onChunk) {
  */
 function midStreamDetail(req, raw) {
   const text = typeof raw === 'string' && raw ? raw : 'unknown error';
-  return withoutCredentials(text, credentialsIn(req.headers)).slice(0, ERROR_DETAIL_CHARS);
+  return screenedDetail(withoutCredentials(text, credentialsIn(req.headers))).slice(0, ERROR_DETAIL_CHARS);
 }
 
 /**
@@ -1296,7 +1326,7 @@ export async function listModels({
   if (bodyError) {
     const detail = withoutCredentials(bodyError, credentialsIn(req.headers));
     throw new LLMError(
-      `Model catalogue at ${address} returned a success status with an error body: ${detail.slice(0, ERROR_DETAIL_CHARS)}`,
+      `Model catalogue at ${address} returned a success status with an error body: ${screenedDetail(detail).slice(0, ERROR_DETAIL_CHARS)}`,
       { address, retriable: false },
     );
   }
