@@ -483,6 +483,18 @@ export function fieldControls(manifest, values = {}) {
  * the keychain wording stands until it says otherwise.
  */
 export function secretStoreNotes(backendName) {
+  /* Windows has no keychain entry to remove. core/secrets.mjs `dpapiFile` writes
+     each secret as its own DPAPI-encrypted file under %LOCALAPPDATA%\Zelos\secrets
+     — outside the home, so the keychain sentence below sent a Windows user off
+     to look for an entry that does not exist and left every password on disk
+     after they had "erased everything" (QA, 2026-10-10, TT-3461). */
+  if (backendName === 'windows-dpapi') {
+    return {
+      field: 'It is encrypted by Windows for your account alone and saved under %LOCALAPPDATA%\\Zelos\\secrets: never into config.json, never into a log, and there is no route that reads it back.',
+      password: 'Encrypted by Windows (DPAPI) for your account alone and saved under %LOCALAPPDATA%\\Zelos\\secrets. It is never written to config.json, never passed on a command line, and never logged.',
+      data: 'On Windows the stored passwords and API keys are not in that directory, and there is no keychain entry to remove: each one is a DPAPI-encrypted file under %LOCALAPPDATA%\\Zelos\\secrets. Deleting the folder above leaves them behind, so delete that one too — it holds the passwords of every Zelos folder on this Windows account:',
+    };
+  }
   if (backendName === 'encrypted-file') {
     return {
       field: 'It goes into secrets.enc in your Zelos home, encrypted with the key in .seed beside it: never into config.json, never into a log, and there is no route that reads it back.',
@@ -507,6 +519,13 @@ export function secretStoreNotes(backendName) {
  */
 export function plainSecretNotes(backendName) {
   const field = 'Saved on this computer only, scrambled so nobody else can read it.';
+  if (backendName === 'windows-dpapi') {
+    return {
+      field,
+      data: 'Your saved passwords are not in this folder. Windows keeps them, locked to your account, in a second Zelos folder: paste %LOCALAPPDATA%\\Zelos into the File Explorer address bar to find it, and delete that folder too.',
+      about: 'Your passwords are locked to your Windows account, in files on this computer.',
+    };
+  }
   if (backendName === 'encrypted-file') {
     return {
       field,
@@ -3151,6 +3170,26 @@ export function folderHint(platform = '') {
 }
 
 /**
+ * How to erase the folder, in the words of the system it is on. The panel said
+ * "drag it to the Trash" and gave an `rm -rf` line to everyone, Windows
+ * included, where there is a Recycle Bin and the shell is PowerShell (TT-3461).
+ * A DPAPI store is only ever on Windows, so it settles the question when the
+ * page cannot see a platform.
+ */
+export function eraseSteps(platform = '', backendName = '') {
+  const windows = String(platform || '').toLowerCase().startsWith('win') || backendName === 'windows-dpapi';
+  return windows
+    ? {
+      plain: 'To erase everything: quit Zelos, then delete this folder and empty the Recycle Bin.',
+      command: (dir) => `Remove-Item -Recurse -Force "${dir}"`,
+    }
+    : {
+      plain: 'To erase everything: quit Zelos, then drag this folder to the Trash and empty the Trash.',
+      command: (dir) => `rm -rf "${dir}"`,
+    };
+}
+
+/**
  * Whether the page is inside the desktop shell with the one bridge that
  * reveals the folder (desktop/preload.js). The board has to keep working
  * when opened from `zelos` on the command line, where no preload runs.
@@ -3211,6 +3250,8 @@ function dataPanel() {
   const status = statusLine();
   const home = state.health?.home || '(unknown)';
   const platform = typeof window !== 'undefined' ? (window.zelos?.platform || window.navigator?.platform || '') : '';
+  const backendName = state.health?.backend?.name;
+  const erase = eraseSteps(platform, backendName);
 
   async function exportSnapshot() {
     status.working('Gathering…');
@@ -3263,12 +3304,13 @@ function dataPanel() {
     el('p', { class: 'quiet-note', text: 'The snapshot includes the current board and settings, without passwords. It does not include your full mail archive, captures or complete item history. Use a backup to restore your data.' }),
     canShowFolder() ? null : el('p', { class: 'quiet-note', text: folderHint(platform) }),
     section('Erasing everything', {}, [
-      el('p', { class: 'quiet-note', text: 'To erase everything: quit Zelos, then drag this folder to the Trash and empty the Trash.' }),
-      el('p', { class: 'quiet-note', text: plainSecretNotes(state.health?.backend?.name).data }),
+      el('p', { class: 'quiet-note', text: erase.plain }),
+      el('p', { class: 'quiet-note', text: plainSecretNotes(backendName).data }),
       fold('For experts', [
         el('p', { class: 'quiet-note', text: 'Zelos deliberately has no route that wipes your data — a local server that can destroy the database on request is a local server a stray web page can point at. Done by hand, with the app closed, it is one command:' }),
-        el('pre', { class: 'code' }, el('code', { text: `rm -rf "${home}"` })),
+        el('pre', { class: 'code' }, el('code', { text: erase.command(home) })),
         el('p', { class: 'quiet-note', text: secretStoreNotes(state.health?.backend?.name).data }),
+        backendName === 'windows-dpapi' ? el('pre', { class: 'code' }, el('code', { text: erase.command('$env:LOCALAPPDATA\\Zelos') })) : null,
       ]),
     ]),
     status.node,
