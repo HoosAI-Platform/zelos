@@ -307,6 +307,22 @@ function linkOf(xml) {
 }
 
 /**
+ * Who wrote the entry.
+ *
+ * RSS's `<author>` is text ("dana@vance.example (Dana Vance)") and
+ * `<dc:creator>` is a name. Atom's `<author>` is a person construct whose
+ * `<name>` sits beside a `<uri>` and an `<email>`; reading the whole element as
+ * text made the sender "Ines Calder http://…/ines". So the `<name>` inside it
+ * is preferred when there is one.
+ */
+function authorOf(block) {
+  const creator = first(block, 'creator');
+  if (creator) return collapse(textOf(creator));
+  const author = first(block, 'author');
+  return collapse(textOf(first(author, 'name') || author || first(block, 'name')));
+}
+
+/**
  * -> {title, date, entries: [{title, link, id, author, date, body}]}
  *
  * Comments are removed first, because a commented-out `<item>` is a real thing
@@ -347,7 +363,7 @@ export function parseFeed(input) {
     // ampersand in it is a row identity that moves when the publisher's
     // escaping does.
     id: decodeXmlEntities(collapse(unwrapCdata(first(block, 'guid') || first(block, 'id')))),
-    author: collapse(textOf(first(block, 'creator') || first(block, 'author') || first(block, 'name'))),
+    author: authorOf(block),
     date: collapse(unwrapCdata(
       first(block, 'pubDate') || first(block, 'published') || first(block, 'updated') || first(block, 'date'),
     )),
