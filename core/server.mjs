@@ -2557,7 +2557,12 @@ async function handleDraftPut(ctx, [id]) {
     patch.body = screenedDraftField(requireString(body, 'body', { max: MAX_DRAFT_CHARS, required: false }), 'body');
   }
   if (body.subject !== undefined) {
-    patch.subject = screenedDraftField(requireString(body, 'subject', { max: 500, required: false }), 'subject');
+    /* And on one line, as the sweep's own subjects are (core/safety.mjs
+       `safeString`): a subject is a header, and a line break in one is a second
+       header waiting for the mail program that reads the mailto: link. */
+    const subject = requireString(body, 'subject', { max: 500, required: false })
+      .replace(/\s*[\n\r\u0085\u2028\u2029]\s*/g, ' ');
+    patch.subject = screenedDraftField(subject, 'subject');
   }
   if (body.state !== undefined) patch.state = requireString(body, 'state', { max: 20 });
 
