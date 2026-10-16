@@ -446,22 +446,36 @@ test('a cursor larger than the ceiling is refused rather than stored', async (t)
  * A refused credential, and a source that is deliberately resting
  * ================================================================== */
 
+/* A GitHub source pointed at a loopback "Enterprise" server: the connector
+   sends a real token, which is what a refused CREDENTIAL needs. A feed sends
+   none, and is the test after these two (TT-3459). */
+const githubSource = (apiBase) => ({
+  id: 's_gh', enabled: true, label: 'GitHub', type: 'github', keyRef: 'source.s_gh', settings: { apiBase },
+});
+const tokenDeps = (token) => ({ getSecret: async () => token });
+/** GitHub keeps a minimum gap between polls; age the last one so the next sweep is due. */
+const dueAgain = (db, id) => {
+  const state = JSON.parse(getKV(db, sourceStateKey(id)) || '{}');
+  setKV(db, sourceStateKey(id), JSON.stringify({ ...state, lastAt: 0, lastOkAt: 0 }));
+};
+
 test('a refused credential rests the source, and the rest is on every run record until it lifts', async (t) => {
   const db = fresh();
-  const feed = await feedServer(t, {
+  const api = await feedServer(t, {
     handler: (req, res) => { res.writeHead(401, { 'content-type': 'text/plain' }); res.end('nope'); },
   });
-  const config = baseConfig({ sources: [feedSource({ settings: { url: feed.url } })] });
+  const config = baseConfig({ sources: [githubSource(api.origin)] });
 
-  const first = await runSweep({ db, config, mode: 'light', deps: sweepDeps });
+  const first = await runSweep({ db, config, mode: 'light', deps: tokenDeps('ghp_old') });
   assert.equal(first.stats.sources.length, 1);
   assert.equal(first.stats.sources[0].ok, false);
-  assert.match(first.stats.sources[0].error, /rejected the credential/);
-  const state = JSON.parse(getKV(db, sourceStateKey('s_feed')));
+  assert.match(first.stats.sources[0].error, /refused the token/);
+  const state = JSON.parse(getKV(db, sourceStateKey('s_gh')));
   assert.ok(state.authBlockedUntil > Date.now(), 'nothing recorded that the credential was refused');
 
-  const second = await runSweep({ db, config, mode: 'light', deps: sweepDeps });
-  assert.equal(feed.hits(), 1, 'the sweep asked again with the credential the host just refused');
+  dueAgain(db, 's_gh');
+  const second = await runSweep({ db, config, mode: 'light', deps: tokenDeps('ghp_old') });
+  assert.equal(api.hits(), 1, 'the sweep asked again with the credential the host just refused');
   /* A red row — not silence, and not a green one. `{ok: true, count: 0}` would
      inflate stats.sourcesOk — a number three files consume — with a source that
      was never read. Silence was the first design, on the argument that a red
@@ -481,26 +495,74 @@ test('a refused credential rests the source, and the rest is on every run record
 
 test('changing the stored credential releases the block immediately', async (t) => {
   const db = fresh();
-  const feed = await feedServer(t, {
+  const api = await feedServer(t, {
     handler: (req, res, hits) => {
       if (hits === 1) { res.writeHead(403); res.end(); return; }
-      res.writeHead(200, { 'content-type': 'application/rss+xml' });
-      res.end(RSS_TWO);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('[]');
     },
   });
-  const config = baseConfig({ sources: [feedSource({ settings: { url: feed.url } })] });
+  const config = baseConfig({ sources: [githubSource(api.origin)] });
 
-  await runSweep({ db, config, mode: 'light', deps: sweepDeps });
+  await runSweep({ db, config, mode: 'light', deps: tokenDeps('ghp_old') });
   // The user pastes a different token. The block is keyed on WHICH credential
   // was refused, not on a flag, because that is the real shape of the failure:
   // somebody rotates a token and the six-hour wait must not apply to the new one.
-  const state = JSON.parse(getKV(db, sourceStateKey('s_feed')));
-  setKV(db, sourceStateKey('s_feed'), JSON.stringify({ ...state, secretHash: 'a-different-one' }));
+  dueAgain(db, 's_gh');
+  const second = await runSweep({ db, config, mode: 'light', deps: tokenDeps('ghp_new') });
+  assert.equal(api.hits(), 2);
+  assert.equal(second.stats.sources[0].ok, true, second.stats.sources[0].error);
+});
 
-  const second = await runSweep({ db, config, mode: 'light', deps: sweepDeps });
-  assert.equal(feed.hits(), 2);
-  assert.equal(second.stats.sources[0].ok, true);
-  assert.equal(second.stats.sources[0].count, 2);
+test('a feed that answers 401 or 403 is not told about a credential, and is not rested (TT-3459)', async (t) => {
+  /* QA, 2026-10-10: any 401 or 403 became an AuthError, so a feed — which has
+     no credential — was told "rejected the credential … check it in Settings"
+     beside an Edit form that says it needs none, and rested six hours until a
+     secret that does not exist changed. After its address was corrected, the
+     next check never asked the new one. */
+  const db = fresh();
+  for (const status of [401, 403]) {
+    const feed = await feedServer(t, {
+      handler: (req, res, hits) => {
+        if (hits === 1) { res.writeHead(status); res.end(); return; }
+        res.writeHead(200, { 'content-type': 'application/rss+xml' });
+        res.end(RSS_TWO);
+      },
+    });
+    const config = baseConfig({ sources: [feedSource({ settings: { url: feed.url } })] });
+
+    const first = await runSweep({ db, config, mode: 'light', deps: sweepDeps });
+    assert.equal(first.stats.sources[0].ok, false);
+    assert.doesNotMatch(first.stats.sources[0].error, /credential/i, `a ${status} was blamed on a credential`);
+    assert.match(first.stats.sources[0].error, new RegExp(`refused to serve this address \\(${status}\\).*check the address`));
+    const state = JSON.parse(getKV(db, sourceStateKey('s_feed')) || '{}');
+    assert.ok(!(state.authBlockedUntil > Date.now()), `a ${status} rested a source that has no credential`);
+
+    const second = await runSweep({ db, config, mode: 'light', deps: sweepDeps });
+    assert.equal(feed.hits(), 2, 'the next check did not ask again');
+    assert.equal(second.stats.sources[0].ok, true);
+  }
+
+  // A feed rested by the old rule, before an upgrade, is not kept resting: its
+  // secret is always null, so nothing the user does could lift it.
+  const feed = await feedServer(t);
+  const config = baseConfig({ sources: [feedSource({ settings: { url: feed.url } })] });
+  setKV(db, sourceStateKey('s_feed'), JSON.stringify({ authBlockedUntil: Date.now() + 6 * 3_600_000, secretHash: secretHash(null) }));
+  const resting = await runSweep({ db, config, mode: 'light', deps: sweepDeps });
+  assert.equal(feed.hits(), 1, 'a feed rested before the upgrade was still not asked');
+  assert.equal(resting.stats.sources[0].ok, true);
+
+  // And the leftover rest is cleared even when that read fails, so Settings
+  // stops offering "can retry after…" and Check all connections comes back.
+  const broken = await feedServer(t, { handler: (req, res) => { res.writeHead(404); res.end(); } });
+  const brokenConfig = baseConfig({ sources: [feedSource({ settings: { url: broken.url } })] });
+  setKV(db, sourceStateKey('s_feed'), JSON.stringify({ authBlockedUntil: Date.now() + 6 * 3_600_000, secretHash: secretHash(null) }));
+  const failed = await runSweep({ db, config: brokenConfig, mode: 'light', deps: sweepDeps });
+  assert.equal(failed.stats.sources[0].ok, false);
+  const { readSourceStatus } = await import('../core/source-status.mjs');
+  const row = readSourceStatus(db, brokenConfig).find((r) => r.id === 's_feed');
+  assert.ok(row, 'no status row for the feed');
+  assert.equal(row.retryAt ?? null, null, `a stale rest still holds the feed until ${row.retryAt}`);
 });
 
 test('a stated rate limit rests the source until the moment the host named', async (t) => {
@@ -1043,7 +1105,16 @@ test('the transport, not the connector, decides what a 401 and a 429 mean', asyn
   const refuses = await feedServer(t, { handler: (req, res) => { res.writeHead(401); res.end(); } });
   const limits = await feedServer(t, { handler: (req, res) => { res.writeHead(429, { 'retry-after': '90' }); res.end(); } });
 
-  await assert.rejects(() => createHttp({ origins: [refuses.origin], limits: {} }).get(refuses.url), AuthError);
+  const credential = { label: 'Token', send: { as: 'header', name: 'authorization', prefix: 'Bearer ' } };
+  await assert.rejects(
+    () => createHttp({ origins: [refuses.origin], limits: {}, credential, secret: 'a-token' }).get(refuses.url),
+    AuthError,
+  );
+  // With no credential sent, a 401 is an ordinary failure, not an AuthError (TT-3459).
+  await assert.rejects(
+    () => createHttp({ origins: [refuses.origin], limits: {} }).get(refuses.url),
+    (err) => !(err instanceof AuthError) && /refused to serve this address \(401\)/.test(err.message),
+  );
   await assert.rejects(
     () => createHttp({ origins: [limits.origin], limits: {} }).get(limits.url),
     (err) => err instanceof RateLimitError && err.retryAfterMs === 90_000,
