@@ -2055,3 +2055,24 @@ test('the scheduler cancels an in-flight sweep when it is stopped', async (t) =>
   await pending;
   assert.equal(sawAbort, true);
 });
+
+/*
+ * TT-3423. A calendar needs no label, and an unlabelled one was reported under
+ * its whole address — for an .ics subscription, the secret that reads it. That
+ * label is stored in the run record /api/state serves, and so reached the board
+ * snapshot. It is now the site the address is on.
+ */
+test('an unlabelled calendar is reported by its site, never its secret address', async () => {
+  const secret = 'https://calendar.google.com/calendar/ical/me%40gmail.com/private-0123456789abcdef/basic.ics';
+  const result = await runSweep({
+    db: fresh(),
+    config: baseConfig({ calendars: [{ id: 'c_secret', enabled: true, kind: 'ics', label: '', url: secret }] }),
+    mode: 'light',
+    deps: {
+      getSecret: SECRETS,
+      fetchEvents: async () => [{ uid: 'x', title: 'One meeting', startsAt: new Date(Date.now() + 86_400_000).toISOString() }],
+    },
+  });
+  assert.ok(!JSON.stringify(result.stats).includes('private-0123456789abcdef'), 'the run record holds the secret address');
+  assert.equal(result.stats.sources.find((s) => s.kind === 'calendar').label, 'calendar.google.com');
+});

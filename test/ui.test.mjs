@@ -5803,4 +5803,10 @@ test('the board snapshot does not carry a calendar or feed secret address', asyn
   // And the export uses it.
   const src = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
   assert.match(src, /config: snapshotConfig\(config\.config\)/, 'exportSnapshot writes the config unfiltered');
+  assert.match(src, /runs: snapshotConfig\(board\.runs\)/, 'exportSnapshot writes a stored run record unfiltered');
+
+  // A run recorded before the sweep stopped using the address as a label.
+  const runs = { last: { stats: { sources: [{ kind: 'calendar', id: 'g', label: google, ok: true }] } } };
+  assert.equal(settings.snapshotConfig(runs).last.stats.sources[0].label,
+    'https://calendar.google.com/… (rest of the address removed)');
 });
