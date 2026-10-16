@@ -29,6 +29,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { DEFAULTS, loadConfig, paths, validateConfig, PRIVACY_CLOSED } from './config.mjs';
+import { fetchFailureReason } from './fetch-error.mjs';
 import { SCHEMA_VERSION, runtimeHasFts5 } from './db.mjs';
 import { backend as secretBackend, getSecret as readSecret, setSecret as writeSecret, deleteSecret as removeSecret } from './secrets.mjs';
 import { readModelKey, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
@@ -1087,7 +1088,7 @@ async function checkCalendar(calendar, deps, { timeoutMs, signal, timezone }) {
     }
     return check(id, label, 'pass', `${parsed.calname || url} · ${parsed.vevents.length} entr${parsed.vevents.length === 1 ? 'y' : 'ies'}`);
   } catch (err) {
-    return check(id, label, 'fail', `${url}: ${errorText(err)}`,
+    return check(id, label, 'fail', `${url}: ${fetchFailureReason(err)}`,
       'Check the address in Settings → Calendars, and that this machine can reach it. A subscription link that works in a browser will work here.');
   }
 }

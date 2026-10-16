@@ -39,6 +39,7 @@ import { Buffer } from 'node:buffer';
 
 import { paths, writeFileAtomic } from '../config.mjs';
 import { log } from '../log.mjs';
+import { fetchFailureReason } from '../fetch-error.mjs';
 
 const dav = log.child('[caldav]');
 
@@ -371,7 +372,8 @@ async function request(method, url, { user, pass, body = null, depth = null, tim
         ? `no response within ${timeoutMs}ms`
         : signal?.aborted
           ? 'cancelled'
-          : err?.message || String(err);
+          // The cause, not undici's "fetch failed" (TT-3514).
+          : fetchFailureReason(err);
       throw new CalDavError(`CalDAV ${method} could not reach ${hostOf(url)}: ${reason}`, { host: hostOf(url), transport: true });
     }
 

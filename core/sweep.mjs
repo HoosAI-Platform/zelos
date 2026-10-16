@@ -56,6 +56,7 @@ import {
 } from './db.mjs';
 import { buildSweepPrompt, mergeSweep, SWEEP_KV } from './triage.mjs';
 import { cap, screenContent, SafetyError } from './safety.mjs';
+import { fetchFailureReason } from './fetch-error.mjs';
 import { SAMPLE_SOURCE_ID, SAMPLE_CALENDAR_ID, SAMPLE_MARK } from './sample-data.mjs';
 import {
   nowISO,
@@ -475,6 +476,9 @@ function authResting(state, secret, nowMs) {
 
 function errorText(err) {
   if (!err) return 'unknown error';
+  // A raw fetch that reached here without a reader's wording still says why,
+  // not "fetch failed" (TT-3514).
+  if (err.message === 'fetch failed' && err.cause) return screenedError(`fetch failed: ${fetchFailureReason(err)}`);
   return screenedError(err.message || String(err));
 }
 
