@@ -7615,3 +7615,44 @@ test('headings never skip a level, and every whole-page screen is a main landmar
   const noscript = /<noscript>([\s\S]*?)<\/noscript>/.exec(html)?.[1] || '';
   assert.match(noscript, /^\s*<main class="screen">[\s\S]*<h1 [^>]*>[^<]+<\/h1>[\s\S]*<\/main>\s*$/, 'the no-JavaScript screen is not a main landmark');
 });
+
+/*
+ * TT-3423. A calendar's subscription address is a credential in its own right —
+ * Google calls it the "Secret address" — and it sits in config.json as
+ * `calendars[].url`. The board snapshot, which promises no passwords, wrote the
+ * config out whole. It now cuts every address back to its site.
+ */
+test('the board snapshot does not carry a calendar or feed secret address', async () => {
+  stubBrowserGlobals();
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  const google = 'https://calendar.google.com/calendar/ical/me%40gmail.com/private-0123456789abcdef/basic.ics';
+  const icloud = 'webcal://p01-caldav.icloud.com/published/2/SECRETTOKEN';
+  const config = {
+    model: { baseUrl: 'https://api.anthropic.com', label: 'Claude' },
+    calendars: [
+      { id: 'g', label: 'Work', kind: 'ics', url: google, keyRef: null },
+      { id: 'a', label: 'Home', kind: 'ics', url: icloud, keyRef: null },
+      { id: 'c', label: 'Fastmail', kind: 'caldav', url: 'https://me:hunter2@caldav.example.com', user: 'me' },
+      { id: 'f', label: 'File', kind: 'file', url: '/Users/nemo/cal.ics' },
+    ],
+    sources: [{ id: 'r', type: 'rss', settings: { url: 'https://feeds.example.com/private?token=abc', maxItems: 50 } }],
+  };
+  const out = settings.snapshotConfig(config);
+  const text = JSON.stringify(out);
+  for (const secret of ['private-0123456789abcdef', 'SECRETTOKEN', 'hunter2', 'token=abc']) {
+    assert.ok(!text.includes(secret), `the snapshot still holds ${secret}`);
+  }
+  assert.equal(out.calendars[0].url, 'https://calendar.google.com/… (rest of the address removed)');
+  assert.equal(out.calendars[1].url, 'webcal://p01-caldav.icloud.com/… (rest of the address removed)',
+    'URL.origin is "null" for webcal:, so the site must be built by hand');
+  assert.equal(out.calendars[2].url, 'https://caldav.example.com/… (rest of the address removed)');
+  assert.equal(out.calendars[3].url, '/Users/nemo/cal.ics', 'a local path is not an address');
+  assert.equal(out.model.baseUrl, 'https://api.anthropic.com', 'a bare site has nothing to remove');
+  assert.equal(out.sources[0].settings.maxItems, 50);
+  assert.equal(out.calendars[0].label, 'Work');
+  assert.equal(config.calendars[0].url, google, 'the live config is not touched');
+
+  // And the export uses it.
+  const src = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
+  assert.match(src, /config: snapshotConfig\(config\.config\)/, 'exportSnapshot writes the config unfiltered');
+});

@@ -3547,6 +3547,35 @@ function dataStats() {
   return slot;
 }
 
+/**
+ * The settings as the board snapshot writes them: every web address cut back to
+ * the site it is on.
+ *
+ * A calendar's address is not a pointer to a password, it IS the password.
+ * Google's "Secret address in iCal format", an Outlook publish link and an
+ * iCloud public calendar all let anyone holding the URL read the calendar, and
+ * core/config.mjs keeps it in `calendars[].url` beside the label — so the
+ * snapshot, which says it has no passwords in it, carried one per calendar. A
+ * private feed's `settings.url` is the same kind of thing. The whole tree is
+ * walked rather than those two keys named, so the next connector with a
+ * `type: 'url'` field is covered without anyone remembering this function.
+ * Built from protocol and host, not `URL.origin`, which is "null" for webcal:.
+ */
+export function snapshotConfig(config) {
+  const strip = (value) => {
+    if (Array.isArray(value)) return value.map(strip);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, strip(v)]));
+    }
+    if (typeof value !== 'string' || !/^(?:https?|webcal):/i.test(value.trim())) return value;
+    let url;
+    try { url = new URL(value.trim()); } catch { return '(address removed)'; }
+    const site = `${url.protocol}//${url.host}`;
+    return url.href === `${site}/` ? value : `${site}/… (rest of the address removed)`;
+  };
+  return strip(config);
+}
+
 function dataPanel() {
   const status = statusLine('data');
   const home = state.health?.home || '(unknown)';
@@ -3559,7 +3588,7 @@ function dataPanel() {
       const payload = JSON.stringify({
         exportedAt: new Date().toISOString(),
         version: state.health?.version || null,
-        config: config.config,
+        config: snapshotConfig(config.config),
         board,
       }, null, 2);
       const blob = new Blob([payload], { type: 'application/json' });
@@ -3569,7 +3598,7 @@ function dataPanel() {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      status.good('Board snapshot saved. It contains no passwords and is not a full backup.');
+      status.good('Board snapshot saved. It contains no passwords or private calendar addresses, and is not a full backup.');
     } catch (err) {
       status.bad(err.message);
     }
@@ -3600,7 +3629,7 @@ function dataPanel() {
         : button('Copy the folder path', { class: 'btn solid', onClick: copyPath }),
       button('Save board snapshot', { class: 'btn quiet', onClick: exportSnapshot }),
     ]),
-    el('p', { class: 'quiet-note', text: 'The snapshot includes the current board and settings, without passwords. It does not include your full mail archive, captures or complete item history. Use a backup to restore your data.' }),
+    el('p', { class: 'quiet-note', text: 'The snapshot includes the current board and settings, without passwords. Calendar and feed addresses are cut back to the site they are on, because the full address is often a key in itself. It does not include your full mail archive, captures or complete item history. Use a backup to restore your data.' }),
     canShowFolder() ? null : el('p', { class: 'quiet-note', text: folderHint(platform) }),
     section('Erasing everything', {}, [
       el('p', { class: 'quiet-note', text: 'To erase everything: quit Zelos, then drag this folder to the Trash and empty the Trash.' }),
