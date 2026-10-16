@@ -1105,7 +1105,7 @@ test('REGRESSION: an attached email is not read as the message body', async () =
       const byUid = new Map(messages.map((m) => [m.uid, m]));
       assert.equal(byUid.get(501).text, 'See below, Nemo — the sender wrote this.');
       assert.equal(byUid.get(502).text, 'See below, Nemo — the sender wrote this.',
-        'an inline-disposed attached email is still someone else\'s words');
+        'an attached email with no disposition is still someone else\'s words');
       assert.equal(byUid.get(503).text, 'Only the original.');
       assert.equal(byUid.get(501).hasAttachments, true);
     },

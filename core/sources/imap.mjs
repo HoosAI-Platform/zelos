@@ -495,13 +495,18 @@ function dispositionFrom(node) {
 }
 
 /**
- * The part a human would read: plain text if there is any, otherwise HTML.
+ * The part a human would read: the sender's own plain text if there is any,
+ * otherwise their own HTML, and only then anything enclosed.
  *
  * The sender's own words come first, whichever of the two they wrote. A message
  * whose own body is HTML only and which carries an email as an attachment used
  * to be read as the ATTACHED email's plain text — the model was shown someone
  * else's words and never the sender's. An attached email is read only when the
  * message has nothing of its own.
+ *
+ * The trade is deliberate: an HTML-only forward with nothing typed now reads as
+ * its near-empty HTML rather than as the attached email, which is honest about
+ * who wrote what. A size cut-off to tell a stub from a body would be a guess.
  */
 function chooseTextPart(parts) {
   const inline = parts.filter((p) => p.disposition !== 'attachment');
