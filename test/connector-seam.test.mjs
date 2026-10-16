@@ -520,6 +520,22 @@ test('doctor asks for the credential the connector named, and for the settings i
   assert.ok(missingField.action.includes('Board address'));
 });
 
+test('REGRESSION: doctor sends a GitHub Enterprise user to their own server to mint a token', async () => {
+  /* credential.url is github.com's. A user whose API address is their own
+     server minted a token there that their server had never heard of. */
+  const report = await diagnose({
+    config: baseConfig({ sources: [{
+      id: 's_ghe', enabled: true, label: 'Work GitHub', type: 'github', keyRef: 'github.s_ghe',
+      settings: { apiBase: 'https://ghe.corp.example/api/v3' },
+    }] }),
+    deps: SILENT_DEPS,
+  });
+  const line = byId(report, 'source.s_ghe');
+  assert.equal(line.status, 'fail', line.detail);
+  assert.match(line.action, /https:\/\/ghe\.corp\.example\/settings\/tokens/);
+  assert.doesNotMatch(line.action, /https:\/\/github\.com/);
+});
+
 test('doctor asks a calendar connector for its own probe instead of branching on the kind', async (t) => {
   const off = register(throwaway({
     type: CALENDAR_KIND,
