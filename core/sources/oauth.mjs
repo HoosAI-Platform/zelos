@@ -42,6 +42,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 
 import { log } from '../log.mjs';
+import { fetchFailureReason } from '../fetch-error.mjs';
 import { getSecret, setSecret, deleteSecret } from '../secrets.mjs';
 import { isModelKeyRef } from '../model-key.mjs';
 
@@ -696,7 +697,7 @@ async function postForm(url, form, { fetchImpl, timeoutMs, signal, provider, cli
       redirect: 'error',
     });
   } catch (err) {
-    throw new OAuthError(`oauth: could not reach the token endpoint at ${url} (${err.message})`, {
+    throw new OAuthError(`oauth: could not reach the token endpoint at ${url} (${fetchFailureReason(err)})`, {
       code: err?.name === 'TimeoutError' ? 'timeout' : 'network',
       provider,
     });
