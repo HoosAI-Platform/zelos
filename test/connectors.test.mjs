@@ -755,6 +755,13 @@ test('decoding a feed\'s XML layer first does not cost text that only looks like
     + '&lt;button onclick=&quot;if(a&lt;b)go()&quot;&gt;Go&lt;/button&gt; end</description></item></channel></rss>');
   assert.equal(quoted.entries[0].body, 'Link after Go end');
 
+  // A closed comment is removed whole, whatever it holds.
+  const commented = parseFeed('<rss><channel><item><guid>g2</guid><description>'
+    + '&lt;p&gt;Hi&lt;/p&gt;&lt;!-- &lt;p&gt;old&lt;/p&gt; if a &lt; b --&gt;&lt;p&gt;Bye&lt;/p&gt;'
+    + '</description></item></channel></rss>');
+  assert.doesNotMatch(commented.entries[0].body, /old|<!--|-->/);
+  assert.match(commented.entries[0].body, /^Hi\s+Bye$/);
+
   /* An Atom element with no `type` is text by RFC 4287, and is read as HTML on
      purpose: feeds that escape HTML there without saying so are real, and the
      other reading hands the model the markup. See textTypeOf. */
