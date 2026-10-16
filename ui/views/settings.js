@@ -28,7 +28,7 @@ import { el, button, meander, section, copyText, replace } from '../lib/dom.js';
    place to look for a call that has exactly one call site. */
 import { api, request } from '../lib/api.js';
 import { state, saveConfig, loadConfig, setAccent, applyAccent, currentAccent, DEFAULT_ACCENT, markOnboarded, nowMark } from '../lib/store.js';
-import { plural, tokenLine } from '../lib/format.js';
+import { plural, tokenLine, calendarTestSummary } from '../lib/format.js';
 import { isLocalAddress, isThisMachine } from '../lib/local-address.js';
 import { monthName } from '../lib/time.js';
 import { aiAccessPanel } from './ai-access.js';
@@ -2948,8 +2948,7 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
         requireTls: requireTls(),
       });
       if (result.ok) {
-        const name = result.calendars?.[0]?.name || 'calendar';
-        status.good(`${name}: ${plural(result.events ?? 0, 'appointment')} found.`);
+        status.good(calendarTestSummary(result));
         return true;
       }
       status.bad(result.error || 'Nothing came back.');

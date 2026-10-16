@@ -319,6 +319,25 @@ export function plural(n, one, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+/**
+ * What "Test it" says a calendar check found. A reader that counts (a .ics
+ * link, a file) says how many appointments; CalDAV does not count — it lists
+ * the calendars it found — and its result has no `events`, so the line used to
+ * read "Site visits: 0 appointments found" for a calendar holding two (QA,
+ * 2026-10-10, TT-3456). It names the calendars Zelos will read instead, which
+ * is the fact a person checking a calendar account actually needs.
+ */
+export function calendarTestSummary(result) {
+  const calendars = Array.isArray(result?.calendars) ? result.calendars : [];
+  const first = calendars[0]?.name || 'calendar';
+  if (typeof result?.events === 'number') return `${first}: ${plural(result.events, 'appointment')} found.`;
+  const names = calendars.map((c) => c?.name || 'a calendar without a name');
+  if (!names.length) return 'Connected.';
+  const shown = names.length > 5 ? [...names.slice(0, 5), `${names.length - 5} more`] : names;
+  const list = shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}`;
+  return `Connected. Zelos will read ${plural(names.length, 'calendar')}: ${list}.`;
+}
+
 /** "1.2k" / "3.4M" — a size, not an accountancy. Under a thousand is exact. */
 export function compactCount(n) {
   const v = Math.max(0, Math.round(Number(n) || 0));
