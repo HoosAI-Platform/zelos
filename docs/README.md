@@ -350,7 +350,10 @@ Three kinds, in order of how common they are:
 
 **CalDAV** — for iCloud, Fastmail or Nextcloud with your own credentials. Paste
 the server address and your username; the password goes in the same way a mail
-password does. For iCloud, use an app-specific password here too.
+password does. For iCloud, use an app-specific password here too. Zelos reads
+what the address names: the server address (`https://host/`) reads every
+calendar in the account, and the address of one calendar reads that calendar
+and no other.
 
 > **If Zelos says a host asked for a password and it is not the host you
 > typed**, that is the pin working, not a bug — and the fix is one paste.
