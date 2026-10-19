@@ -357,6 +357,8 @@ function chip({ event, start, end, col, cols }, { today, nowMinutes, compact }) 
     },
     title: `${eventTimeLabel(event)} — ${event.title || '(untitled)'}`,
   }, [
+    // Ended is drawn as an outline in quieter ink; this says it in words.
+    past ? el('span', { class: 'visually-hidden', text: 'Ended: ' }) : null,
     el('span', { class: 'chip-time mono', text: formatTime(event.starts_at) }),
     el('span', { class: 'chip-title', text: event.title || '(untitled)' }),
     !compact && event.location ? el('span', { class: 'chip-where', text: event.location }) : null,
@@ -385,7 +387,6 @@ function notLoadedMark({ block = false } = {}) {
       'letter-spacing': '0.08em',
       'text-transform': 'uppercase',
       color: 'var(--ink-3)',
-      opacity: '0.75',
       ...(block ? { display: 'block', 'text-align': 'center', 'margin-top': '0.6rem' } : {}),
     },
     text: 'not loaded',

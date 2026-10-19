@@ -120,6 +120,17 @@ body {
 [hidden] { display: none !important; }
 
 h1, h2, h3, h4 { margin: 0; font-weight: 600; line-height: 1.2; }
+
+/* Read by a screen reader, not shown: a view's h1 (TT-3530). */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 p { margin: 0; }
 ul, ol { margin: 0; padding: 0; list-style: none; }
 a { color: inherit; text-decoration: none; }
@@ -906,7 +917,13 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 .agenda-time { flex: none; font-size: 0.75rem; color: var(--lapis); }
 .agenda-title { font-size: 0.9375rem; }
 .agenda-where { font-size: 0.75rem; color: var(--ink-on-wash); }
-.agenda-item.is-past { opacity: 0.5; }
+/* An appointment that has ended is an outline: no wash, a grey stripe, quieter
+   ink, and "Ended:" for screen readers. It used to be opacity 0.5, which took
+   its time and place to 2.75 and 1.9:1 (TT-3469). */
+.agenda-item.is-past { border-left-color: var(--line-strong); background: none; }
+.agenda-item.is-past .agenda-time,
+.agenda-item.is-past .agenda-where { color: var(--ink-3); }
+.agenda-item.is-past .agenda-title { color: var(--ink-2); }
 .agenda-item.is-live { border-left-color: var(--accent); background: var(--accent-wash); }
 
 /* ------------------------------------------------------------- 7. calendar */
@@ -1094,7 +1111,11 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 .chip-ev.is-short .chip-time { flex: none; }
 .chip-ev.is-short .chip-title { display: block; white-space: nowrap; }
 .chip-ev.is-packed { border-right: 1px solid var(--paper); }
-.chip-ev.is-past { opacity: 0.5; }
+/* Ended, drawn the way the agenda draws it (TT-3469). */
+.chip-ev.is-past { border-left-color: var(--line-strong); background: none; }
+.chip-ev.is-past .chip-time,
+.chip-ev.is-past .chip-where { color: var(--ink-3); }
+.chip-ev.is-past .chip-title { color: var(--ink-2); }
 .chip-ev.is-live { border-left-color: var(--accent); background: var(--accent-wash); }
 .chip-time { font-size: 0.625rem; color: var(--lapis); }
 .chip-ev.is-live .chip-time { color: var(--accent-text); }

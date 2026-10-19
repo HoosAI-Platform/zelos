@@ -287,9 +287,10 @@ test('the glow and the accent presets are readable from the source', () => {
 
 test('dim text on an event wash uses --ink-on-wash, not a plain dim ink', () => {
   for (const selector of ['.agenda-where', '.chip-where', '.scope-state', '.account.is-connection-target .account-host']) {
-    const rule = new RegExp(selector.replace(/\./g, '\\.') + String.raw`\s*\{([^}]*)\}`).exec(CSS);
+    // The rule that names the selector on its own, not a compound of it.
+    const rule = RULES.find((r) => !r.nested && r.selectors.includes(selector));
     assert.ok(rule, `ui/app.css no longer styles ${selector}`);
-    assert.match(rule[1], /(^|;)\s*color:\s*var\(--ink-on-wash\)/, `${selector} sits on the accent wash`);
+    assert.match(rule.body, /(^|;)\s*color:\s*var\(--ink-on-wash\)/, `${selector} sits on the accent wash`);
   }
 });
 
@@ -316,4 +317,113 @@ test('the glow is actually composited: it lowers the dim ink ratio', () => {
   const lit = ratio(fg, background(accent, SURFACES['a glass pane'], PEAK_GLOW));
   const dark = ratio(fg, background(accent, SURFACES['a glass pane'], 0));
   assert.ok(lit < dark, `glow should lower contrast (${lit.toFixed(2)} vs ${dark.toFixed(2)})`);
+});
+
+/* ------------------------------------------------- ended appointments (TT-3469) */
+
+/** An ink as an opaque colour: a token, a literal, or the accent mixed toward a colour (--accent-text). */
+function inkColour(value, accent) {
+  const v = value.trim();
+  const ref = /^var\((--[\w-]+)\)$/.exec(v);
+  if (ref) return inkColour(token(ref[1]), accent);
+  const mix = /^color-mix\(\s*in srgb\s*,\s*var\(--accent\)\s+([\d.]+)%\s*,\s*(#[0-9a-f]{3,6})\s*\)$/i.exec(v);
+  if (mix) {
+    const p = Number(mix[1]) / 100;
+    const a = parseColour(accent).rgb;
+    const b = parseColour(mix[2]).rgb;
+    return a.map((c, i) => c * p + b[i] * (1 - p));
+  }
+  const c = parseColour(v);
+  assert.equal(c.a, 1, `the ink ${v} is expected to be opaque`);
+  return c.rgb;
+}
+
+const lastDecl = (selector, prop) => {
+  let value;
+  for (const r of RULES) {
+    if (r.nested || !r.selectors.includes(selector)) continue;
+    const m = new RegExp(String.raw`(?:^|;)\s*${prop}:\s*([^;]+);`).exec(r.body);
+    if (m) value = m[1].trim();
+  }
+  return value;
+};
+
+/*
+ * Past events are drawn only on today, so the chips sit in the calendar's pane
+ * on today's tinted column; the agenda sits on the plain surfaces.
+ */
+const TODAY_TINT = lastDecl('.cal-col.is-today', 'background(?:-color)?');
+assert.ok(TODAY_TINT, 'ui/app.css no longer tints today\'s column');
+SURFACES['today\'s column in the calendar pane'] = ['--paper', TODAY_TINT];
+const PAST_SURFACES = [...PLAIN, 'today\'s column in the calendar pane'];
+
+const PAST = {
+  'agenda-item': { file: 'today.js', parts: ['agenda-time', 'agenda-title', 'agenda-where'] },
+  'chip-ev': { file: 'calendar.js', parts: ['chip-time', 'chip-title', 'chip-where'] },
+};
+
+for (const [item, { file, parts }] of Object.entries(PAST)) {
+  test(`an ended .${item} keeps its time, title and place at ${AA}:1 (opacity modelled)`, () => {
+    const view = fs.readFileSync(new URL(`../ui/views/${file}`, import.meta.url), 'utf8');
+    for (const part of [item, ...parts]) assert.match(view, new RegExp(`['\`]${part}\\b`), `${file} no longer draws .${part}`);
+    assert.match(view, /is-past/, `${file} no longer marks an ended event`);
+
+    // The past rule wins over the base one on specificity, so read it first.
+    const own = (prop) => lastDecl(`.${item}.is-past`, prop) ?? lastDecl(`.${item}`, prop);
+    const fillValue = own('background(?:-color)?');
+    const fill = fillValue && !/^(none|transparent)$/.test(fillValue) ? fillValue : null;
+    const opacity = Number(own('opacity') ?? 1);
+
+    const failures = [];
+    for (const accent of ACCENTS) {
+      for (const name of PAST_SURFACES) {
+        const under = background(accent, SURFACES[name], PEAK_GLOW);
+        const box = fill ? fillColour(fill, accent) : null;
+        // Opacity fades the item as a group: its fill and its text alike.
+        const bg = box ? over({ rgb: box.rgb, a: box.a * opacity }, under) : under;
+        for (const part of parts) {
+          const value = lastDecl(`.${item}.is-past .${part}`, 'color') ?? lastDecl(`.${part}`, 'color')
+            ?? own('color') ?? 'var(--ink)';
+          const fg = over({ rgb: inkColour(value, accent), a: opacity }, under);
+          const r = ratio(fg, bg);
+          if (r < AA) failures.push(`.${part} (${value}${opacity < 1 ? ` at opacity ${opacity}` : ''}) on ${name}, accent ${accent}: ${r.toFixed(2)}:1`);
+        }
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
+}
+
+/*
+ * Opacity on text is how three of these tickets happened: it fades the ink
+ * under 4.5:1 without any token changing, and axe can only call it "needs
+ * review". So no rule may fade below 1 unless it is decoration with no text,
+ * a disabled control (which WCAG exempts), or on the list still to be fixed.
+ */
+const OPACITY_ALLOWED = new Set([
+  '.meander', '.tab-marker', '.nav-marker', '.section .meander', '.hero-rule', // ornaments, no text
+  '.btn[disabled]', // disabled controls are exempt from 1.4.3
+]);
+const OPACITY_PENDING = new Set([
+  '.row.is-snoozed', '.worth.is-finished .row', // TT-3510
+  '.sweepline-tokens', // follow-up: dim token count in the top bar
+]);
+
+test('no text is faded with opacity, in the stylesheet or inline', () => {
+  const offenders = [];
+  for (const r of RULES) {
+    const m = /(?:^|;)\s*opacity:\s*([\d.]+)\s*;/.exec(r.body);
+    if (!m) continue;
+    const value = Number(m[1]);
+    if (value === 0 || value >= 1) continue;
+    for (const s of r.selectors) if (!OPACITY_ALLOWED.has(s) && !OPACITY_PENDING.has(s)) offenders.push(`${s} { opacity: ${value} }`);
+  }
+  assert.deepEqual(offenders, [], 'fade with a quieter ink instead, and check it in this file');
+
+  // Inline styles in the views: the calendar's "not loaded" mark was one.
+  const dir = new URL('../ui/views/', import.meta.url);
+  for (const name of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+    const source = fs.readFileSync(new URL(name, dir), 'utf8');
+    assert.doesNotMatch(source, /['"]?opacity['"]?\s*:\s*['"]0?\.\d+['"]/, `ui/views/${name} fades something inline`);
+  }
 });
