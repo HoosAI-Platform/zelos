@@ -1411,7 +1411,10 @@ test('the sweep line and the toast can actually be heard', () => {
   const toast = /function toastBar\(\)[\s\S]*?\n\}/m.exec(app);
   assert.ok(toast, 'toastBar is missing');
   assert.ok(!/text: state\.toast\.message/.test(toast[0]), 'the toast bakes its message in');
-  assert.match(paintChrome[0], /announce\(built\.text, state\.toast\.message\)/);
+  // The toast is painted in every skeleton, not only the chrome one.
+  const paintToast = /function paintToast\(\)[\s\S]*?\n\}/m.exec(app);
+  assert.ok(paintToast, 'paintToast is missing');
+  assert.match(paintToast[0], /announce\(built\.text, state\.toast\.message\)/);
 });
 
 test('the page declares the one theme it actually has', () => {
@@ -3528,6 +3531,96 @@ test('first-run sample data recovers from availability and loading failures with
     assert.equal(loads, 2);
     const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
     store.notify(null);
+  ` });
+});
+
+/**
+ * First-run setup has no chrome, and the toast used to live only in the
+ * chrome — so every notify() raised during setup was dropped, unseen and
+ * unheard (TT-3464).
+ */
+test('a toast raised during first-run setup is shown and can be heard', () => {
+  runAppScenario({ initiallyConfigured: false, scenario: `
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+    store.notify('hello from setup');
+    await settle();
+    assert.match(textOf(root), /hello from setup/);
+    const toast = plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('toast'));
+    assert.ok(toast, 'no toast in the setup skeleton');
+    assert.equal(toast.attributes.role, 'status');
+    const shell = plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('shell-bare'));
+    const slot = toast.parentNode;
+    assert.equal(slot.attributes.class, 'toast-slot');
+    assert.deepEqual(shell.children.map(n => n.attributes.id || n.attributes.class), ['toast-slot', 'main'],
+      'the slot sits before <main>, so an Undo is reached before the view');
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    store.notify('a second toast');
+    await settle();
+    assert.match(textOf(root), /a second toast/);
+    assert.equal(plainWalk(root).find(n => n.attributes.id === 'main'), main, 'setup keeps one skeleton across renders');
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is still showing');
+  ` });
+});
+
+test('clearing the made-up data during setup shows its toast', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: `
+    const sampleCalls = [];
+    globalThis.fetch = async (path, init = {}) => {
+      if (path === '/api/sweep/stream') return new Promise(() => {});
+      assert.equal(path, '/api/sample-data');
+      sampleCalls.push(init.method || 'GET');
+      const body = init.method === 'DELETE' ? {} : { installed: true, summary: 'A made-up week.' };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+  `, scenario: `
+    const clear = findButton(root, 'Clear the made-up data');
+    assert.ok(clear, 'installed sample data offers to clear it');
+    clear.fire('click');
+    await settle();
+    assert.ok(sampleCalls.includes('DELETE'));
+    assert.match(textOf(root), /The made-up data is gone\\. Nothing else was touched\\./);
+    const toast = plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('toast'));
+    assert.equal(toast.attributes.role, 'status');
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is still showing');
+  ` });
+});
+
+/**
+ * Loading the made-up week raises its toast during setup and then leaves for
+ * the board in the same breath. The toast must cross that handover as the
+ * same node, not be dropped with the setup skeleton or rebuilt and read twice.
+ */
+test('the toast raised while loading the made-up week survives the handover to the board', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: `
+    let loaded = false;
+    globalThis.fetch = async (path, init = {}) => {
+      if (path === '/api/sweep/stream') return new Promise(() => {});
+      assert.equal(path, '/api/sample-data');
+      if (init.method === 'POST') loaded = true;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ installed: loaded, summary: 'A made-up week.' }) };
+    };
+  `, scenario: `
+    const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+    const hasClass = (n, name) => (n.attributes.class || '').split(' ').includes(name);
+    // Subscribed after the app, so this sees each emit after it has rendered:
+    // the toast as setup showed it, before finish() moves to the board.
+    let toastInSetup = null;
+    store.subscribe(() => {
+      if (toastInSetup || !plainWalk(root).some(n => hasClass(n, 'shell-bare'))) return;
+      toastInSetup = plainWalk(root).find(n => hasClass(n, 'toast')) || null;
+    });
+    findButton(root, 'Look around with made-up data first').fire('click');
+    await settle();
+    assert.ok(toastInSetup, 'the toast was never shown during setup');
+    assert.ok(!plainWalk(root).some(n => hasClass(n, 'shell-bare')), 'setup handed over to the board');
+    const shell = plainWalk(root).find(n => hasClass(n, 'shell'));
+    assert.deepEqual(shell.children.map(n => n.attributes.id ? '#' + n.attributes.id : '.' + n.attributes.class),
+      ['.skip-link', '.chrome', '.toast-slot', '#main']);
+    assert.match(textOf(root), /The made-up week is loaded\\. Every row is marked, and one click removes it\\./);
+    const toast = plainWalk(root).find(n => hasClass(n, 'toast'));
+    assert.equal(toast, toastInSetup, 'the toast must be the same node on both sides of the handover');
+    assert.equal(toast.attributes.role, 'status');
   ` });
 });
 

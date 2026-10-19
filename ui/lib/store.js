@@ -122,6 +122,9 @@ export function notify(message, { tone = 'info', action = null } = {}) {
       state.toast = null;
       emit();
     }, action ? TOAST_ACTION_MS : TOAST_MS);
+    // A pending toast is no reason to keep a process alive. The browser's
+    // timer id is a number and has no unref; Node's (the tests) does.
+    toastTimer?.unref?.();
   }
   emit();
 }

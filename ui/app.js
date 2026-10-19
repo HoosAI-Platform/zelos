@@ -313,10 +313,6 @@ function buildChrome() {
     commands,
     railNode: rail(route.view),
     tabbarNode: tabbar(route.view),
-    // The toast lives in a slot so showing and clearing it never moves its
-    // siblings. The slot is display:contents, so it is not a grid item and the
-    // shell's named areas are undisturbed.
-    toastSlot: el('div', { class: 'toast-slot' }),
   };
 }
 
@@ -450,9 +446,9 @@ function renderKey() {
     state.rev,
     state.fatal ? '1' : '0',
     showOnboarding() ? 'ob' : '-',
-    // Deliberately not the toast: it lives in the chrome, which repaints on
-    // every event, so putting it here would rebuild the view — and a draft
-    // someone is typing — every time a save failed.
+    // Deliberately not the toast: it has its own slot, painted on every
+    // event, so putting it here would rebuild the view — and a draft someone
+    // is typing — every time a save failed.
   ].join('|');
 }
 
@@ -476,6 +472,24 @@ let layout = null;
 /** The toast object last painted into its slot. Reference identity is the
  *  change signal, because notify() always mints a fresh object. */
 let paintedToast = null;
+
+/**
+ * The toast's one home, in both skeletons. It used to live inside the chrome,
+ * so first-run setup — which has no chrome — dropped every toast raised
+ * during it: "The made-up data is gone" reached neither the page nor a screen
+ * reader. Built once and moved between skeletons, never rebuilt. It sits just
+ * before <main>, so an Undo is reached before the view, as it always was.
+ * The slot is display:contents, so it is not a grid item and the shell's named
+ * areas are undisturbed; showing and clearing a toast never moves a sibling.
+ */
+const toastSlot = el('div', { class: 'toast-slot' });
+
+/** Leaving every skeleton: the next one must build and announce the toast
+ *  afresh, not re-insert a node whose text was already read. */
+function emptyToastSlot() {
+  replace(toastSlot, null);
+  paintedToast = null;
+}
 
 /**
  * A board refresh that lands while the cursor is inside a form field would
@@ -543,6 +557,7 @@ function render({ force = false } = {}) {
   const key = renderKey();
   if (!force && key === lastRenderKey && main) {
     paintChrome();
+    paintToast();
     return;
   }
   // Both skeletons: the bare one is onboarding, whose email step holds a
@@ -550,6 +565,7 @@ function render({ force = false } = {}) {
   if (!force && (layout === 'chrome' || layout === 'bare') && state.phase === 'ready' && editingInMain()) {
     renderQueued = true;
     paintChrome();
+    paintToast();
     return;
   }
   renderQueued = false;
@@ -560,6 +576,7 @@ function render({ force = false } = {}) {
     main = null;
     chromeWrap = null;
     layout = null;
+    emptyToastSlot();
     return;
   }
   if (state.phase === 'boot') {
@@ -567,6 +584,7 @@ function render({ force = false } = {}) {
     main = null;
     chromeWrap = null;
     layout = null;
+    emptyToastSlot();
     return;
   }
   if (state.phase === 'down' && state.fatal) {
@@ -574,6 +592,7 @@ function render({ force = false } = {}) {
     main = null;
     chromeWrap = null;
     layout = null;
+    emptyToastSlot();
     return;
   }
 
@@ -581,10 +600,16 @@ function render({ force = false } = {}) {
   if (onboarding) {
     setupActive = true;
     // The flow gets the whole window: no rail, no tab bar, nothing to click past.
-    main = el('main', { class: 'main', id: 'main', tabindex: '-1' }, currentView());
-    chromeWrap = null;
-    layout = 'bare';
-    replace(root, el('div', { class: 'shell shell-bare' }, main));
+    // Like the chrome skeleton, this one survives re-renders: rebuilding it
+    // would re-parent the toast slot each time, detaching an Undo mid-press.
+    if (layout !== 'bare') {
+      main = el('main', { class: 'main', id: 'main', tabindex: '-1' });
+      chromeWrap = null;
+      layout = 'bare';
+      replace(root, el('div', { class: 'shell shell-bare' }, [toastSlot, main]));
+    }
+    replace(main, currentView());
+    paintToast();
     return;
   }
   setupActive = false;
@@ -605,6 +630,7 @@ function render({ force = false } = {}) {
         },
       }),
       chromeWrap,
+      toastSlot,
       main,
     ]));
     // Arriving at the board from a different skeleton — onboarding, mostly —
@@ -616,6 +642,7 @@ function render({ force = false } = {}) {
   }
   replace(main, currentView());
   paintChrome();
+  paintToast();
   const connectionKey = route.view === 'settings' && route.connectionId ? `${route.sub}/${route.connectionId}` : null;
   if (connectionKey && connectionKey !== focusedConnection) focusConnectionTarget();
   focusedConnection = connectionKey;
@@ -627,7 +654,7 @@ function render({ force = false } = {}) {
  * the page; the date, the sweep button and the whole sweep line are text and
  * attribute updates on nodes that also persist (the sweep line has to persist —
  * its text is a live region, and a region that is replaced rather than mutated
- * announces nothing); the rail, tab bar and toast hold no input, so they are
+ * announces nothing); the rail and tab bar hold no input, so they are
  * rebuilt and swapped in place with replaceWith, which cannot touch anything a
  * person is typing into.
  */
@@ -635,7 +662,7 @@ function paintChrome() {
   if (!chromeWrap) return;
   if (!chrome) chrome = buildChrome();
   if (chrome.topbarNode.parentNode !== chromeWrap) {
-    replace(chromeWrap, [chrome.topbarNode, chrome.railNode, chrome.tabbarNode, chrome.toastSlot]);
+    replace(chromeWrap, [chrome.topbarNode, chrome.railNode, chrome.tabbarNode]);
   }
 
   // The date comes from the ROLLED key, not from the board's `now` string: a
@@ -657,17 +684,23 @@ function paintChrome() {
   chrome.tabbarNode.replaceWith(freshTabs);
   chrome.tabbarNode = freshTabs;
 
-  // The toast is rebuilt only when the toast itself changed. paintChrome runs
-  // on every emit — sweep progress arrives several times a second — and
-  // rebuilding an action toast that often would replace its Undo button under
-  // a hovering cursor, mid-press.
+  measureTopbar();
+}
+
+/**
+ * The toast, in whichever skeleton is up. It is rebuilt only when the toast
+ * itself changed: this runs on every emit — sweep progress arrives several
+ * times a second — and rebuilding an action toast that often would replace its
+ * Undo button under a hovering cursor, mid-press.
+ */
+function paintToast() {
+  if (!layout) return;
   if (paintedToast !== state.toast) {
     paintedToast = state.toast;
     const built = toastBar();
-    replace(chrome.toastSlot, built && built.node);
+    replace(toastSlot, built && built.node);
     if (built) announce(built.text, state.toast.message);
   }
-  measureTopbar();
 }
 
 /**

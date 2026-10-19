@@ -1414,6 +1414,9 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 /* --- onboarding ---------------------------------------------------------- */
 
 .shell-bare { display: block; }
+/* Setup has no tab bar for a toast to clear, so it sits at the bottom edge
+   at every width, as it does on the wide board. */
+.shell-bare .toast { bottom: 1.5rem; }
 .view-onboarding {
   display: grid;
   gap: var(--gap);
