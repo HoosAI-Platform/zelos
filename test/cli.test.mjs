@@ -782,7 +782,7 @@ describe('doctor', () => {
     const report = await diagnose({ deps: SILENT_DEPS });
     const check = byId(report, 'home');
     assert.equal(check.status, 'fail');
-    assert.match(check.detail, /readable by other accounts/);
+    assert.match(check.detail, /readable\s+by\s+other\s+accounts/);
     assert.match(check.action, /chmod 700/);
   });
 
@@ -791,7 +791,7 @@ describe('doctor', () => {
     const report = await diagnose({ deps: SILENT_DEPS });
     const check = byId(report, 'home');
     assert.equal(check.status, 'warn');
-    assert.match(check.detail, /does not exist yet/);
+    assert.match(check.detail, /does\s+not\s+exist\s+yet/);
     assert.equal(report.ok, true);
   });
 
@@ -1939,7 +1939,7 @@ describe('zelos doctor sees the data folder as it is (TT-3484)', () => {
     const home = path.join(SCRATCH, `doctor-missing-${homeCounter += 1}`);
     const result = await doctorIn(home);
     assert.equal(result.code, 0, 'a home that is not made yet is worth knowing, not broken');
-    assert.match(result.stdout, /does not exist yet/);
+    assert.match(result.stdout, /does\s+not\s+exist\s+yet/);
     assert.doesNotMatch(result.stderr, /\n\s+at /);
     assert.equal(fs.existsSync(home), false, `doctor made the home: ${fs.existsSync(home) ? fs.readdirSync(home).join(', ') : ''}`);
   });
@@ -1949,7 +1949,7 @@ describe('zelos doctor sees the data folder as it is (TT-3484)', () => {
     fs.chmodSync(home, 0o755);
     const result = await doctorIn(home);
     assert.notEqual(result.code, 0);
-    assert.match(result.stdout, /readable by other accounts/);
+    assert.match(result.stdout, /readable\s+by\s+other\s+accounts/);
     assert.equal(fs.statSync(home).mode & 0o777, 0o755, 'doctor changed the mode it was reporting');
   });
 
@@ -1958,7 +1958,7 @@ describe('zelos doctor sees the data folder as it is (TT-3484)', () => {
     fs.writeFileSync(home, 'not a folder');
     const result = await doctorIn(home);
     assert.notEqual(result.code, 0);
-    assert.match(result.stdout, /is a file, not a folder/);
+    assert.match(result.stdout, /is\s+a\s+file,\s+not\s+a\s+folder/);
     assert.doesNotMatch(result.stderr, /\n\s+at /, 'a stack trace');
   });
 
@@ -1977,7 +1977,7 @@ describe('zelos doctor sees the data folder as it is (TT-3484)', () => {
     const result = await doctorIn(home);
     assert.notEqual(result.code, 0, 'a broken settings file passed');
     assert.match(result.stdout, /not\s+valid JSON/);
-    assert.doesNotMatch(result.stdout, /No settings file has been written yet/);
+    assert.doesNotMatch(result.stdout, /No\s+settings\s+file\s+has\s+been\s+written\s+yet/);
     assert.equal(fs.readFileSync(file, 'utf8'), '{ "identity": ', 'doctor moved or changed the file it was reporting');
     assert.deepEqual(fs.readdirSync(home).filter((f) => f.includes('corrupt')), [], 'doctor moved the file aside');
   });
