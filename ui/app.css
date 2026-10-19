@@ -1405,6 +1405,16 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
+/* "Server settings (for experts)" opens the full form inside the simple form's
+   own box. A second fill there put the 12px hints on two layers of --ground-2,
+   under 4.5:1 (TT-3471), so the inner form is just a section of the outer. */
+.account-form .account-form {
+  padding: 0.75rem 0 0;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+}
 .editor:empty { display: none; }
 
 .facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.35rem 1rem; font-size: 0.875rem; }
@@ -1594,6 +1604,18 @@ body::before {
     rgba(255, 255, 255, 0.015) 24%,
     transparent 48%);
 }
+
+/* Glass inside a form box is not glass. The simple mail form holds the chosen
+   provider's .chosen card inside its own --ground-2 box; a --paper fill and the
+   sheen on top of that took the card's --ink-3 lines under 4.5:1. Inside a
+   form it is an outline, not a pane. */
+.account-form .chosen {
+  background: none;
+  border-color: var(--line-strong);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.account-form .chosen::after { content: none; }
 
 /* The topbar and rail float over content, so they get a heavier frost and an
    actual tint — at 4.5% white they would let text scroll through and read. */

@@ -2607,6 +2607,85 @@ test('REGRESSION: the About panel names /api/mcp as the one call that does not c
  * source because the forms need a layout engine; the sequence itself runs for
  * real against a fake fetch, two tests down.
  */
+test('the full mail form opened inside the simple one draws no second --ground-2 box (TT-3471)', () => {
+  // The nesting is real: the simple form is an .account-form, and its expert
+  // slot receives mailForm(), which is one too.
+  const src = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
+  const simple = /export function simpleMailForm\(\{ onSaved, onCancel \}\)[\s\S]*?\n\}/m.exec(src);
+  assert.ok(simple, 'simpleMailForm is missing');
+  assert.match(simple[0], /return el\('div', \{ class: 'account-form' \}, \[[\s\S]*expertSlot,/, 'the simple form no longer holds the expert slot');
+  assert.match(simple[0], /expertSlot\.replaceChildren\(mailForm\(\{/);
+  const full = /\nfunction mailForm\(account,[\s\S]*?\n\}/m.exec(src);
+  assert.ok(full, 'mailForm is missing');
+  assert.match(full[0], /el\('div', \{ class: 'account-form' \}/);
+
+  // So the stylesheet must flatten an .account-form inside another: its
+  // --ground-2 over the outer one's put the 12px --ink-3 hints at 4.08:1.
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const box = /(?:^|\})\s*\.account-form\s*\{([^}]*)\}/.exec(css);
+  assert.ok(box && /background:\s*var\(--ground-2\)/.test(box[1]), 'the form box itself changed; revisit this guard');
+  const nested = [...css.matchAll(/(?:^|\})\s*([^{}]*\.account-form[^{},]*\s+\.account-form)\s*\{([^}]*)\}/g)];
+  assert.ok(nested.length > 0, 'no rule for an .account-form inside an .account-form');
+  const last = nested.at(-1)[2];
+  assert.match(last, /background:\s*(none|transparent)\s*;/, 'a nested form box must not paint a second --ground-2');
+});
+
+test('no --ground-2 or --paper box built inside a form box paints a fill or a sheen over it', () => {
+  // Reads flat CSS (as app.css is) and only the class literals in each form
+  // builder's own body; a box added through a helper it calls is not seen.
+  // The general form of TT-3471: the simple mail form put the chosen
+  // provider's .chosen pane (--paper, plus the glass sheen) inside its own
+  // --ground-2 box, and the card's --ink-3 lines fell under 4.5:1.
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const src = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
+
+  // Top-level rules only; at-rule blocks are skipped.
+  const rules = [];
+  for (let i = 0, depth = 0, start = 0; i < css.length; i++) {
+    if (css[i] === '{') {
+      const prelude = css.slice(start, i).trim();
+      if (prelude.startsWith('@')) { depth++; start = i + 1; continue; }
+      const close = css.indexOf('}', i);
+      if (depth === 0) rules.push({ selectors: prelude.split(',').map((x) => x.trim()), body: css.slice(i + 1, close) });
+      i = close;
+      start = i + 1;
+    } else if (css[i] === '}') { depth--; start = i + 1; }
+  }
+  const backgroundOf = (body) => /(?:^|;)\s*background(?:-color)?:\s*([^;]+);/.exec(body)?.[1].trim();
+
+  // A box is a class whose own last background is --ground-2 or --paper.
+  const fill = {};
+  for (const rule of rules) {
+    const bg = backgroundOf(rule.body);
+    if (!bg) continue;
+    for (const sel of rule.selectors) { const m = /^\.([\w-]+)$/.exec(sel); if (m) fill[m[1]] = bg; }
+  }
+  const boxes = new Set(Object.keys(fill).filter((c) => /^var\(--(ground-2|paper)\)$/.test(fill[c])));
+  assert.ok(boxes.has('account-form') && boxes.has('chosen'), 'the box classes changed; revisit this guard');
+
+  // The form builders in Settings, and the boxes each one builds inside itself.
+  const builders = [...src.matchAll(/^(?:export )?(?:async )?function (\w+)\([\s\S]*?\n\}/gm)]
+    .filter((m) => m[0].includes("class: 'account-form'"));
+  assert.ok(builders.length >= 2, 'expected the account-form builders in settings.js');
+  const inner = new Set();
+  for (const [body] of builders) {
+    for (const [, list] of body.matchAll(/class: ['`]([^'`$]+)/g)) {
+      for (const c of list.trim().split(/\s+/)) if (c !== 'account-form' && boxes.has(c)) inner.add(c);
+    }
+  }
+  assert.ok(inner.has('chosen'), 'the simple mail form no longer builds .chosen inside its box; revisit this guard');
+
+  const problems = [];
+  for (const c of inner) {
+    const flat = rules.filter((r) => r.selectors.includes(`.account-form .${c}`)).map((r) => backgroundOf(r.body)).filter(Boolean).at(-1);
+    if (!/^(none|transparent)$/.test(flat || '')) problems.push(`.account-form .${c} keeps its ${fill[c]} fill`);
+    const sheen = rules.some((r) => r.selectors.includes(`.${c}::after`) && /content:\s*""/.test(r.body));
+    const off = rules.some((r) => r.selectors.includes(`.account-form .${c}::after`) && /content:\s*none/.test(r.body));
+    if (sheen && !off) problems.push(`.account-form .${c}::after still paints the sheen`);
+  }
+  assert.deepEqual(problems, []);
+});
+
 test('Add an email account opens the simple form, and the simple form reaches the full one beneath its card', () => {
   const src = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
   const simple = /export function simpleMailForm\(\{ onSaved, onCancel \}\)[\s\S]*?\n\}/m.exec(src);
