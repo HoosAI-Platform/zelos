@@ -470,7 +470,16 @@ function currentView() {
   };
   if (showOnboarding()) return renderOnboarding(ctx);
   const view = VIEWS.find((v) => v.id === route.view) || VIEWS[0];
-  return view.render(ctx);
+  const node = view.render(ctx);
+  /* Every view gets a level-one heading: its name, for a screen reader's
+     heading list, where the rail's "The board" h2 (hidden on a phone) was the
+     only outline there was (QA, 2026-10-10, TT-3530). Settings draws its own,
+     visible; the others get one that is read but not shown. It goes BESIDE
+     the view in <main>, never into the view's own root: Search and Ask hand
+     back the same root on every render, so a heading put inside it piled up
+     one per redraw, and Today's and Promises' wide layouts key on their
+     first child. */
+  return view.id === 'settings' ? node : [el('h1', { class: 'visually-hidden', text: view.label }), node];
 }
 
 let main = null;

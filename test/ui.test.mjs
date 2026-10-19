@@ -6707,3 +6707,34 @@ test('a new calendar opens on "decide from the address", and a guided card keeps
   assert.ok(plainHidden(tlsPicker(panel)), 'the picker is on the first-timer card rather than under Advanced');
   assert.equal(tlsPicker(panel).value, 'auto');
 });
+
+test('every view has exactly one level-one heading, however often it redraws (TT-3530)', () => {
+  /* QA, 2026-10-10: six of the seven views had no h1 (axe page-has-heading-one
+     on 20 states); only Settings had one. Booted for real, because the first
+     fix put the heading inside the view's root, and Search and Ask hand back
+     the same root on every render: the headings piled up, one per redraw. */
+  runAppScenario({ scenario: `
+    const h1s = () => plainWalk(root).filter((n) => n.tag === 'h1');
+    const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+    const names = { now: 'Now', today: 'Today', owed: 'Promises', calendar: 'Calendar', search: 'Search', ask: 'Ask', settings: 'Settings' };
+    for (const [view, name] of Object.entries(names)) {
+      window.location.hash = '#/' + view; windowEvents.hashchange(); await settle();
+      for (let i = 0; i < 3; i += 1) { store.state.rev += 1; window.location.hash = '#/' + view; windowEvents.hashchange(); await settle(); }
+      const found = h1s();
+      assert.equal(found.length, 1, view + ' has ' + found.length + ' h1s: ' + found.map((n) => textOf(n)).join(', '));
+      assert.equal(textOf(found[0]), name);
+      const cls = found[0].attributes.class || '';
+      if (view === 'settings') assert.match(cls, /view-title/, 'Settings keeps its visible heading');
+      else assert.match(cls, /visually-hidden/);
+    }
+    // Away and back again, the case that piled up most.
+    window.location.hash = '#/now'; windowEvents.hashchange(); await settle();
+    window.location.hash = '#/search'; windowEvents.hashchange(); await settle();
+    assert.equal(h1s().length, 1, 'Search gained a heading on returning to it');
+  ` });
+  // And the class hides it from sight, not from a screen reader.
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
+  const rule = /\.visually-hidden \{([^}]+)\}/.exec(css)?.[1] || '';
+  assert.match(rule, /clip: rect\(0, 0, 0, 0\)/);
+  assert.doesNotMatch(rule, /display:\s*none|visibility:\s*hidden/, 'that would hide it from a screen reader too');
+});
