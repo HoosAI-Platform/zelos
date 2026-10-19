@@ -388,14 +388,13 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 .sweepline.is-bad .sweepline-text { color: var(--accent-text); }
 
-/* The day's token spend. Dimmer than the sweep text beside it — it is a thing
-   to notice when you go looking, not a thing to be told. When the database has
+/* The day's token spend. Quieter than the sweep text beside it by size alone —
+   an opacity here took the dim ink under 4.5:1. When the database has
    no counter the node is empty, and an empty node must take no room at all
    rather than push the sweep bar down a line. */
 .sweepline-tokens {
   font-size: 0.6875rem;
   color: var(--ink-3);
-  opacity: 0.75;
 }
 .sweepline-tokens:empty { display: none; }
 
@@ -677,7 +676,21 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 .row.sev-2 { border-left-color: var(--olive); }
 .row.sev-3 { border-left-color: var(--accent); }
-.row.is-snoozed { opacity: 0.6; }
+/* A snoozed row, and every row in Finished recently (section 8), is drawn as
+   set aside rather than faded: no glass fill and no sheen, a dashed edge, and
+   the headline in --ink-2. Opacity 0.6 took its reason, its "until" and the
+   Reopen button to about 3.4:1 (TT-3510). */
+.row.is-snoozed,
+.worth.is-finished .row {
+  background: none;
+  border-style: dashed;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.row.is-snoozed::after,
+.worth.is-finished .row::after { content: none; }
+.row.is-snoozed .headline,
+.worth.is-finished .row .headline { color: var(--ink-2); }
 
 .row-main { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.55rem 0.6rem; }
 
@@ -1255,7 +1268,9 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   font-size: 0.625rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  /* --ink-2, not --ink-3: the label sits in the card's top-left corner, under
+     the brightest of the glass sheen (TT-3510). */
+  color: var(--ink-2);
 }
 .draft-addr { font-size: 0.875rem; overflow-wrap: anywhere; }
 .draft-status { margin-left: auto; font-size: 0.6875rem; color: var(--ink-3); }
@@ -2037,10 +2052,9 @@ textarea.input:focus,
 .hit-tools { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.55rem; }
 
 /* --- Finished recently (Now) ---------------------------------------------
-   The fold holds rows that are off the board — done and dismissed — so the
-   whole list dims the way a snoozed row does (.row.is-snoozed above), and the
-   ticks inside stay live: the tick on a done row is the reopen. */
-.worth.is-finished .row { opacity: 0.6; }
+   The fold holds rows that are off the board — done and dismissed — so they
+   are drawn set aside the way a snoozed row is (.row.is-snoozed, section 6),
+   and the ticks inside stay live: the tick on a done row is the reopen. */
 
 /* The Your data stats: quiet lines above the folder field, with room of their own. */
 .data-stats { display: grid; gap: 0.35rem; margin-bottom: 1rem; }

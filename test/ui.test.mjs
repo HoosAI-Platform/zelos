@@ -5835,9 +5835,14 @@ test('Now folds "Finished recently" at the very bottom, and the tick on a done r
   // Search keeps treating items[] as the board; the finished live beside it.
   const search = fs.readFileSync(path.join(UI, 'views/search.js'), 'utf8');
   assert.ok(!/finished/.test(search), 'search must not learn about the finished array');
-  // Dimmed like the snoozed: off the board, still on the record.
+  // Set aside like the snoozed: off the board, still on the record. Drawn with
+  // the snoozed row's own rule, not faded (opacity took them under 4.5:1;
+  // test/contrast.test.mjs does the sums, TT-3510).
   const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
-  assert.match(css, /\.worth\.is-finished \.row \{[^}]*opacity/, 'the finished rows are not dimmed');
+  const aside = /\.row\.is-snoozed,\s*\.worth\.is-finished \.row \{([^}]*)\}/.exec(css);
+  assert.ok(aside, 'the finished rows are not drawn the way a snoozed row is');
+  assert.match(aside[1], /border-style:\s*dashed/, 'a set-aside row needs a cue other than colour');
+  assert.doesNotMatch(aside[1], /opacity/, 'fade with a quieter ink, not opacity');
 });
 
 test('a board without the finished field folds nothing and breaks nothing', async (t) => {

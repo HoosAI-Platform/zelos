@@ -357,36 +357,74 @@ assert.ok(TODAY_TINT, 'ui/app.css no longer tints today\'s column');
 SURFACES['today\'s column in the calendar pane'] = ['--paper', TODAY_TINT];
 const PAST_SURFACES = [...PLAIN, 'today\'s column in the calendar pane'];
 
-const PAST = {
-  'agenda-item': { file: 'today.js', parts: ['agenda-time', 'agenda-title', 'agenda-where'] },
-  'chip-ev': { file: 'calendar.js', parts: ['chip-time', 'chip-title', 'chip-where'] },
-};
+/*
+ * The glass sheen: `::after` on a pane, a white gradient that is brightest in
+ * the top-left corner, where a card's first line of text sits. Its peak is the
+ * strongest white stop in the rule.
+ */
+function sheenPeak(base) {
+  const rule = RULES.find((r) => !r.nested && r.selectors.includes(`${base}::after`) && /content:\s*""/.test(r.body));
+  if (!rule) return 0;
+  const stops = [...rule.body.matchAll(/rgba\(\s*255\s*,\s*255\s*,\s*255\s*,\s*([\d.]+)\s*\)/g)].map((m) => Number(m[1]));
+  assert.ok(stops.length > 0, `${base}::after paints a sheen this test cannot read`);
+  return Math.max(...stops);
+}
 
-for (const [item, { file, parts }] of Object.entries(PAST)) {
-  test(`an ended .${item} keeps its time, title and place at ${AA}:1 (opacity modelled)`, () => {
-    const view = fs.readFileSync(new URL(`../ui/views/${file}`, import.meta.url), 'utf8');
-    for (const part of [item, ...parts]) assert.match(view, new RegExp(`['\`]${part}\\b`), `${file} no longer draws .${part}`);
-    assert.match(view, /is-past/, `${file} no longer marks an ended event`);
+/*
+ * Items drawn in a quieter state, and the text inside them. Each is checked
+ * with everything the state does to it: its own fill (or none), the sheen
+ * unless the state turns it off, and any opacity, which fades the item as a
+ * group, fill and text alike.
+ */
+const UI_SOURCE = ['views', 'lib'].flatMap((dir) => {
+  const url = new URL(`../ui/${dir}/`, import.meta.url);
+  return fs.readdirSync(url).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(new URL(f, url), 'utf8'));
+}).join('\n');
+const ROW_SURFACES = ['the bare ground', 'a glass pane'];
+const STATES = [
+  { name: 'an ended agenda item (TT-3469)', file: 'views/today.js', item: '.agenda-item.is-past', base: '.agenda-item',
+    parts: ['.agenda-time', '.agenda-title', '.agenda-where'], surfaces: PAST_SURFACES },
+  { name: 'an ended calendar chip (TT-3469)', file: 'views/calendar.js', item: '.chip-ev.is-past', base: '.chip-ev',
+    parts: ['.chip-time', '.chip-title', '.chip-where'], surfaces: PAST_SURFACES },
+  { name: 'a snoozed row (TT-3510)', file: 'lib/items.js', item: '.row.is-snoozed', base: '.row',
+    parts: ['.headline', '.why', '.meta', '.meta-carried', '.btn.quiet'], surfaces: ROW_SURFACES },
+  { name: 'a finished row (TT-3510)', file: 'lib/items.js', item: '.worth.is-finished .row', base: '.row',
+    parts: ['.headline', '.why', '.meta', '.meta-carried', '.btn.quiet'], surfaces: ROW_SURFACES },
+  // The draft card in its ordinary state: its "To" label sits under the sheen's peak.
+  { name: 'a draft card\'s "To" label (TT-3510)', file: 'views/owed.js', item: '.draft', base: '.draft',
+    parts: ['.draft-label'], surfaces: ['the bare ground'] },
+];
 
-    // The past rule wins over the base one on specificity, so read it first.
-    const own = (prop) => lastDecl(`.${item}.is-past`, prop) ?? lastDecl(`.${item}`, prop);
+for (const { name, file, item, base, parts, surfaces } of STATES) {
+  test(`${name} keeps its text at ${AA}:1 (fill, sheen and opacity modelled)`, () => {
+    // The classes are still drawn somewhere in the UI, or this checks nothing.
+    const view = UI_SOURCE;
+    assert.ok(fs.existsSync(new URL(`../ui/${file}`, import.meta.url)), `ui/${file} is gone`);
+    for (const cls of [...item.split(/[\s.]+/), ...parts.flatMap((p) => p.split('.'))].filter(Boolean)) {
+      assert.match(view, new RegExp(`['\`\\s]${cls}\\b|${cls}['\`]`), `the UI no longer draws .${cls}`);
+    }
+    // The state's own rule wins over the base one on specificity, so read it first.
+    const own = (prop) => lastDecl(item, prop) ?? lastDecl(base, prop);
     const fillValue = own('background(?:-color)?');
     const fill = fillValue && !/^(none|transparent)$/.test(fillValue) ? fillValue : null;
+    const sheenOff = /^none$/.test(lastDecl(`${item}::after`, 'content') ?? '');
+    const sheen = sheenOff ? 0 : sheenPeak(base);
     const opacity = Number(own('opacity') ?? 1);
 
     const failures = [];
     for (const accent of ACCENTS) {
-      for (const name of PAST_SURFACES) {
-        const under = background(accent, SURFACES[name], PEAK_GLOW);
-        const box = fill ? fillColour(fill, accent) : null;
-        // Opacity fades the item as a group: its fill and its text alike.
-        const bg = box ? over({ rgb: box.rgb, a: box.a * opacity }, under) : under;
+      for (const surface of surfaces) {
+        const under = background(accent, SURFACES[surface], PEAK_GLOW);
+        let box = under;
+        if (fill) box = over(fillColour(fill, accent), box);
+        if (sheen) box = over({ rgb: [1, 1, 1], a: sheen }, box);
+        // Opacity mixes the item's own pixels with what is behind it.
+        const bg = box.map((c, i) => c * opacity + under[i] * (1 - opacity));
         for (const part of parts) {
-          const value = lastDecl(`.${item}.is-past .${part}`, 'color') ?? lastDecl(`.${part}`, 'color')
-            ?? own('color') ?? 'var(--ink)';
+          const value = lastDecl(`${item} ${part}`, 'color') ?? lastDecl(part, 'color') ?? own('color') ?? 'var(--ink)';
           const fg = over({ rgb: inkColour(value, accent), a: opacity }, under);
           const r = ratio(fg, bg);
-          if (r < AA) failures.push(`.${part} (${value}${opacity < 1 ? ` at opacity ${opacity}` : ''}) on ${name}, accent ${accent}: ${r.toFixed(2)}:1`);
+          if (r < AA) failures.push(`${part} (${value}${opacity < 1 ? ` at opacity ${opacity}` : ''}${sheen ? `, sheen ${sheen}` : ''}) on ${surface}, accent ${accent}: ${r.toFixed(2)}:1`);
         }
       }
     }
@@ -398,15 +436,11 @@ for (const [item, { file, parts }] of Object.entries(PAST)) {
  * Opacity on text is how three of these tickets happened: it fades the ink
  * under 4.5:1 without any token changing, and axe can only call it "needs
  * review". So no rule may fade below 1 unless it is decoration with no text,
- * a disabled control (which WCAG exempts), or on the list still to be fixed.
+ * or a disabled control (which WCAG exempts).
  */
 const OPACITY_ALLOWED = new Set([
   '.meander', '.tab-marker', '.nav-marker', '.section .meander', '.hero-rule', // ornaments, no text
   '.btn[disabled]', // disabled controls are exempt from 1.4.3
-]);
-const OPACITY_PENDING = new Set([
-  '.row.is-snoozed', '.worth.is-finished .row', // TT-3510
-  '.sweepline-tokens', // follow-up: dim token count in the top bar
 ]);
 
 test('no text is faded with opacity, in the stylesheet or inline', () => {
@@ -416,7 +450,7 @@ test('no text is faded with opacity, in the stylesheet or inline', () => {
     if (!m) continue;
     const value = Number(m[1]);
     if (value === 0 || value >= 1) continue;
-    for (const s of r.selectors) if (!OPACITY_ALLOWED.has(s) && !OPACITY_PENDING.has(s)) offenders.push(`${s} { opacity: ${value} }`);
+    for (const s of r.selectors) if (!OPACITY_ALLOWED.has(s)) offenders.push(`${s} { opacity: ${value} }`);
   }
   assert.deepEqual(offenders, [], 'fade with a quieter ink instead, and check it in this file');
 
