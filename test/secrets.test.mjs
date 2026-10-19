@@ -1159,7 +1159,9 @@ test('Windows CI: DPAPI is the detected backend and really round-trips a secret'
 
   // The module's own idea of where the blob goes, rather than a second copy of
   // that path logic here — a test that guessed the path could pass against a
-  // backend that had written somewhere else entirely.
+  // backend that had written somewhere else entirely. The home needs its
+  // identity first, as setSecret would give it, to have an address at all.
+  ensureNamespace();
   const blob = describeCommand({ name: 'windows-dpapi', action: 'set', ref: DPAPI_REF }).env.ZELOS_SECRET_FILE;
 
   await setSecret(DPAPI_REF, DPAPI_VALUE);
