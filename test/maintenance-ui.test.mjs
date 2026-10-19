@@ -156,6 +156,41 @@ test('the desktop update panel offers the restart once an update is verified, an
   assert.match(text(panel), /draft edits are not lost/);
 });
 
+test('with automatic updates off, a newer release is offered beside the ready one and its download is shown', async t => {
+  const document = installDom(t);
+  const official = 'https://github.com/HoosAI-Platform/zelos/releases/tag/v1.9.0';
+  const fake = fakeUpdaterBridge({ auto: false, status: 'ready', latestVersion: '1.9.0', releaseUrl: official, notes: 'Fixes.',
+    newer: { version: '1.9.1', releaseUrl: 'https://github.com/HoosAI-Platform/zelos/releases/tag/v1.9.1' } });
+  fake.bridge.download = (...args) => { fake.calls.push(['download', args]); fake.set({ progress: 0 }); return fake.bridge.state(); };
+  window.zelos = { desktop: true, updates: fake.bridge };
+  const { updatesPanel } = await import('../ui/lib/updates.js');
+  const panel = updatesPanel();
+  document.body.appendChild(panel);
+  await settle();
+  assert.match(text(panel), /Zelos 1\.9\.0 is ready to install\. .*Zelos 1\.9\.1 is also available\./);
+  assert.ok(findButton(panel, 'Restart to update'), 'the ready update keeps its Restart');
+  assert.ok(findButton(panel, 'Check for updates'), 'with updates off, checking stays possible');
+  assert.equal(panel.querySelector('a').getAttribute('href'), official, 'the notes are the ready update\'s');
+  findButton(panel, 'Download 1.9.1').click();
+  await settle();
+  assert.deepEqual(fake.calls.filter(([name]) => name === 'download'), [['download', []]]);
+  assert.match(text(panel), /Zelos 1\.9\.0 is ready to install\. .*Downloading Zelos 1\.9\.1… 0%/);
+  assert.equal(findButton(panel, 'Download 1.9.1').disabled, true, 'no second download while one runs');
+  assert.equal(findButton(panel, 'Restart to update').disabled, false, 'Restart still installs 1.9.0');
+
+  // The download fails: the panel says so, and Download can be tried again.
+  fake.set({ progress: null, error: 'Zelos 1.9.1 could not be downloaded. The downloaded update does not match the signed release.' });
+  await new Promise((resolve) => setTimeout(resolve, 1_600)); // one poll
+  assert.match(text(panel), /1\.9\.1 could not be downloaded/);
+  assert.equal(findButton(panel, 'Download 1.9.1').disabled, false);
+
+  // It lands: one ready update, no offer beside it.
+  fake.set({ latestVersion: '1.9.1', newer: null, error: '' });
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  assert.match(text(panel), /Zelos 1\.9\.1 is ready to install/);
+  assert.equal(findButton(panel, 'Download 1.9.1'), undefined);
+});
+
 test('the desktop update panel shows no link for an unverified release address', async t => {
   const document = installDom(t);
   const fake = fakeUpdaterBridge({ status: 'available', latestVersion: '1.9.0', releaseUrl: 'https://untrusted.example/release' });

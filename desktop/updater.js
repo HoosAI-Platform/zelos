@@ -71,6 +71,12 @@ export const FIRST_CHECK_DELAY_MS = 60 * 1000;
 export const TICK_MS = 15 * 60 * 1000;
 
 const METADATA_TIMEOUT_MS = 20_000;
+/**
+ * A newer release that fails to download beside a ready update is retried
+ * quietly — but not forever in silence: after this many failures in a row the
+ * panel says so, since each attempt may fetch a hundred megabytes.
+ */
+export const QUIET_FAILURES_SHOWN = 3;
 /** A download that receives nothing for this long is abandoned, however large. */
 const STALL_TIMEOUT_MS = 60_000;
 const MAX_REDIRECTS = 5;
@@ -492,6 +498,11 @@ export function createUpdater({
   // { version, dir, done }. `done` settles once the download has cleaned up
   // after itself, so a later download of the same version waits for that.
   let fetching = null;
+  // A release newer than the ready one that a check found but did not fetch,
+  // because automatic updates are off: { version, releaseUrl }. Offered beside
+  // the ready update ("also available — Download"), never in its place.
+  let newer = null;
+  let quietFailures = 0;         // newer releases that failed beside the ready one, in a row
   let controller = null;
   let tick = null;
   let first = null;
@@ -539,6 +550,9 @@ export function createUpdater({
       // The version the "ready to install" banner offers, or '' for none: a
       // verified update that was neither skipped nor put off until next launch.
       banner: status === 'ready' && release.latestVersion && release.latestVersion !== settings.skipped && release.latestVersion !== snoozed ? release.latestVersion : '',
+      // A newer release than the ready one, found but not downloaded; while
+      // the person's own download of it runs, `progress` is its progress.
+      newer: status === 'ready' && ready && newer ? { ...newer } : null,
       checkedAt: checkedAt === null ? null : new Date(checkedAt).toISOString(),
     };
   };
@@ -720,10 +734,11 @@ export function createUpdater({
    * it starts (what a crash left of the same version). The ready update's
    * folder is never written or removed from here. `beside` is a newer release
    * fetched while an update is ready: the status stays 'ready' and the ready
-   * update stays installable until this one has verified (QA, 2026-10-10,
+   * update stays installable until this one has verified. It is `quiet` —
+   * no progress shown — unless the person asked for it (QA, 2026-10-10,
    * TT-3485).
    */
-  async function download(version, raw, own, { beside = false, releaseUrl: url = '', notes: text = '' } = {}) {
+  async function download(version, raw, own, { beside = false, quiet = beside, releaseUrl: url = '', notes: text = '' } = {}) {
     const name = updateAssetName(version, platform, arch);
     const asset = releaseAsset(raw, version, name);
     const manifestFile = releaseAsset(raw, version, MANIFEST_NAME);
@@ -757,7 +772,7 @@ export function createUpdater({
         fetchImpl, signal: own.signal, expectedSize: expected.size, setTimer, clearTimer,
         onProgress: (fraction) => {
           const rounded = Math.floor(fraction * 100) / 100;
-          if (!beside && rounded !== progress && controller === own) set({ progress: rounded });
+          if (!quiet && rounded !== progress && controller === own) set({ progress: rounded });
         },
       });
       if (digest !== expected.sha256) throw new Error('The downloaded update does not match the signed release.');
@@ -791,6 +806,8 @@ export function createUpdater({
     const replaced = ready?.version ?? '';
     ready = { version, dir, file, sha256: expected.sha256, releaseUrl: url, notes: text };
     controller = null;
+    newer = null;
+    quietFailures = 0;
     // The update this one replaces, and anything else left over, goes now.
     tidy();
     log('info', 'update downloaded and verified', replaced ? { version, replaced } : { version });
@@ -950,7 +967,7 @@ export function createUpdater({
    * once the check is answered — a download carries on in the background and
    * reports through onChange.
    */
-  async function check({ download: fetchIt }) {
+  async function check({ download: fetchIt, asked = false }) {
     if (!supported || stopped || working()) return snapshot();
     // A ready update stays ready through a check: it is replaced only by a
     // newer release, dropped only if the release it came from is no longer
@@ -983,22 +1000,45 @@ export function createUpdater({
     nextAttemptAt = checkedAt + CHECK_INTERVAL_MS;
     const release = { latestVersion: info.latestVersion, releaseUrl: info.releaseUrl, notes: info.notes };
     if (kept && info.latestVersion === kept.version) {
+      // The ready update is the latest again: nothing newer to offer, and no
+      // newer download failing any more.
       controller = null;
-      set(release);
+      newer = null;
+      quietFailures = 0;
+      set({ ...release, error: '' });
       return snapshot();
     }
     const isNewer = kept && info.updateAvailable && compareVersions(info.latestVersion, kept.version) > 0;
-    if (isNewer && fetchIt) {
-      // A newer release while one is ready: it downloads into its own folder
-      // beside the ready one, quietly. Until it has verified, the ready update
-      // is what the screen describes and what Restart installs; if it fails,
-      // only its own folder goes (QA, 2026-10-10, TT-3485).
+    if (isNewer && !fetchIt) {
+      // Automatic updates are off: the newer release is offered beside the
+      // ready one, which keeps its Restart. Nothing is downloaded until the
+      // person asks (QA, 2026-10-10, TT-3485).
+      controller = null;
+      newer = { version: info.latestVersion, releaseUrl: info.releaseUrl };
       set(release);
-      download(info.latestVersion, raw, own, { beside: true, releaseUrl: info.releaseUrl, notes: info.notes }).catch((err) => {
+      return snapshot();
+    }
+    if (isNewer) {
+      // A newer release while one is ready: it downloads into its own folder
+      // beside the ready one — quietly when Zelos decided to, with progress
+      // when the person chose Download. Until it has verified, the ready
+      // update is what the screen describes and what Restart installs; if it
+      // fails, only its own folder goes (QA, 2026-10-10, TT-3485).
+      const version = info.latestVersion;
+      set({ ...release, ...(asked ? { progress: 0, error: '' } : {}) });
+      download(version, raw, own, { beside: true, quiet: !asked, releaseUrl: info.releaseUrl, notes: info.notes }).catch((err) => {
         if (controller === own) {
           controller = null;
           nextAttemptAt = now() + RETRY_INTERVAL_MS;
-          log('warn', 'a newer update could not be downloaded; the ready one is kept', { version: info.latestVersion, error: err?.message });
+          log('warn', 'a newer update could not be downloaded; the ready one is kept', { version, error: err?.message });
+          const said = String(err?.message || 'The download did not complete.');
+          if (asked) {
+            set({ progress: null, error: `Zelos ${version} could not be downloaded. ${said}` });
+          } else if (++quietFailures >= QUIET_FAILURES_SHOWN) {
+            // Retried every hour, each time perhaps a hundred megabytes: after
+            // a few in a row it is said rather than kept quiet.
+            set({ error: `Zelos ${version} has failed to download ${quietFailures} times in a row, so Zelos ${kept.version} is still the update ready to install. ${said}` });
+          }
         }
         tidy();
       });
@@ -1009,9 +1049,10 @@ export function createUpdater({
       // than the ready one — the publisher pulled it. Dropped before anything
       // newer has been verified, on purpose: a withdrawn release is not
       // installed on the strength of having been downloaded before it was
-      // withdrawn. Security over availability. (A newer release found by a
-      // check that does not download is offered in its place, as before.)
+      // withdrawn. Security over availability.
       ready = null;
+      newer = null;
+      quietFailures = 0;
       tidy();
     }
     if (!info.updateAvailable) {
@@ -1114,11 +1155,18 @@ export function createUpdater({
       return check({ download: settings.auto });
     },
 
-    /** The person asked for the update they were told about. */
+    /**
+     * The person asked for the update they were told about: the one available,
+     * or a newer one offered beside a ready update, which is then downloaded
+     * beside it with its progress shown.
+     */
     download() {
-      if (status !== 'available') return Promise.resolve(snapshot());
-      status = 'idle';
-      return check({ download: true });
+      if (status === 'available') {
+        status = 'idle';
+        return check({ download: true });
+      }
+      if (status === 'ready' && ready && newer) return check({ download: true, asked: true });
+      return Promise.resolve(snapshot());
     },
 
     setAuto(auto) {

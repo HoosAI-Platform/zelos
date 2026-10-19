@@ -461,10 +461,13 @@ true.
    and anything in the folder that is not a plain version folder — a link, a
    stray file, the files an earlier version of Zelos kept at the top — is
    removed without being followed. A newer release found while an update is
-   ready downloads into its own folder beside it: the ready update stays
-   offered, and is what **Restart to update** installs, until the newer one
-   has passed every check; one that fails is deleted and the ready one is
-   untouched. A release pulled back to an older version drops the ready
+   ready downloads into its own folder beside it — at once with automatic
+   updates on, and only when the person chooses its Download with them off —
+   and the ready update stays offered, and is what **Restart to update**
+   installs, until the newer one has passed every check; one that fails is
+   deleted and the ready one is untouched. A failure the person asked for is
+   reported at once; automatic ones are retried hourly and reported after
+   three in a row. A release pulled back to an older version drops the ready
    update at once, before anything else is verified. While a restart is
    being prepared and carried out, no check runs and nothing in the folder
    changes. Public keys that cannot

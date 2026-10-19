@@ -20,7 +20,7 @@ import {
   ATTEMPT_FILE, createUpdater, downloadToFile, isStrongPublicKey, MAC_NEW_SUFFIX, MAC_SWAP_SCRIPT, macReplaceCheck,
   manifestAsset, openReleaseDownload, parseSwapResult, PENDING_DIR, publicKeyFrom, readUpdateSettings, RESULT_FILE,
   signatureMatches, signManifest, updateAssetName, verifyReleaseManifest, windowsReplaceCheck, writeUpdateSettings,
-  CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS, RETRY_INTERVAL_MS,
+  CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS, QUIET_FAILURES_SHOWN, RETRY_INTERVAL_MS,
 } from '../desktop/updater.js';
 import { RELEASE_API, REPOSITORY } from '../core/updates.mjs';
 
@@ -1114,6 +1114,111 @@ describe('a newer release while an update is ready', () => {
     await until(() => !fs.existsSync(pending('1.9.1')), '1.9.1 to be dropped');
     await until(() => h.updater.state().status === 'ready' && h.updater.state().latestVersion === '1.9.0', '1.9.0 instead');
     assert.deepEqual(fs.readdirSync(pending()), ['1.9.0']);
+  });
+});
+
+describe('a newer release beside a ready update, offered or retried', () => {
+  /* Automatic updates off: a newer release is offered beside the ready one,
+     never in its place, and the person's download of it shows progress.
+     Automatic updates on: a newer release that keeps failing is said, not
+     retried in silence (QA, 2026-10-10, TT-3485). */
+  const pending = (...parts) => path.join(sandbox, PENDING_DIR, ...parts);
+  const installer = (version) => updateAssetName(version, 'win32', 'x64');
+  function publish(fx, next) {
+    fx.release = next.release;
+    fx.files = next.files;
+    fx.version = next.version;
+  }
+
+  async function readyWithAutoOff(overrides) {
+    const fx = fixture('1.9.0');
+    const h = windowsUpdater(fx, overrides);
+    await h.updater.start();
+    h.updater.setAuto(false);
+    await h.updater.checkNow();
+    await h.updater.download();
+    await until(() => h.updater.state().status === 'ready', 'the chosen download');
+    return { ...h, fx };
+  }
+
+  it('with automatic updates off, a check offers the newer release beside the ready one, and Download fetches it with progress', async () => {
+    const h = await readyWithAutoOff();
+    publish(h.fx, fixture('1.9.1'));
+    const state = await h.updater.checkNow();
+    assert.equal(state.status, 'ready', 'Restart for 1.9.0 is still offered');
+    assert.equal(state.latestVersion, '1.9.0');
+    assert.equal(state.banner, '1.9.0');
+    assert.deepEqual(state.newer, { version: '1.9.1', releaseUrl: `${REPOSITORY}/releases/tag/v1.9.1` });
+    assert.ok(!h.github.seen.some((x) => x.url.includes('/v1.9.1/')), 'nothing of 1.9.1 is fetched until asked');
+
+    const before = h.states.length;
+    await h.updater.download();
+    await until(() => h.updater.state().latestVersion === '1.9.1', 'the chosen newer download');
+    const during = h.states.slice(before);
+    assert.ok(during.some((x) => x.status === 'ready' && x.latestVersion === '1.9.0' && x.newer?.version === '1.9.1' && x.progress === 1),
+      'its progress is shown while 1.9.0 stays ready');
+    assert.ok(during.every((x) => x.status === 'ready'), 'never anything but ready meanwhile');
+    const after = h.updater.state();
+    assert.equal(after.newer, null);
+    assert.equal(after.progress, null);
+    assert.equal(after.banner, '1.9.1');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.1']);
+  });
+
+  it('a newer download the person asked for that fails says so, and leaves 1.9.0 ready and installable', async () => {
+    const tampered = Buffer.from(fixture('1.9.1').payload);
+    const h = await readyWithAutoOff({ github: { override: { [storage(installer('1.9.1'))]: async () => new Response(tampered) } } });
+    publish(h.fx, fixture('1.9.1'));
+    await h.updater.checkNow();
+    await h.updater.download();
+    await until(() => h.updater.state().error, 'the refusal');
+    const state = h.updater.state();
+    assert.equal(state.status, 'ready');
+    assert.equal(state.latestVersion, '1.9.0');
+    assert.match(state.error, /Zelos 1\.9\.1 could not be downloaded\. The downloaded update does not match the signed release/);
+    assert.equal(state.progress, null);
+    assert.equal(state.newer?.version, '1.9.1', 'still offered, to try again');
+    await until(() => !fs.existsSync(pending('1.9.1')), 'the refused folder to go');
+    assert.equal(await h.updater.prepareInstall(), true);
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [pending('1.9.0', installer('1.9.0'))]);
+  });
+
+  it('with automatic updates on, a newer release that keeps failing is said after a few tries in a row, and the message goes once it lands', async () => {
+    let broken = true;
+    const tampered = Buffer.from(fixture('1.9.1').payload);
+    let now = 1_000_000;
+    const fx = fixture('1.9.0');
+    const h = windowsUpdater(fx, {
+      deps: { now: () => now },
+      github: { override: { [storage(installer('1.9.1'))]: async () => new Response(broken ? tampered : fx.files.get(installer('1.9.1'))) } },
+    });
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    publish(fx, fixture('1.9.1'));
+    const tick = () => h.timers.timers.find((t) => !t.cleared && t.ms !== FIRST_CHECK_DELAY_MS && t.ms > 30_000);
+    let requests = 0;
+    const attempts = () => h.github.seen.filter((x) => x.url === storage(installer('1.9.1'))).length;
+    for (let attempt = 1; attempt <= QUIET_FAILURES_SHOWN; attempt++) {
+      now += CHECK_INTERVAL_MS;
+      tick().fn();
+      await until(() => attempts() === requests + 1 && !fs.existsSync(pending('1.9.1')), `failure ${attempt}`);
+      requests = attempts();
+      await settle();
+      const state = h.updater.state();
+      assert.equal(state.status, 'ready');
+      assert.equal(state.latestVersion, '1.9.0');
+      if (attempt < QUIET_FAILURES_SHOWN) assert.equal(state.error, '', `quiet after ${attempt}`);
+    }
+    assert.match(h.updater.state().error, /Zelos 1\.9\.1 has failed to download 3 times in a row, so Zelos 1\.9\.0 is still the update ready to install/);
+    assert.equal(h.updater.state().banner, '1.9.0');
+
+    broken = false;
+    now += RETRY_INTERVAL_MS;
+    tick().fn();
+    await until(() => h.updater.state().latestVersion === '1.9.1', 'the fixed release');
+    assert.equal(h.updater.state().error, '');
   });
 });
 

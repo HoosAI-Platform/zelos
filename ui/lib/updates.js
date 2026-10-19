@@ -65,6 +65,9 @@ function manualUpdatesPanel({ reason = '' } = {}) {
 /** How often the open panel asks the shell for the updater's state. Local IPC only. */
 const POLL_MS = 1_500;
 
+/** A release newer than the ready one, offered beside it; '' for none or a malformed one. */
+const newerVersion = (state) => (state.status === 'ready' && VERSION.test(state.newer?.version || '') ? state.newer.version : '');
+
 function describeState(state) {
   const latest = VERSION.test(state.latestVersion || '') ? state.latestVersion : '';
   switch (state.status) {
@@ -74,7 +77,18 @@ function describeState(state) {
     case 'downloading': return Number.isFinite(state.progress)
       ? `Downloading Zelos ${latest}… ${Math.round(state.progress * 100)}%`
       : `Downloading Zelos ${latest}…`;
-    case 'ready': return `Zelos ${latest} is ready to install. Restart Zelos to finish updating; your drafts are saved first.`;
+    case 'ready': {
+      // Always the ready update first: Restart installs that one, whatever
+      // else is going on. A newer release beside it, the person's download of
+      // it, or a newer download that keeps failing follows.
+      const newer = newerVersion(state);
+      return [
+        `Zelos ${latest} is ready to install. Restart Zelos to finish updating; your drafts are saved first.`,
+        newer && Number.isFinite(state.progress) ? `Downloading Zelos ${newer}… ${Math.round(state.progress * 100)}%`
+          : newer ? `Zelos ${newer} is also available.` : '',
+        typeof state.error === 'string' ? state.error : '',
+      ].filter(Boolean).join(' ');
+    }
     case 'installing': return 'Restarting to install the update…';
     case 'error': return `Could not update. ${state.error || 'Please try again later.'}`;
     default: return state.auto
@@ -180,7 +194,9 @@ function desktopUpdatesPanel(bridge) {
     renderRelease();
     // The buttons are rebuilt only when something they show changed, so a
     // poll never moves keyboard focus off a control the person is on.
-    const key = JSON.stringify([state.status, acting]);
+    const newer = newerVersion(state);
+    const fetchingNewer = Boolean(newer) && Number.isFinite(state.progress);
+    const key = JSON.stringify([state.status, acting, state.auto === true, newer, fetchingNewer]);
     if (key === shown) return;
     shown = key;
     const focused = controls.contains(document.activeElement) ? document.activeElement.dataset?.control : null;
@@ -192,11 +208,17 @@ function desktopUpdatesPanel(bridge) {
       return node;
     };
     const buttons = [];
-    if (state.status === 'ready') buttons.push(control('Restart to update', 'restart', true, acting, () => bridge.restart()));
-    else if (state.status === 'available') buttons.push(control('Download update', 'download', true, busy, () => bridge.download()));
-    if (!['ready', 'installing', 'downloading'].includes(state.status)) {
-      buttons.push(control('Check for updates', 'check', false, busy, () => bridge.check()));
-    }
+    if (state.status === 'ready') {
+      buttons.push(control('Restart to update', 'restart', true, acting, () => bridge.restart()));
+      // "1.9.1 is also available": the ready update keeps its Restart, and the
+      // newer one can be fetched beside it (QA, 2026-10-10, TT-3485).
+      if (newer) buttons.push(control(`Download ${newer}`, 'download', false, acting || fetchingNewer, () => bridge.download()));
+    } else if (state.status === 'available') buttons.push(control('Download update', 'download', true, busy, () => bridge.download()));
+    // With automatic updates on, a ready update is kept current by the shell
+    // and restarted into, not re-checked. With them off, checking is the only
+    // way a newer release beside it is ever found, so the button stays.
+    const checkable = state.status === 'ready' ? state.auto !== true : !['installing', 'downloading'].includes(state.status);
+    if (checkable) buttons.push(control('Check for updates', 'check', false, busy || fetchingNewer, () => bridge.check()));
     replace(controls, [el('div', { class: 'row-inline' }, buttons)]);
     if (!focused) return;
     // Back to the same control when it is still usable; otherwise to the
