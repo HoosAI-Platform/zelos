@@ -525,6 +525,66 @@ test('index.html carries no inline script and no inline event handler', () => {
   assert.match(html, /<script type="module" src="\/app\.js">/);
 });
 
+/**
+ * Split a selector list or a complex selector on a separator that is not inside
+ * parentheses, so `:not(a, b)` and `:is(a b)` stay whole.
+ */
+function splitTopLevel(text, isSeparator) {
+  const parts = [];
+  let depth = 0;
+  let current = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '(' || ch === '[') depth++;
+    else if (ch === ')' || ch === ']') depth--;
+    if (depth === 0 && isSeparator(ch)) {
+      if (current.trim()) parts.push(current.trim());
+      current = '';
+    } else current += ch;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+/**
+ * The compound selector a complex selector styles: the last one, after the
+ * final descendant or child combinator.
+ */
+const subjectOf = (selector) => splitTopLevel(selector, (ch) => /[\s>+~]/.test(ch)).at(-1);
+
+/** Can this compound selector ever match a <select>? */
+function compoundCanMatchSelect(compound) {
+  const type = /^[a-z][\w-]*/i.exec(compound)?.[0]?.toLowerCase();
+  if (type && type !== '*' && type !== 'select') return false;
+  // :not(select), :not(:where(select)) or :not(:is(select)) rule it out, as do
+  // the same with select:enabled (a disabled select is meant to look locked).
+  return !/:not\(\s*(?::(?:where|is)\(\s*)?select(?::enabled)?\s*\)?\s*\)/i.test(compound);
+}
+
+test('the read-only field style cannot land on a <select> (TT-3470)', () => {
+  // A <select> is never read-write, so it matches :read-only. A bare
+  // `.input:read-only` drew every picker as a locked field in --ink-3.
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const readOnlyRules = [...css.matchAll(/([^{}]+)\{[^{}]*\}/g)]
+    .flatMap((m) => splitTopLevel(m[1], (ch) => ch === ','))
+    .filter((selector) => /:read-only|\[readonly\]|:not\(\s*:read-write\s*\)/.test(subjectOf(selector)));
+  assert.ok(readOnlyRules.length > 0, 'expected the read-only field style to exist');
+
+  const offenders = readOnlyRules.filter((selector) => compoundCanMatchSelect(subjectOf(selector)));
+  assert.deepEqual(offenders, [], 'a read-only rule that also matches <select>');
+
+  // The real read-only inputs (the timezone, the Zelos folder) keep their look.
+  assert.ok(readOnlyRules.some((selector) => /^\.input:read-only\b/.test(subjectOf(selector))),
+    'a read-only .input still needs the read-only style');
+
+  // And the guard itself: the old selector is one it would have caught.
+  assert.equal(compoundCanMatchSelect('.input:read-only'), true);
+  assert.equal(compoundCanMatchSelect('input.input:read-only'), false);
+  assert.equal(compoundCanMatchSelect('.input:read-only:not(select)'), false);
+  assert.equal(compoundCanMatchSelect('.input:read-only:not(:where(select:enabled))'), false);
+  assert.equal(compoundCanMatchSelect('.input:not(:read-write)'), true);
+});
+
 test('the meander is drawn, not downloaded', () => {
   const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
   assert.match(css, /--meander:\s*url\("data:image\/svg\+xml/);

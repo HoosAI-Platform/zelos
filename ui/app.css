@@ -267,7 +267,16 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
 }
-.input:read-only { color: var(--ink-3); background: var(--ground-2); }
+/* Read-only fields (the timezone, the Zelos folder, the message to paste) keep
+   the dark field fill and say "locked" with a dashed edge and the dim ink. The
+   old --ground-2 fill swapped that for a lighter box inside the form's own box
+   and took the dim ink under 4.5:1 (test/contrast.test.mjs).
+
+   An enabled <select> is never read-write either, so it matches :read-only and
+   every picker was drawn as a locked field (TT-3470); a disabled one still gets
+   the locked look, like any disabled field. :where() keeps the specificity at
+   .input:read-only's, so .input:focus still wins where it did. */
+.input:read-only:not(:where(select:enabled)) { color: var(--ink-3); border-style: dashed; border-color: var(--line-strong); }
 
 textarea.input, .draft-body, .ask-field, .capture-field {
   width: 100%;

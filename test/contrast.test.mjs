@@ -171,11 +171,91 @@ const SURFACES = {
   'an event wash in a glass pane': ['--paper', '--lapis-wash'],
 };
 const PLAIN = ['the bare ground', 'a glass pane', 'a --ground-2 box in a glass pane'];
+const WASH = 'an event wash in a glass pane';
+
+/**
+ * Every style rule as { selectors, body, nested }, where `nested` is true for a
+ * rule inside an at-rule block such as @media. Assumes flat CSS, as app.css
+ * is: native nesting (`&:hover {}`) or a statement at-rule (`@import …;`)
+ * before a rule would be misread.
+ */
+function styleRules(css) {
+  const rules = [];
+  const stack = [];
+  let start = 0;
+  for (let i = 0; i < css.length; i++) {
+    if (css[i] === '{') {
+      const prelude = css.slice(start, i).trim();
+      if (prelude.startsWith('@')) {
+        stack.push('@');
+      } else {
+        const close = css.indexOf('}', i);
+        rules.push({ selectors: prelude.split(',').map((s) => s.trim()), body: css.slice(i + 1, close), nested: stack.length > 0 });
+        i = close;
+      }
+      start = i + 1;
+    } else if (css[i] === '}') {
+      stack.pop();
+      start = i + 1;
+    }
+  }
+  return rules;
+}
+
+const RULES = styleRules(CSS);
+const backgroundOf = (body) => /(?:^|;)\s*background(?:-color)?:\s*([^;]+);/.exec(body)?.[1].trim();
+
+/*
+ * A form field's own fill: the last `background` set by a top-level rule whose
+ * selector list names `.input` on its own. Section 9 darkens fields inside
+ * glass, so this is not a token. A viewport- or preference-dependent override
+ * would make the sums below wrong for some screens, so one fails the suite.
+ */
+function fieldFill() {
+  let fill;
+  for (const rule of RULES) {
+    if (!rule.selectors.includes('.input')) continue;
+    const bg = backgroundOf(rule.body);
+    if (!bg) continue;
+    assert.ok(!rule.nested, `an @-rule block now sets .input's background (${bg}); model it here`);
+    fill = bg;
+  }
+  assert.ok(fill, 'ui/app.css no longer gives .input a background');
+  return fill;
+}
+
+/*
+ * A read-only field: the ink the read-only rule sets, on the fill it sets, or
+ * on the plain field fill when it sets none. It once set --ground-2, which
+ * replaced the dark field fill with a second box inside the form's own and
+ * took the dim ink under 4.5:1.
+ */
+function readOnlyField() {
+  const rule = RULES.find((r) => !r.nested && r.selectors.some((s) => s.startsWith('.input:read-only')));
+  assert.ok(rule, 'ui/app.css no longer styles .input:read-only');
+  const ink = /(?:^|;)\s*color:\s*var\((--[\w-]+)\)/.exec(rule.body)?.[1];
+  assert.ok(ink, '.input:read-only no longer sets its ink from a token');
+  const bg = backgroundOf(rule.body);
+  return { ink, fill: bg || FIELD };
+}
+
+const FIELD = fieldFill();
+const READ_ONLY = readOnlyField();
+SURFACES['a field in a glass pane'] = ['--paper', FIELD];
+SURFACES['a field in a --ground-2 box in a glass pane'] = ['--paper', '--ground-2', FIELD];
+SURFACES['a read-only field in a glass pane'] = ['--paper', READ_ONLY.fill];
+SURFACES['a read-only field in a --ground-2 box in a glass pane'] = ['--paper', '--ground-2', READ_ONLY.fill];
+const READ_ONLY_FIELDS = ['a read-only field in a glass pane', 'a read-only field in a --ground-2 box in a glass pane'];
 const ALL = Object.keys(SURFACES);
 
-/** A fill token as a colour; the accent wash resolves to the accent at its alpha. */
+/**
+ * A fill as a colour: a token name, or a literal colour. The accent wash
+ * resolves to the accent at its alpha.
+ */
 function fillColour(name, accent) {
-  const value = token(name);
+  const ref = /^var\((--[\w-]+)\)$/.exec(name);
+  if (ref) return fillColour(ref[1], accent);
+  const value = name.startsWith('--') ? token(name) : name;
   if (/^(var|color-mix)\(/.test(value)) return { rgb: parseColour(accent).rgb, a: accentAlpha(value) };
   return parseColour(value);
 }
@@ -193,8 +273,10 @@ const INKS = {
   '--ink': ALL,
   '--ink-2': PLAIN,
   '--ink-3': PLAIN,
-  '--ink-on-wash': ALL,
+  '--ink-on-wash': [...PLAIN, WASH],
 };
+// Whatever ink the read-only rule uses must also clear its own field.
+INKS[READ_ONLY.ink] = [...new Set([...(INKS[READ_ONLY.ink] || []), ...READ_ONLY_FIELDS])];
 
 test('the glow and the accent presets are readable from the source', () => {
   assert.ok(PEAK_GLOW > 0 && PEAK_GLOW < 1, `peak glow alpha ${PEAK_GLOW}`);
