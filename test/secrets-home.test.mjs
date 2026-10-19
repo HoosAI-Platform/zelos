@@ -10,7 +10,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-secret-homes-'));
 process.env.ZELOS_HOME = path.join(scratch, 'initial');
 process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
 process.env.ZELOS_LOG_LEVEL = 'silent';
-const { describeCommand, setSecret, getSecret, deleteSecret, listRefs, resetBackendCache } = await import('../core/secrets.mjs');
+const { describeCommand, ensureNamespace, setSecret, getSecret, deleteSecret, listRefs, resetBackendCache } = await import('../core/secrets.mjs');
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
 function useHome(name) {
@@ -21,6 +21,8 @@ function useHome(name) {
 }
 
 function addresses() {
+  // describeCommand only reads the identity; giving a fresh home one is a save's job.
+  ensureNamespace();
   return ['macos-keychain', 'libsecret', 'windows-dpapi'].map((name) => {
     const command = describeCommand({ name, action: 'get', ref: 'model.default' });
     return name === 'windows-dpapi' ? command.env.ZELOS_SECRET_FILE : command.args.at(-1);
@@ -313,4 +315,40 @@ test('reading a DPAPI key with no blob answers null without starting PowerShell'
   t.after(() => { process.env.PATH = previousPath; });
   assert.equal(await getSecret('model.default'), null);
   assert.equal(fs.existsSync(spawned), false, 'a missing file is already the answer');
+});
+
+test('looking for a credential in a home that has never saved one gives it no identity', async (t) => {
+  // secrets.namespace.json is part of the home, so a read that wrote one would
+  // put an identity into every backup and copy of a home that never needed it
+  // (TT-3503). Only a save, or forgetting a pre-upgrade key, creates it.
+  const priorLocal = process.env.LOCALAPPDATA;
+  t.after(() => {
+    if (priorLocal === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = priorLocal;
+    process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
+    resetBackendCache();
+  });
+  process.env.LOCALAPPDATA = path.join(scratch, 'fresh-dpapi-localappdata');
+  fs.mkdirSync(process.env.LOCALAPPDATA);
+  process.env.ZELOS_SECRETS_BACKEND = 'windows-dpapi';
+  const home = useHome('fresh-dpapi');
+  assert.equal(await getSecret('model.default'), null);
+  assert.deepEqual(await listRefs(), []);
+  assert.deepEqual(await deleteSecret('mail.m_1'), { ok: true, deleted: false });
+  assert.equal(fs.existsSync(path.join(home, 'secrets.namespace.json')), false);
+});
+
+test('a home that gets its identity never shows anyone a half-written one', () => {
+  // An empty secrets.namespace.json is damaged, not missing: replacing it could
+  // hand a home a second identity and orphan every key saved under the first.
+  const empty = useHome('namespace-empty');
+  fs.writeFileSync(path.join(empty, 'secrets.namespace.json'), '');
+  assert.throws(() => ensureNamespace(), /namespace is damaged/);
+  // So the record has to appear whole. It is written to a temporary file and
+  // linked into place, and nothing but the record is left behind.
+  const home = useHome('namespace-created');
+  const { id } = ensureNamespace();
+  assert.match(id, /^[0-9a-f]{32}$/);
+  assert.equal(ensureNamespace().id, id, 'a second call reads the first identity back');
+  assert.deepEqual(fs.readdirSync(home).filter((name) => name.startsWith('secrets.')), ['secrets.namespace.json']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'secrets.namespace.json'), 'utf8')).id, id);
 });

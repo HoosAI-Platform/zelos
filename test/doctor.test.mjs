@@ -339,6 +339,32 @@ describe('the mail check and the sent folder', () => {
 
 describe('the secret store check', () => {
   /**
+   * TT-3503: doctor looks up the AI key through the real store, and looking
+   * used to be enough to give a home its credential identity — so a doctor run
+   * on a home that had never saved anything wrote secrets.namespace.json into
+   * it. DPAPI is forced, at a scratch %LOCALAPPDATA%, because it is the store
+   * that can answer "not saved" without running anything.
+   */
+  test('checking the AI key of a home that has saved nothing writes nothing', async (t) => {
+    const { resetBackendCache } = await import('../core/secrets.mjs');
+    const priorLocal = process.env.LOCALAPPDATA;
+    t.after(() => {
+      if (priorLocal === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = priorLocal;
+      process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
+      resetBackendCache();
+    });
+    const home = freshHome({ config: { model: { baseUrl: 'https://api.example.com/v1', model: 'some-model' } } });
+    process.env.LOCALAPPDATA = path.join(home, 'localappdata');
+    fs.mkdirSync(process.env.LOCALAPPDATA);
+    process.env.ZELOS_SECRETS_BACKEND = 'windows-dpapi';
+    resetBackendCache();
+    const { getSecret: _fake, backend: _fakeBackend, ...deps } = SILENT_DEPS;
+    const report = await diagnose({ deps });
+    assert.equal(byId(report, 'model.key').status, 'fail', byId(report, 'model.key').detail);
+    assert.equal(fs.existsSync(path.join(home, 'secrets.namespace.json')), false);
+  });
+
+  /**
    * The contract, both ends: core/secrets.mjs writes secrets.backend.json at
    * the first successful setSecret (`recordBackend`, called from `setSecret`),
    * and this is the only reader of it outside that module. Written here with

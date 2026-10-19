@@ -581,6 +581,9 @@ test('the sample-data handlers seed, report and clear over HTTP, and touch nothi
  * ================================================================== */
 
 test('no command line can carry a secret, on any backend', () => {
+  // A scoped address needs the home's credential identity, which only a save
+  // creates; describeCommand itself never writes one.
+  secrets.ensureNamespace();
   const hostile = ['hunter2', MODEL_KEY, MAIL_PASS, '--verbose', '; rm -rf /'];
   for (const name of ['macos-keychain', 'windows-dpapi', 'libsecret']) {
     for (const action of ['set', 'get', 'has', 'delete']) {

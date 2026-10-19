@@ -395,7 +395,7 @@ finally{ [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
 export function describeCommand({ name, action, ref, legacy = false }) {
   if (!isValidRef(ref)) throw new TypeError(`secrets: invalid ref ${JSON.stringify(ref)}`);
   if (!BACKEND_NAMES.includes(name)) throw new TypeError(`secrets: unknown backend ${name}`);
-  const account = name === 'encrypted-file' || legacy ? ref : `${namespaceRecord().id}.${ref}`;
+  const account = name === 'encrypted-file' || legacy ? ref : `${scopedId()}.${ref}`;
 
   if (name === 'macos-keychain') {
     switch (action) {
@@ -447,7 +447,7 @@ export function describeCommand({ name, action, ref, legacy = false }) {
 }
 
 function dpapiFile(ref, legacy = false, base = process.env.LOCALAPPDATA || path.join(paths().home, 'dpapi')) {
-  return path.join(base, 'Zelos', 'secrets', ...(legacy ? [] : [namespaceRecord().id]), `${ref}.dpapi`);
+  return path.join(base, 'Zelos', 'secrets', ...(legacy ? [] : [scopedId()]), `${ref}.dpapi`);
 }
 
 /**
@@ -769,26 +769,26 @@ function forgetRef(ref) {
 // entries until the next explicit save. Reads never write a migrated value:
 // a concurrent process may be replacing/deleting that key while the OS reads.
 // Never remove the shared legacy entry another older home may still need.
-function namespaceRecord() {
-  const file = path.join(paths().home, 'secrets.namespace.json');
+function namespaceFile() {
+  return path.join(paths().home, 'secrets.namespace.json');
+}
+
+/**
+ * This home's credential identity, read and never written. A home that has
+ * not yet saved anything to an OS store has no identity, and `id` is null:
+ * looking for a key — which is all `doctor`, `listRefs` and every read do —
+ * must not be what gives it one, because the file it would write is part of
+ * the home and a backup or a copy carries it along. Its `legacyRefs` are then
+ * the ones ensureNamespace() would record, so reads see the same thing either
+ * way.
+ */
+function readNamespace() {
   let raw;
   try {
-    raw = fs.readFileSync(file, 'utf8');
+    raw = fs.readFileSync(namespaceFile(), 'utf8');
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
-    const fresh = { version: 1, id: crypto.randomBytes(16).toString('hex'), legacyRefs: readIndex(true) };
-    let fd;
-    try {
-      fd = fs.openSync(file, 'wx', 0o600);
-      fs.writeFileSync(fd, `${JSON.stringify(fresh, null, 2)}\n`);
-      fs.fsyncSync(fd);
-    } catch (writeError) {
-      if (writeError.code === 'EEXIST') return namespaceRecord();
-      throw writeError;
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-    }
-    return fresh;
+    return { version: 1, id: null, legacyRefs: readIndex(true) };
   }
   let record;
   try { record = JSON.parse(raw); } catch { /* fail without replacing the identity */ }
@@ -799,17 +799,82 @@ function namespaceRecord() {
   return record;
 }
 
+/**
+ * The identity, created if this home has none. Only a save and the deletion
+ * of a pre-upgrade key call this, because only they have to record anything:
+ * the save writes under the identity, and the deletion writes a marker that
+ * stops the older unscoped key coming back.
+ */
+export function ensureNamespace() {
+  const file = namespaceFile();
+  const existing = readNamespace();
+  if (existing.id !== null) return existing;
+  const fresh = { version: 1, id: crypto.randomBytes(16).toString('hex'), legacyRefs: existing.legacyRefs };
+  const text = `${JSON.stringify(fresh, null, 2)}\n`;
+  // Written whole beside the real name, then linked into place: a link either
+  // creates the file complete or fails because another process got there
+  // first. Opening the real name and then writing it left a moment where a
+  // reader, or the writer that lost, saw an empty file and called it damaged.
+  const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    let fd;
+    try {
+      fd = fs.openSync(temp, 'wx', 0o600);
+      fs.writeFileSync(fd, text);
+      fs.fsyncSync(fd);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    try {
+      fs.linkSync(temp, file);
+      return fresh;
+    } catch (linkError) {
+      if (linkError.code === 'EEXIST') return readNamespace();
+      // Some filesystems have no hard links; there the old exclusive create
+      // is the best available, narrow window and all.
+      if (linkError.code !== 'EPERM' && linkError.code !== 'ENOTSUP' && linkError.code !== 'ENOSYS') throw linkError;
+    }
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
+  let fd;
+  try {
+    fd = fs.openSync(file, 'wx', 0o600);
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+  } catch (writeError) {
+    if (writeError.code === 'EEXIST') return readNamespace();
+    throw writeError;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return fresh;
+}
+
+/* An OS store address under this home's identity. Every reader checks for a
+   null id before it gets here, so reaching this without one is a missed check,
+   and failing loudly beats inventing an address nothing was ever saved to. */
+function scopedId() {
+  const { id } = readNamespace();
+  if (id === null) throw new Error('secrets: this home has no credential identity yet, so it has no scoped address');
+  return id;
+}
+
 function hasLegacyRef(ref) {
-  const record = namespaceRecord();
-  return record.legacyRefs.includes(ref) && !fs.existsSync(legacyMarker(record, ref));
+  const record = readNamespace();
+  if (!record.legacyRefs.includes(ref)) return false;
+  // Markers are written under the identity, so a home without one has none.
+  return record.id === null || !fs.existsSync(legacyMarker(record, ref));
 }
 
 function legacyMarker(record, ref) {
+  // A tripwire, like scopedId(): every caller has already checked for a null id.
+  if (record.id === null) throw new Error('secrets: this home has no credential identity yet, so it has no migration markers');
   return path.join(paths().home, 'secrets.migrated', `${record.id}.${ref}`);
 }
 
 function forgetLegacyRef(ref) {
-  const record = namespaceRecord();
+  const record = readNamespace();
   if (!record.legacyRefs.includes(ref)) return;
   const file = legacyMarker(record, ref);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -1046,6 +1111,7 @@ async function writeSecret(ref, value) {
     return { ok: true, backend: name };
   }
 
+  ensureNamespace();
   if (name === 'windows-dpapi') {
     const desc = describeCommand({ name, action: 'set', ref });
     const { code, stderr } = await runWithRetry(desc.file, desc.args,
@@ -1106,6 +1172,8 @@ async function readSecret(ref) {
 }
 
 async function readExternalSecret(name, ref, legacy = false) {
+  // Nothing has ever been saved under an identity this home does not have.
+  if (!legacy && readNamespace().id === null) return null;
   // DPAPI's "not found" is a missing file, which Node can see without paying
   // for a PowerShell start. The script makes the same check and exits
   // NOT_FOUND_EXIT, so this changes how long the answer takes, not what it is.
@@ -1166,8 +1234,17 @@ async function removeSecret(ref) {
     return { ok: true, deleted: existed };
   }
 
+  const legacy = hasLegacyRef(ref);
+  // A pre-upgrade key needs its marker, and the marker needs an identity. Any
+  // other key in a home without one was never saved, so there is nothing to
+  // ask the OS store to remove.
+  if (legacy) ensureNamespace();
+  else if (readNamespace().id === null) {
+    forgetRef(ref);
+    return { ok: true, deleted: false };
+  }
+
   if (name === 'windows-dpapi') {
-    const legacy = hasLegacyRef(ref);
     let deleted = true;
     try {
       fs.unlinkSync(dpapiFile(ref));
@@ -1180,7 +1257,6 @@ async function removeSecret(ref) {
     return { ok: true, deleted };
   }
 
-  const legacy = hasLegacyRef(ref);
   const desc = describeCommand({ name, action: 'delete', ref });
   const { code, stderr } = await runWithRetry(desc.file, desc.args,
     { timeoutMs: budgets.access, label: `${name} delete ${ref}` });
@@ -1208,23 +1284,28 @@ async function removeSecret(ref) {
  * user account on this one. See below.
  */
 async function hasSecret(name, ref, legacy = false) {
+  // A home with no identity yet has saved nothing scoped: no blob, no folder.
+  const unsaved = !legacy && readNamespace().id === null;
   if (name === 'windows-dpapi') {
-    const blob = dpapiFile(ref, legacy);
-    if (fs.existsSync(blob)) return 'yes';
+    const blob = unsaved ? null : dpapiFile(ref, legacy);
+    if (blob !== null && fs.existsSync(blob)) return 'yes';
+    const ownFolder = blob !== null && fs.existsSync(path.dirname(blob));
     if (!legacy && hasLegacyRef(ref)) {
       const old = await hasSecret(name, ref, true);
       // The older store is shared by every home on this account, so it can
       // exist while this home has never stored anything here. Its 'no' proves
       // a deletion only when this home's own folder is here too; otherwise
       // the rules below decide, as they would for a key with no older copy.
-      if (old !== 'no' || fs.existsSync(path.dirname(blob))) return old;
+      if (old !== 'no' || ownFolder) return old;
+    } else if (unsaved) {
+      return 'no';
     }
     // The blob lives under %LOCALAPPDATA%, and dpapiFile() falls back to the
     // Zelos home when that variable is missing — so a relaunch without it looks
     // in a directory Zelos has never written to, where every ref reads as
     // deleted. A missing directory is not an empty store; it is the wrong
     // address.
-    if (fs.existsSync(path.dirname(blob))) return 'no';
+    if (ownFolder) return 'no';
     if (!dpapiAddressAuthoritative()) return 'unknown';
     // The right address, and this home has never stored anything there: the
     // home was restored from another computer or user account, whose DPAPI keys
@@ -1234,9 +1315,11 @@ async function hasSecret(name, ref, legacy = false) {
     // without pruning it. One exception: blobs written on an earlier launch
     // without %LOCALAPPDATA% sit in the home's own fallback folder, and those
     // keys are this account's, so they stay 'unknown' rather than vanish.
-    if (fs.existsSync(path.dirname(dpapiFile(ref, legacy, path.join(paths().home, 'dpapi'))))) return 'unknown';
+    if (blob !== null && fs.existsSync(path.dirname(dpapiFile(ref, legacy, path.join(paths().home, 'dpapi'))))) return 'unknown';
     return 'absent-here';
   }
+
+  if (unsaved) return hasLegacyRef(ref) ? hasSecret(name, ref, true) : 'no';
 
   const desc = describeCommand({ name, action: 'has', ref, legacy });
   try {
