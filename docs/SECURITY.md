@@ -850,9 +850,24 @@ Independently created homes use separate OS credential names, even when both
 configurations use a ref such as `mail.m_9f3a1c`. `secrets.namespace.json` holds
 that home's random identifier and the refs recorded before upgrading; it holds
 no values. Keep it, `secrets.index.json`, and `secrets.migrated/` with the home
-when moving or restoring a backup. Copying an entire home also copies its
-credential identity; start with an empty `--home` directory for an independent
-setup. Windows stores new blobs in a namespace subdirectory of the path above.
+when moving or restoring a backup. Windows stores new blobs in a namespace
+subdirectory of the path above.
+
+Copying an entire home also copies its credential identity. On the same
+computer, the copy and the original then share their credentials in the OS
+store, and changes go both ways. A key saved, replaced or forgotten through
+either home is saved, replaced or forgotten for both. The exception is a key
+carried over from before this identity existed: forgetting it in one home
+leaves the shared older entry, which the other home can still read until it
+saves or forgets that key itself. All this is true of the macOS Keychain,
+Windows DPAPI and Linux libsecret, because the entry's address is built from
+the identity in `secrets.namespace.json` and the ref: the Keychain or libsecret
+account `<identity>.<ref>`, or on Windows the file
+`%LOCALAPPDATA%\Zelos\secrets\<identity>\<ref>.dpapi`. Restoring a backup into
+a second home on the same computer shares credentials in the same way. A home
+on the encrypted-file fallback is different: the copy has its own `secrets.enc`
+and `.seed`, so after copying the two are independent. For a separate setup,
+start with a new, empty `--home` folder and add its accounts there.
 
 Older unscoped entries remain readable only by homes that already indexed
 them. The next explicit save writes the home's own entry. Reading an older key

@@ -16,9 +16,18 @@ a backup to an issue tracker or send it with a diagnostic report.
 
 Operating-system keychain entries and Windows DPAPI credentials are not exported.
 They may still work on the same computer, but you may need to reconnect accounts
-and your model on another computer. Copy local calendar files outside the Zelos
-folder separately. Logs, cache files, window geometry, open connections, and
-previous backup archives are not included. A backup contains saved settings;
+and your model on another computer. A backup carries the home's credential
+identity. So if you restore it into a second home on the same computer, the two
+homes share their credentials in the system store (Keychain, DPAPI or
+libsecret). Saving, replacing or forgetting a key in one changes it in the
+other. Encrypted-file credentials are the exception: each home keeps its own
+copy. Restoring replaces the home's credential identity with the backup's.
+Restoring a backup of this same home changes nothing. Restoring another home's
+backup over a setup that already had its own credentials in the system store
+leaves those credentials there but unused, so reconnect anything the backup did
+not cover. Copy local calendar files outside the Zelos folder separately.
+Logs, cache files, window geometry, open connections, and previous backup
+archives are not included. A backup contains saved settings;
 finish editing other forms before creating one. Draft text is flushed automatically.
 
 ## Restore

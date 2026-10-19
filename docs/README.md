@@ -133,7 +133,7 @@ still there for you to copy by hand.
 | Option | What it does |
 | --- | --- |
 | `--port 8080` | Listen on a different port. If it's busy, Zelos walks up until it finds one that's free. |
-| `--home ~/zelos-work` | Keep the data somewhere other than `~/.zelos`. Useful for a second, separate setup (work and personal, say). |
+| `--home ~/zelos-work` | Keep the data somewhere other than `~/.zelos`. Point it at a new, empty folder for a second, separate setup (work and personal, say). A copy of an existing folder is not separate: on the same computer it shares that setup's passwords and keys in the system keychain (unless the setup uses the encrypted-file fallback), as [SECURITY.md § 7](SECURITY.md#7-secrets) explains. |
 | `--no-open` | Don't open a browser; just print the link. |
 | `--sweep-now` | Run a sweep immediately instead of waiting for the schedule. |
 | `--version` | Print the version. |
@@ -435,7 +435,7 @@ and is the only place it is stated.
 | `window.json` | Desktop app only: window size and position. |
 | `secrets.enc`, `.seed` | Present when this home is on the encrypted-file backend — see below. `.seed` holds the key that decrypts `secrets.enc`, in the same folder. |
 | `secrets.backend.json` | Which secret store this home committed to, the first time it stored one. Zelos keeps using that store afterwards even if a keychain later appears, because moving would orphan the secrets already written. |
-| `secrets.namespace.json`, `secrets.index.json`, `secrets.migrated/` | OS credential identity, known names, and upgrade markers; never key values. Keep them with a backup or a moved home. A new empty `--home` gets an independent identity; copying the entire folder copies its existing identity. |
+| `secrets.namespace.json`, `secrets.index.json`, `secrets.migrated/` | OS credential identity, known names, and upgrade markers; never key values. Keep them with a backup or a moved home. A new empty `--home` gets an independent identity. A copied folder keeps the same identity, so on the same computer the copy and the original share the credentials in the OS store (macOS Keychain, Windows DPAPI or libsecret): a key saved, replaced or forgotten in one changes in both. Homes on the encrypted-file backend are the exception; each copy has its own `secrets.enc` and `.seed`. |
 | `.seed.unreadable-<ts>`, `secrets.enc.unreadable-<ts>` | Only after damage: a seed or store Zelos could not read is renamed aside as a matched pair sharing one timestamp, rather than overwritten. To recover, put the 64 hex characters back in `.seed`, rename the store back to `secrets.enc`, and the secrets read again. |
 
 **Your passwords and API keys are not in that folder** — **unless this home is
