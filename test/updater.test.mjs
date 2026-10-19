@@ -1550,15 +1550,24 @@ describe('what the tidying could not remove', () => {
     assert.ok(fs.existsSync(pending('staged')), 'still held');
     assert.equal(h.said('warn', LEFT), 1, 'said once, not on every tick');
     unlock();
-    tick(h);
+    // A pass that began before the unlock may still be running, and a tick
+    // then joins it; the next tick starts afresh, as it would in the app.
+    for (let i = 0; i < 50 && fs.existsSync(pending()); i++) {
+      tick(h);
+      for (let n = 0; n < 20; n++) await settle();
+    }
     await until(() => !fs.existsSync(pending()), 'the leftover to be removed on a tick');
     assert.equal(h.github.seen.length, 0, 'and nothing was checked: updates are off');
   });
 
   it('a clean folder is not touched by the ticks', async () => {
+    // Something for the launch's tidying to remove, so that waiting for the
+    // folder to go waits for that pass, not for a folder that was never there.
+    fs.mkdirSync(pending('1.7.0'), { recursive: true });
     const h = windowsUpdater(fixture());
     await h.updater.start();
     await until(() => !fs.existsSync(pending()), 'the launch tidy');
+    for (let n = 0; n < 20; n++) await settle();
     // Something tidying would remove, put there after the launch; only a
     // leftover the tidying itself failed on sends the ticks looking.
     fs.mkdirSync(pending(), { recursive: true });
