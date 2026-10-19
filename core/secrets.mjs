@@ -446,9 +446,22 @@ export function describeCommand({ name, action, ref, legacy = false }) {
   return null; // encrypted-file is pure JS
 }
 
-function dpapiFile(ref, legacy = false) {
-  const base = process.env.LOCALAPPDATA || path.join(paths().home, 'dpapi');
+function dpapiFile(ref, legacy = false, base = process.env.LOCALAPPDATA || path.join(paths().home, 'dpapi')) {
   return path.join(base, 'Zelos', 'secrets', ...(legacy ? [] : [namespaceRecord().id]), `${ref}.dpapi`);
+}
+
+/**
+ * Whether a missing DPAPI blob directory can be believed. dpapiFile() falls
+ * back to the Zelos home when %LOCALAPPDATA% is unset, and a variable that
+ * names a folder which does not exist is just as clearly not this account's
+ * real profile — in both cases Zelos is looking in the wrong place, and
+ * nothing it finds missing there says anything about the keys. A
+ * %LOCALAPPDATA% that is set and exists is this account's own store, so a
+ * home whose blobs are not in it was brought here from somewhere else.
+ */
+function dpapiAddressAuthoritative() {
+  const base = process.env.LOCALAPPDATA;
+  return Boolean(base) && fs.existsSync(base);
 }
 
 /* ------------------------------------------------------------- detection */
@@ -1093,6 +1106,18 @@ async function readSecret(ref) {
 }
 
 async function readExternalSecret(name, ref, legacy = false) {
+  // DPAPI's "not found" is a missing file, which Node can see without paying
+  // for a PowerShell start. The script makes the same check and exits
+  // NOT_FOUND_EXIT, so this changes how long the answer takes, not what it is.
+  if (name === 'windows-dpapi') {
+    try {
+      fs.statSync(dpapiFile(ref, legacy));
+    } catch (err) {
+      // Only "there is no such file" is the script's not-found. A file Node
+      // may not look at is PowerShell's to report, as it always was.
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+    }
+  }
   const desc = describeCommand({ name, action: 'get', ref, legacy });
   const { code, stdout, stderr } = await runWithRetry(desc.file, desc.args,
     { env: desc.env, timeoutMs: budgets.access, label: `${name} get ${ref}` });
@@ -1177,18 +1202,40 @@ async function removeSecret(ref) {
  * values themselves survived in the keychain, which is what made it so quiet:
  * mail kept syncing, while Ask started answering "no model is configured yet"
  * and Settings showed placeholders until every password was re-entered.
+ *
+ * DPAPI has a fourth, 'absent-here': the store answered, and this home's keys
+ * are not in it because they were saved on another computer, or by another
+ * user account on this one. See below.
  */
 async function hasSecret(name, ref, legacy = false) {
   if (name === 'windows-dpapi') {
     const blob = dpapiFile(ref, legacy);
     if (fs.existsSync(blob)) return 'yes';
-    if (!legacy && hasLegacyRef(ref)) return hasSecret(name, ref, true);
+    if (!legacy && hasLegacyRef(ref)) {
+      const old = await hasSecret(name, ref, true);
+      // The older store is shared by every home on this account, so it can
+      // exist while this home has never stored anything here. Its 'no' proves
+      // a deletion only when this home's own folder is here too; otherwise
+      // the rules below decide, as they would for a key with no older copy.
+      if (old !== 'no' || fs.existsSync(path.dirname(blob))) return old;
+    }
     // The blob lives under %LOCALAPPDATA%, and dpapiFile() falls back to the
     // Zelos home when that variable is missing — so a relaunch without it looks
     // in a directory Zelos has never written to, where every ref reads as
     // deleted. A missing directory is not an empty store; it is the wrong
     // address.
-    return fs.existsSync(path.dirname(blob)) ? 'no' : 'unknown';
+    if (fs.existsSync(path.dirname(blob))) return 'no';
+    if (!dpapiAddressAuthoritative()) return 'unknown';
+    // The right address, and this home has never stored anything there: the
+    // home was restored from another computer or user account, whose DPAPI keys
+    // cannot decrypt here even if the blobs had come along. That is not 'no'
+    // — pointing %LOCALAPPDATA% back at the right profile, or saving the key
+    // again, should find the ref still indexed — so listRefs() hides it
+    // without pruning it. One exception: blobs written on an earlier launch
+    // without %LOCALAPPDATA% sit in the home's own fallback folder, and those
+    // keys are this account's, so they stay 'unknown' rather than vanish.
+    if (fs.existsSync(path.dirname(dpapiFile(ref, legacy, path.join(paths().home, 'dpapi'))))) return 'unknown';
+    return 'absent-here';
   }
 
   const desc = describeCommand({ name, action: 'has', ref, legacy });
@@ -1227,6 +1274,7 @@ export async function listRefs() {
 
   const known = readIndex();
   const alive = [];
+  const removed = new Set();
   let answered = true;
   for (const ref of known) {
     /* Once one ref has gone unanswered the store is not answering, and asking
@@ -1242,17 +1290,20 @@ export async function listRefs() {
     // has said it is gone, and the caller's next getSecret() will find out for
     // real — whereas dropping it turns a five-second keyring stall into a UI
     // that says the account was never set up.
-    if (state !== 'no') alive.push(ref);
+    // 'absent-here' is a DPAPI home whose keys are on another computer: an
+    // answer, so the rest are still asked about, but not one the UI should
+    // show as saved, and not a deletion either.
+    if (state === 'yes' || state === 'unknown') alive.push(ref);
+    if (state === 'no') removed.add(ref);
     if (state === 'unknown') answered = false;
   }
   // Something deleted outside Zelos (Keychain Access, say) should not linger —
   // but only prune when every probe actually answered. Pruning on a partial
   // answer is what made a transient failure permanent: the index is the only
   // record that a keychain item is ours, and there is no way to rebuild it.
-  if (answered && alive.length !== known.length) {
+  if (answered && removed.size > 0) {
     // A credential may have been saved while the OS answered these probes.
     // Remove only the refs this pass actually proved absent.
-    const removed = new Set(known.filter((ref) => !alive.includes(ref)));
     writeIndex(readIndex().filter((ref) => !removed.has(ref)));
   }
   return alive;

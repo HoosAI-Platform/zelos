@@ -869,6 +869,17 @@ on the encrypted-file fallback is different: the copy has its own `secrets.enc`
 and `.seed`, so after copying the two are independent. For a separate setup,
 start with a new, empty `--home` folder and add its accounts there.
 
+A Windows home restored onto another computer or user account brings its
+credential names but not its keys: the encrypted blobs live under
+`%LOCALAPPDATA%`, outside the home and outside backups, and DPAPI ties each one
+to the account that saved it. If `%LOCALAPPDATA%` exists but has no folder for
+this home's identity, Zelos stops listing those credentials as saved, so
+Settings asks for them again. Their names stay in `secrets.index.json`, so saving a key again
+brings it back, as does pointing `%LOCALAPPDATA%` back at the profile that
+saved them. When `%LOCALAPPDATA%` is unset or names a folder that does not
+exist, Zelos is looking in the wrong place rather than at an empty store, so it
+keeps listing the credentials as saved.
+
 Older unscoped entries remain readable only by homes that already indexed
 them. The next explicit save writes the home's own entry. Reading an older key
 does not write anything back to the keychain, so it cannot undo an edit in
