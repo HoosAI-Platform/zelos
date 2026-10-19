@@ -621,7 +621,7 @@ export function finishedItems() {
 }
 
 export function openDrafts() {
-  return state.board.drafts.filter((d) => d.state === 'pending' || d.state === 'edited');
+  return state.board.drafts.filter((d) => (d.state === 'pending' || d.state === 'edited') && !discardedDrafts.has(d.id));
 }
 
 /**
@@ -734,6 +734,30 @@ export function dayIsLoaded(key) {
 
 /** What the Undo toast calls the thing it can undo. */
 const STATE_VERB = { done: 'Marked done', dismissed: 'Dismissed', snoozed: 'Snoozed' };
+
+/** Drafts discarded this session; see dropDraft. */
+const discardedDrafts = new Set();
+
+/**
+ * Take a discarded draft off the board now, and redraw. The discard handler
+ * used to edit state.board without bumping rev, so the refetch that followed
+ * compared against the already-edited board, saw no change, never bumped
+ * either — and the card stayed on the page, greyed out and still counted,
+ * until something else redrew the view (QA, 2026-10-10, TT-3463). The same
+ * shape as setItemState: change, rev, emit.
+ */
+export function dropDraft(id) {
+  // Remembered for the session, so a board fetch that started before the
+  // discard reached the server — the heartbeat, a sweep finishing — cannot
+  // bring the card back, editable, when it lands after this.
+  discardedDrafts.add(id);
+  state.board = {
+    ...state.board,
+    drafts: (state.board.drafts || []).filter((d) => d.id !== id),
+  };
+  state.rev += 1;
+  emit();
+}
 
 export async function setItemState(id, next, { until = undefined, silent = false } = {}) {
   const before = state.board.items;

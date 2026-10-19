@@ -7748,3 +7748,43 @@ test('a calendar Test names the calendars it will read, not "0 appointments" (TT
     assert.doesNotMatch(src, /result\.events \?\? 0/, file);
   }
 });
+
+test('a discarded draft leaves the page at once, and the count with it (TT-3463)', () => {
+  /* QA, 2026-10-10: after Discard the card stayed on the page, greyed out,
+     and "Replies it wrote for you" still counted it, until something else
+     redrew the view — the handler edited state.board without bumping rev,
+     so the refetch saw no change either. Booted for real; the first refetch
+     after the click returns the OLD list, as a heartbeat that started before
+     the discard landed would. */
+  runAppScenario({
+    beforeBoot: `
+      const pending = (id, subject) => ({ id, state: 'pending', to_email: 'sam@example.com', subject, body: subject + ' reply.', item_id: null });
+      let drafts = [pending('d1', 'The survey'), pending('d2', 'The retainage')];
+      let stale = null;
+      globalThis.edits = [];
+      api.state = async () => ({ items: [], drafts: stale ? (() => { const s = stale; stale = null; return s; })() : drafts, events: [], counts: {}, notes: [], runs: {}, now: '2026-08-12T09:00:00-04:00' });
+      api.updateDraft = async (id, patch) => {
+        if (patch.state === 'discarded') { stale = drafts; drafts = drafts.filter((d) => d.id !== id); }
+        else globalThis.edits.push({ id, ...patch });
+        return { ok: true };
+      };
+    `,
+    scenario: `
+      window.location.hash = '#/owed'; windowEvents.hashchange(); await settle();
+      const subjects = () => plainWalk(root).filter((n) => n.tag === 'h3' && (n.attributes.class || '').includes('draft-subject')).map((n) => textOf(n));
+      const sectionText = () => plainWalk(root).map((n) => n.textContent || '').join(' ');
+      assert.deepEqual(subjects(), ['The survey', 'The retainage']);
+      const card = plainWalk(root).find((n) => n.tag === 'h3' && textOf(n) === 'The survey');
+      let node = card; while (node && !findButton(node, 'Discard')) node = node.parentNode;
+      findButton(node, 'Discard').fire('click');
+      for (let i = 0; i < 4; i += 1) await settle();
+      assert.deepEqual(subjects(), ['The retainage'], 'the discarded card is still (or again) on the page');
+      // Once more, as another heartbeat would.
+      const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+      await store.refreshBoard(); await settle();
+      assert.deepEqual(subjects(), ['The retainage']);
+      assert.deepEqual(globalThis.edits.filter((e) => e.id === 'd1'), [], 'the discarded draft was written to again');
+      assert.equal(store.openDrafts().length, 1, 'the count still includes the discarded draft');
+    `,
+  });
+});
