@@ -629,7 +629,13 @@ function youPanel() {
   // Writing it back here would freeze the zone it was in the day it was typed.
   const tzInput = input({ value: identity.timezone || '', readonly: true });
 
-  return el('div', { class: 'panel panel-you' }, [
+  // `data-editing-region`: Save here sits in a plain div, so without the mark a
+  // focused Save counted as "not editing" and a redraw queued by a finished
+  // check flushed the moment Tab reached it — the panel rebuilt from the
+  // stored settings, the typed name gone, Enter saving nothing (QA,
+  // 2026-10-10, TT-3465). The same mark is on the AI, Schedule and Privacy
+  // panels; ui/lib/editing.js says why it is on these and not on every panel.
+  return el('div', { class: 'panel panel-you', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: 'Two facts about you. Neither leaves this computer except inside what Zelos sends to the AI you chose.' }),
     field('Your name', nameInput, {
       hint: 'Signs the replies Zelos writes. If you leave this blank, the replies Zelos writes for you will not be signed.',
@@ -1245,7 +1251,10 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
 
   drawForm();
 
-  return el('div', { class: 'panel panel-model' }, [
+  // An editing region, as on You (TT-3465): the guided card's key and the
+  // Advanced form's fields are saved by buttons in plain divs. Set here, not
+  // in renderSettings, so onboarding's copy of this panel is covered too.
+  return el('div', { class: 'panel panel-model', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: compact
       ? 'Zelos sends your mail summaries to the AI you pick here, and to nothing else.'
       : 'Pick the AI that reads your mail. Your mail summaries go to the AI you choose.' }),
@@ -3169,7 +3178,8 @@ function sweepPanel() {
   const toSelect = select(END_HOUR_CHOICES, { value: String(cfg.activeHours?.[1] ?? 23) });
   let auto = cfg.auto !== false;
 
-  return el('div', { class: 'panel' }, [
+  // An editing region, as on You (TT-3465): Save is in a plain div.
+  return el('div', { class: 'panel', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: 'When Zelos looks at your mail and calendar on its own. You can always press Check now as well.' }),
     checkbox('Check my mail automatically', { checked: auto, onChange: (v) => { auto = v; } }),
     el('div', { class: 'grid-2' }, [
@@ -3257,7 +3267,8 @@ function privacyPanel() {
   const charsInput = input({ type: 'number', value: String(cfg.bodyChars), min: String(charsMin), max: String(charsMax) });
   const maxInput = input({ type: 'number', value: String(cfg.maxItemsPerSweep), min: String(itemsMin), max: String(itemsMax) });
 
-  return el('div', { class: 'panel' }, [
+  // An editing region, as on You (TT-3465): Save is in a plain div.
+  return el('div', { class: 'panel', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: 'Zelos only talks to the AI service you chose. It sends nothing to us and nothing to anyone else.' }),
     checkbox('Let the AI read the full text of your emails (recommended — it does a better job)', {
       checked: sendBodies,

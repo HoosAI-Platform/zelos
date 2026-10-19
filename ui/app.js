@@ -29,6 +29,7 @@ import { createCommandMenu, commandShortcut } from './lib/commands.js';
 import { parseConnectionTarget } from './lib/source-status.js';
 import { updateBanner } from './lib/update-banner.js';
 import { updatesPanel } from './lib/updates.js';
+import { isEditing } from './lib/editing.js';
 
 import { renderNow } from './views/now.js';
 import { renderToday } from './views/today.js';
@@ -604,17 +605,20 @@ function closeSetupUpdates() {
 let renderQueued = false;
 
 function editingInMain() {
-  const active = document.activeElement;
-  if (!active || !main || !main.contains(active)) return false;
-  if (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT') return true;
-  // A button inside an open editor still counts. Tabbing from a text field to
-  // "Save account" lands focus on the button, and flushing in that moment
-  // rebuilds the view — the open form and everything typed into it gone
-  // before the button can be pressed, the result of "Test the connection"
-  // written into detached nodes. Focus anywhere else in the view — an item
-  // row's tick, a panel-level button — still flushes, because those hold no
-  // half-finished typing to protect.
-  return Boolean(active.closest('form, .account-form'));
+  // The rule itself lives in ui/lib/editing.js so the test suite can name the
+  // selector it checks. A button inside an open editor still counts: Tabbing
+  // from a text field to "Save account" lands focus on the button, and
+  // flushing in that moment rebuilds the view — the open form and everything
+  // typed into it gone before the button can be pressed, the result of "Test
+  // the connection" written into detached nodes. The same is true of Save on
+  // You, AI, Schedule and Privacy, which sit in plain panels rather than
+  // editors: a check finishing while a name was half-typed queued a redraw,
+  // Tab to Save flushed it, and the panel came back from the stored settings
+  // with the typing gone, so Enter saved nothing (QA, 2026-10-10, TT-3465).
+  // Those panels now carry `data-editing-region`. Focus anywhere else in the
+  // view — an item row's tick, a button on Your data — still flushes, because
+  // those hold no half-finished typing to protect.
+  return isEditing(document.activeElement, main);
 }
 
 /**

@@ -1211,9 +1211,16 @@ test('the deferral covers onboarding, and holds while focus is on a button in an
   assert.ok(editing, 'editingInMain is missing');
   // Focus INSIDE an open editor still counts as editing; focus anywhere else
   // in main — an item row's tick, a panel-level button — still flushes,
-  // because those hold no half-finished typing to protect.
-  assert.match(editing[0], /closest\('form, \.account-form'\)/,
-    'focus inside an open editor must still count as editing');
+  // because those hold no half-finished typing to protect. The rule moved to
+  // ui/lib/editing.js, and its selector grew `[data-editing-region]` for the
+  // Settings panels whose Save sits in a plain div (QA, 2026-10-10, TT-3465);
+  // what that does to Tab-to-Save is tested by driving the shell, below.
+  assert.match(editing[0], /isEditing\(document\.activeElement, main\)/,
+    'editingInMain must ask ui/lib/editing.js, the rule the shell tests drive');
+  const rule = fs.readFileSync(path.join(UI, 'lib', 'editing.js'), 'utf8');
+  assert.match(rule, /export const EDITING_SELECTOR = 'form, \.account-form, \[data-editing-region\]'/,
+    'focus inside an open editor, or a marked panel, must still count as editing');
+  assert.match(rule, /closest\(EDITING_SELECTOR\)/);
 });
 
 test('view navigation resets the scroll; same-view re-renders leave it alone', () => {
@@ -3502,10 +3509,22 @@ class PlainNode {
 
   scrollIntoView() {}
 
+  /** The browser's tag spelling, which ui/lib/editing.js reads to tell a text field from a button. */
+  get tagName() { return String(this.tag).toUpperCase(); }
+
+  /**
+   * Enough of Element.closest for the selectors the UI passes: a comma list
+   * of `.class`, `[attribute]` and bare tag names. ui/lib/editing.js asks
+   * for all three kinds at once (TT-3465).
+   */
   closest(selector) {
-    const cls = selector.replace(/^\./, '');
+    const tests = selector.split(',').map((part) => part.trim()).map((part) => {
+      if (part.startsWith('.')) return (n) => (n.attributes.class || '').split(/\s+/).includes(part.slice(1));
+      if (part.startsWith('[')) return (n) => part.slice(1, -1) in n.attributes;
+      return (n) => n.tag === part;
+    });
     for (let n = this; n; n = n.parentNode) {
-      if ((n.attributes.class || '').split(/\s+/).includes(cls)) return n;
+      if (n.attributes && tests.some((matches) => matches(n))) return n;
     }
     return null;
   }
@@ -3687,6 +3706,15 @@ function runAppScenario({ initiallyConfigured = true, storageUnavailable = false
       globalThis.localStorage = storage();
       globalThis.sessionStorage = storage();
       const windowEvents = {};
+      // The shell's document-level listeners — focusout, pointerdown/up, keydown
+      // — kept so a scenario can fire them the way a browser would. Arrays,
+      // because more than one module may listen for the same event.
+      const documentEvents = {};
+      const fireDocument = (name, event = {}) => {
+        for (const fn of documentEvents[name] || []) fn({ preventDefault() {}, ...event });
+      };
+      // focusout and pointerup re-check on a zero timeout; this lets those run.
+      const afterTimers = () => new Promise(resolve => setTimeout(resolve, 5));
       globalThis.window = {
         location: { href: ${JSON.stringify(href)}, host: '127.0.0.1', hash: '#/now' },
         history: { replaceState() {} }, addEventListener: (name, fn) => { windowEvents[name] = fn; }, scrollTo() {},
@@ -3701,7 +3729,8 @@ function runAppScenario({ initiallyConfigured = true, storageUnavailable = false
       };
       globalThis.document = {
         documentElement: { style: { setProperty() {} } }, body: new PlainNode('body'), activeElement: null,
-        visibilityState: 'visible', addEventListener() {}, removeEventListener() {},
+        visibilityState: 'visible', addEventListener: (name, fn) => { (documentEvents[name] ||= []).push(fn); },
+        removeEventListener() {},
         createElement: tag => new PlainNode(tag),
         createTextNode: text => { const n = new PlainNode('#text'); n.textContent = String(text); return n; },
         getElementById: id => id === 'app' ? root : null,
@@ -3775,6 +3804,178 @@ test('a failure toast interrupts, and its Dismiss brings forward what waited beh
     assert.match(textOf(toastNode()), /Saved/);
     assert.equal(toastNode().attributes.role, 'status', 'anything else waits its turn to be read');
     store.notify(null);
+  ` });
+});
+
+/**
+ * Tab to Save in Settings → You could wipe what was just typed (QA,
+ * 2026-10-10, TT-3465). A check finishes while a name is being typed; the
+ * redraw it causes is queued, because a text field has focus. Tab then moves
+ * focus to Save — a button in a plain div, which editingInMain() did not
+ * count as editing — so the queued redraw ran in that gap: the panel came
+ * back from the stored settings, the typing and the focus gone, Enter saved
+ * nothing, and the name stayed empty.
+ *
+ * Driven through the real shell, because the bug is the shell's timing, not
+ * the panel's markup: the board refresh goes through the store's own
+ * refreshBoard(), and the Tab is the focus move plus the document focusout
+ * a browser fires. Each panel case also checks the queued redraw is not lost
+ * — it runs once focus leaves the panel.
+ */
+const TAB_TO_SAVE_SETUP = `
+  const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+  const main = () => plainWalk(root).find(n => n.attributes.id === 'main');
+  // A check that found something: the board changes, so rev moves and the
+  // store asks the shell to redraw — a render caused by data, not by the user.
+  let checks = 0;
+  const checkFinishes = async () => {
+    checks += 1;
+    api.state = async () => ({ items: [{ id: 'found-' + checks, state: 'open', bucket: 'now', headline: 'Found by check ' + checks }], drafts: [], events: [], counts: {}, notes: [], runs: {}, now: '2026-08-12T09:00:00-04:00' });
+    const rev = store.state.rev;
+    await store.refreshBoard();
+    assert.ok(store.state.rev > rev, 'the check must move rev, or there is no redraw to queue');
+  };
+  // Tab: focus lands on the next control, and the browser fires focusout.
+  const tabTo = async (node) => { node.focus(); fireDocument('focusout'); await afterTimers(); };
+  const openSettings = async (sub) => {
+    window.location.hash = '#/settings/' + sub;
+    windowEvents.hashchange();
+    await settle();
+  };
+`;
+
+test('Tab to Save on You keeps the typed name through a check that finished mid-typing, and Save stores it (TT-3465)', () => {
+  runAppScenario({ scenario: `
+    ${TAB_TO_SAVE_SETUP}
+    await openSettings('you');
+    // The whole Settings view, tabs and all: a redraw replaces this node.
+    const view = main().firstChild;
+    const name = plainWalk(root).find(n => n.tag === 'input' && n.getAttribute('placeholder') === 'Nemo Hale');
+    assert.ok(name, 'the You panel has a name field');
+    name.focus();
+    name.value = 'Ada Lovelace';
+    name.fire('input');
+
+    await checkFinishes();
+    assert.equal(main().firstChild, view, 'a redraw while a field has focus must queue, not run');
+
+    const save = findButton(view, 'Save');
+    await tabTo(save);
+    assert.equal(main().firstChild, view, 'Tab to Save must not flush the queued redraw: the panel would be rebuilt from the stored settings');
+    assert.ok(plainWalk(root).includes(name), 'the name field must still be the one on screen');
+    assert.equal(name.value, 'Ada Lovelace', 'the typed name must survive Tab to Save');
+    assert.equal(document.activeElement, save, 'focus must still be on Save, so Enter presses it');
+
+    save.fire('click');
+    await settle();
+    assert.equal(config.identity.name, 'Ada Lovelace', 'Save must send the name that was typed');
+
+    // The queued redraw is held, not dropped: focus leaving the panel runs it.
+    document.activeElement = document.body;
+    fireDocument('focusout');
+    await afterTimers();
+    assert.notEqual(main().firstChild, view, 'the queued redraw must run once focus leaves the panel');
+  ` });
+});
+
+/**
+ * The same Tab-to-Save, on the other three panels whose Save sits in a plain
+ * div: AI (the Advanced form's model id), Schedule (an hour select) and
+ * Privacy (a number field under Advanced). Each case finds its control, the
+ * value to type, and what Save must then have sent, if anything.
+ */
+const TAB_TO_SAVE_PANELS = [
+  {
+    sub: 'model',
+    find: `n => n.tag === 'input' && n.value === 'local-test'`,
+    typed: 'local-better',
+  },
+  {
+    sub: 'sweep',
+    find: `n => n.tag === 'select' && n.value === '6'`,
+    typed: '8',
+    event: 'change',
+    sent: `config.sweep.activeHours[0] === 8`,
+  },
+  {
+    sub: 'privacy',
+    // In the Advanced drawer, closed by default: a real Tab could not reach
+    // it until the drawer opens, but focusing it directly proves the same.
+    find: `n => n.tag === 'input' && n.getAttribute('type') === 'number' && n.value === '4000'`,
+    typed: '6000',
+    sent: `config.privacy.bodyChars === 6000`,
+  },
+];
+
+for (const { sub, find, typed, event = 'input', sent } of TAB_TO_SAVE_PANELS) {
+  test(`Tab to Save on Settings → ${sub} keeps what was typed through a check that finished mid-typing (TT-3465)`, () => {
+    runAppScenario({ scenario: `
+      ${TAB_TO_SAVE_SETUP}
+      await openSettings(${JSON.stringify(sub)});
+      const view = main().firstChild;
+      const control = plainWalk(view).find(${find});
+      assert.ok(control, 'the panel has the control under test');
+      control.focus();
+      control.value = ${JSON.stringify(typed)};
+      control.fire(${JSON.stringify(event)});
+
+      await checkFinishes();
+      assert.equal(main().firstChild, view, 'a redraw while a field has focus must queue, not run');
+
+      // The nearest ancestor with a role is the tabpanel (the plain DOM's
+      // closest() matches attribute names, not values).
+      const save = plainWalk(control.closest('[role]')).filter(n => n.tag === 'button' && textOf(n) === 'Save').pop();
+      assert.ok(save, 'the panel has a Save button');
+      await tabTo(save);
+      assert.equal(main().firstChild, view, 'Tab to Save must not flush the queued redraw');
+      assert.ok(plainWalk(root).includes(control), 'the control must still be the one on screen');
+      assert.equal(control.value, ${JSON.stringify(typed)}, 'what was typed must survive Tab to Save');
+      ${sent ? `save.fire('click');
+      await settle();
+      assert.ok(${sent}, 'Save must send what was typed');` : ''}
+    ` });
+  });
+}
+
+test('the editing-region mark is on You, AI, Schedule and Privacy, and on no other Settings panel (TT-3465)', () => {
+  // Focus stays on a clicked button, so a mark on a panel with nothing typed
+  // into it would hold that panel's redraws back for as long as focus sat on
+  // the button just pressed. Read off each rendered tabpanel, not the source.
+  runAppScenario({ beforeBoot: `
+    api.data = async () => ({ dbBytes: 0, walBytes: 0, messageCount: 0, eventCount: 0, itemCount: 0, accounts: [] });
+  `, scenario: `
+    ${TAB_TO_SAVE_SETUP}
+    const marked = ['you', 'model', 'sweep', 'privacy'];
+    await openSettings('you');
+    const all = plainWalk(main()).filter(n => n.getAttribute('role') === 'tab')
+      .map(n => n.getAttribute('id').replace(/^settings-tab-/, ''));
+    // Pinned, so a new panel has to be placed on one side of the line or the other.
+    assert.deepEqual(all, ['you', 'model', 'mail', 'calendars', 'sweep', 'privacy', 'sources', 'ai', 'data', 'about', 'appearance']);
+    for (const sub of all) {
+      await openSettings(sub);
+      const tabpanel = plainWalk(main()).find(n => n.getAttribute('role') === 'tabpanel');
+      assert.ok(tabpanel, sub + ' renders a tabpanel');
+      assert.equal('data-editing-region' in tabpanel.attributes, marked.includes(sub),
+        sub + (marked.includes(sub) ? ' must' : ' must not') + ' be marked as an editing region');
+    }
+  ` });
+});
+
+test('a panel with nothing to type into still runs a queued redraw when focus moves to its button (TT-3465)', () => {
+  // Your data carries no mark (see above), so focus on its button is not
+  // editing. The read-only folder field still counts as a field, so it queues.
+  runAppScenario({ beforeBoot: `
+    api.data = async () => ({ dbBytes: 0, walBytes: 0, messageCount: 0, eventCount: 0, itemCount: 0, accounts: [] });
+  `, scenario: `
+    ${TAB_TO_SAVE_SETUP}
+    await openSettings('data');
+    const view = main().firstChild;
+    const folder = plainWalk(view).find(n => n.tag === 'input');
+    folder.focus();
+    await checkFinishes();
+    assert.equal(main().firstChild, view, 'a redraw while a field has focus must queue, not run');
+    await tabTo(findButton(view, 'Copy the folder path'));
+    assert.notEqual(main().firstChild, view, 'focus on a button in Your data must let the queued redraw run');
   ` });
 });
 
