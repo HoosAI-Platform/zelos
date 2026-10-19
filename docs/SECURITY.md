@@ -448,12 +448,26 @@ true.
    Before anything large is downloaded, the signature must verify against one
    of them, the manifest must name the release's own version, and it must list
    this computer's file at the size GitHub reports. The file is then streamed
-   to a folder in the app's own settings directory (not the data folder) and
-   must hash to the signed SHA-256, or it is deleted. The manifest and its
-   signature are kept beside the download, and at the next launch the whole
-   check runs again — signature, version newer than the running app, size and
-   SHA-256 — before the update is offered without downloading it a second
-   time; anything that fails is deleted. Public keys that cannot
+   into a folder of its own, `pending-update/<version>/` in the app's own
+   settings directory (not the data folder), created only after the manifest
+   naming that version has verified, and must hash to the signed SHA-256, or
+   the folder is deleted. The manifest and its signature are kept beside the
+   download — the manifest written last, so a folder without one is a download
+   that never finished — and at the next launch the whole check runs again
+   for each plain version folder, highest first: signature, a manifest naming
+   the folder's own version, a version newer than the running app, size and
+   SHA-256 (and Authenticode, when configured). The first that passes is
+   offered without downloading it a second time; one that fails is deleted,
+   and anything in the folder that is not a plain version folder — a link, a
+   stray file, the files an earlier version of Zelos kept at the top — is
+   removed without being followed. A newer release found while an update is
+   ready downloads into its own folder beside it: the ready update stays
+   offered, and is what **Restart to update** installs, until the newer one
+   has passed every check; one that fails is deleted and the ready one is
+   untouched. A release pulled back to an older version drops the ready
+   update at once, before anything else is verified. While a restart is
+   being prepared and carried out, no check runs and nothing in the folder
+   changes. Public keys that cannot
    mean anything — small-order points, against which a signature can be forged
    without any private key — are refused as if absent. Someone able to change
    the GitHub release, but without the private key, cannot get an update

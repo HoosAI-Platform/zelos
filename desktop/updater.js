@@ -40,6 +40,12 @@
  * shell's normal shutdown (drafts saved, sweep settled, database closed, home
  * lock released) before the installer or the swap takes over.
  *
+ * Each version waits in a folder of its own, `pending-update/<version>/`, so a
+ * newer release can be downloaded beside one that is already ready without
+ * touching it: the ready update stays offered, and installable, until the newer
+ * one has verified, and a newer one that fails is simply deleted. The settings
+ * screen, the banner and the menus always describe the ready update itself.
+ *
  * A build with no update key never tries; the manual check in Settings remains
  * the way to update it, and the panel says why.
  *
@@ -92,6 +98,8 @@ export const MAC_NEW_SUFFIX = '.zelos-new';
 
 /** Beside a download: the release notes it came with, so a remembered update can still show them. */
 const NOTES_NAME = 'release-notes.json';
+/** In PENDING_DIR itself, not a version's folder: the macOS swap script, written at the hand-off. */
+const SWAP_NAME = 'swap.sh';
 
 /** The signed manifest and its signature, as every release names them. */
 export const MANIFEST_NAME = 'release.json';
@@ -439,7 +447,7 @@ export function sha256File(file) {
  * @param {string} deps.arch               process.arch
  * @param {boolean} deps.isPackaged        app.isPackaged
  * @param {string} deps.settingsFile       <home>/updates.json
- * @param {string} deps.downloadDir        <userData>/pending-update — emptied freely
+ * @param {string} deps.downloadDir        <userData>/pending-update — this module's alone; one folder per version inside
  * @param {string[]} deps.publicKeys       the Zelos update keys (base64url Ed25519)
  * @param {string} [deps.windowsPublisher] when set, Authenticode must name this publisher too
  * @param {object} [deps.mac]              { bundlePath, canReplace, extractZip, readBundleInfo, copyApp, otherInstances, launchSwap }
@@ -457,8 +465,9 @@ export function createUpdater({
   mac = {}, windows = {}, pid = process.pid, fetchImpl = globalThis.fetch, now = Date.now,
   setTimer = setTimeout, clearTimer = clearTimeout, logger = null, onChange = () => {},
 }) {
-  // The download folder is emptied with a recursive remove before every
-  // download, so it must be a folder this module owns and nothing else.
+  // Everything in the download folder that is not an update being kept is
+  // removed with a recursive remove, so it must be a folder this module owns
+  // and nothing else.
   if ((platform === 'win32' || platform === 'darwin') && path.basename(String(downloadDir ?? '')) !== PENDING_DIR) {
     throw new Error(`The update download folder must be a dedicated "${PENDING_DIR}" folder.`);
   }
@@ -475,7 +484,14 @@ export function createUpdater({
   let progress = null;
   let checkedAt = null;
   let nextAttemptAt = null;
-  let ready = null;              // { version, file, sha256, staged? }
+  // The verified update a Restart would install, in its own version folder:
+  // { version, dir, file, sha256, releaseUrl, notes, staged? }. While there is
+  // one, the screen describes it and nothing else (QA, 2026-10-10, TT-3485).
+  let ready = null;
+  // The download being written, in its own folder beside the ready one:
+  // { version, dir, done }. `done` settles once the download has cleaned up
+  // after itself, so a later download of the same version waits for that.
+  let fetching = null;
   let controller = null;
   let tick = null;
   let first = null;
@@ -496,23 +512,36 @@ export function createUpdater({
 
   const log = (level, message, data) => { try { logger?.[level]?.(`updater: ${message}`, data); } catch { /* logging never breaks updating */ } };
 
-  const snapshot = () => ({
-    supported: supported === true,
-    reason,
-    auto: settings.auto,
-    status,
-    currentVersion,
-    latestVersion,
-    releaseUrl,
-    notes,
-    progress,
-    error,
-    installProblem,
-    // The version the "ready to install" banner offers, or '' for none: a
-    // verified update that was neither skipped nor put off until next launch.
-    banner: status === 'ready' && latestVersion && latestVersion !== settings.skipped && latestVersion !== snoozed ? latestVersion : '',
-    checkedAt: checkedAt === null ? null : new Date(checkedAt).toISOString(),
-  });
+  /**
+   * The release the screen talks about. While an update is ready (or being
+   * installed) that is the ready update, taken from the update itself — never
+   * the last check's answer, which may name a newer release that is still
+   * downloading or that failed to verify. Settings, the banner, Skip this
+   * version and the menus therefore can never name one version while Restart
+   * installs another (QA, 2026-10-10, TT-3485).
+   */
+  const shown = () => (ready && (status === 'ready' || status === 'installing')
+    ? { latestVersion: ready.version, releaseUrl: ready.releaseUrl, notes: ready.notes }
+    : { latestVersion, releaseUrl, notes });
+
+  const snapshot = () => {
+    const release = shown();
+    return {
+      supported: supported === true,
+      reason,
+      auto: settings.auto,
+      status,
+      currentVersion,
+      ...release,
+      progress,
+      error,
+      installProblem,
+      // The version the "ready to install" banner offers, or '' for none: a
+      // verified update that was neither skipped nor put off until next launch.
+      banner: status === 'ready' && release.latestVersion && release.latestVersion !== settings.skipped && release.latestVersion !== snoozed ? release.latestVersion : '',
+      checkedAt: checkedAt === null ? null : new Date(checkedAt).toISOString(),
+    };
+  };
 
   const changed = () => {
     try { onChange(snapshot()); } catch (err) { log('warn', 'a state listener failed', { error: err.message }); }
@@ -544,12 +573,53 @@ export function createUpdater({
     }
   }
 
-  /** Empty the download folder; a file the system still holds open is left for next time. */
-  function removeDownloads() {
+  /**
+   * Remove everything in the download folder except the ready update's folder
+   * and the one being downloaded — the old flat layout's files, versions that
+   * were replaced or failed, anything that is not a plain version folder. An
+   * entry is removed, never followed: a symlink is unlinked, not entered. A
+   * file the system still holds open is left for next time.
+   *
+   * Inert once stop() has run or a restart is committed: from then on the
+   * folder belongs to the installer or the swap. The swap script itself is
+   * written only after stop(), so one found while running is left alone; one
+   * found at launch belongs to a restart that has finished (`launch`). Only
+   * the download folder's own entries are touched — the attempt and result
+   * files beside it are not (QA, 2026-10-10, TT-3485).
+   */
+  function tidy({ launch = false, hold = [] } = {}) {
+    if (stopped || committed || !downloadDir) return;
+    const keep = new Set(hold);
+    for (const dir of [ready?.dir, fetching?.dir]) if (dir) keep.add(path.basename(dir));
+    if (!launch) keep.add(SWAP_NAME);
+    let entries;
     try {
-      fs.rmSync(downloadDir, { recursive: true, force: true });
+      if (!fs.lstatSync(downloadDir).isDirectory()) {
+        fs.rmSync(downloadDir, { force: true });
+        return;
+      }
+      entries = fs.readdirSync(downloadDir);
     } catch (err) {
-      log('warn', 'could not remove an old update download', { error: err.message });
+      if (err?.code !== 'ENOENT') log('warn', 'could not tidy the update folder', { error: err.message });
+      return;
+    }
+    let failed = null;
+    for (const entry of entries) {
+      if (keep.has(entry)) continue;
+      try { fs.rmSync(path.join(downloadDir, entry), { recursive: true, force: true }); } catch (err) { failed ??= err; }
+    }
+    if (failed) log('warn', 'could not remove an old update download', { error: failed.message });
+    if (!keep.size || (keep.size === 1 && keep.has(SWAP_NAME))) {
+      try { fs.rmdirSync(downloadDir); } catch { /* not empty: what is left goes next time */ }
+    }
+  }
+
+  /** One version's folder, and nothing outside it; ready.dir is never passed here. */
+  function removeFolder(dir) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (err) {
+      log('warn', 'could not remove an update download', { error: err.message });
     }
   }
 
@@ -589,7 +659,8 @@ export function createUpdater({
     const attempted = attemptFile ? read(attemptFile) : null;
     const swap = resultFile ? parseSwapResult(read(resultFile)) : null;
     if (attempted === null && !swap) return;
-    removeDownloads();
+    // Whatever the restart was installing is spent either way.
+    tidy({ launch: true });
     const version = /^\d+\.\d+\.\d+$/.test(String(attempted ?? '').trim()) ? attempted.trim() : swap?.version;
     if (!version) return;
     if (version === currentVersion) {
@@ -642,8 +713,17 @@ export function createUpdater({
    * Verify the release's signed manifest, then download this computer's file
    * and hold it to the signed size and SHA-256. Nothing large is fetched until
    * the signature has checked out.
+   *
+   * The file goes into a folder named after the version the signed manifest
+   * names, created only once that manifest has verified, and this download is
+   * the only thing that removes it: on failure, on being stopped, and before
+   * it starts (what a crash left of the same version). The ready update's
+   * folder is never written or removed from here. `beside` is a newer release
+   * fetched while an update is ready: the status stays 'ready' and the ready
+   * update stays installable until this one has verified (QA, 2026-10-10,
+   * TT-3485).
    */
-  async function download(version, raw, own) {
+  async function download(version, raw, own, { beside = false, releaseUrl: url = '', notes: text = '' } = {}) {
     const name = updateAssetName(version, platform, arch);
     const asset = releaseAsset(raw, version, name);
     const manifestFile = releaseAsset(raw, version, MANIFEST_NAME);
@@ -658,47 +738,69 @@ export function createUpdater({
     if (!expected || expected.size !== asset.size) throw new Error('The signed release details do not list this update.');
     if (stopped || controller !== own) throw new Error('The update check was stopped.');
 
-    // Only one update is ever kept: whatever an earlier run left is removed
-    // before this one is written, so the folder cannot fill with old versions.
-    removeDownloads();
-    const file = path.join(downloadDir, name);
-    set({ status: 'downloading', progress: 0 });
-    const digest = await downloadToFile(asset.url, file, {
-      fetchImpl, signal: own.signal, expectedSize: expected.size, setTimer, clearTimer,
-      onProgress: (fraction) => {
-        const rounded = Math.floor(fraction * 100) / 100;
-        if (rounded !== progress && controller === own) set({ progress: rounded });
-      },
-    });
+    // A download that was stopped may still be unwinding — an Authenticode
+    // check does not stop mid-way — and it removes its own folder when it
+    // does. Starting on the same folder before then would have that clean-up
+    // delete this download's file.
+    while (fetching) await fetching.done;
+    if (stopped || controller !== own) throw new Error('The update check was stopped.');
+    const dir = path.join(downloadDir, version);
+    if (!VERSION.test(version) || ready?.dir === dir) throw new Error('The update could not be downloaded.');
+    let settle;
+    const mine = { version, dir, done: new Promise((resolve) => { settle = resolve; }) };
+    fetching = mine;
+    const file = path.join(dir, name);
     try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      if (!beside) set({ status: 'downloading', progress: 0 });
+      const digest = await downloadToFile(asset.url, file, {
+        fetchImpl, signal: own.signal, expectedSize: expected.size, setTimer, clearTimer,
+        onProgress: (fraction) => {
+          const rounded = Math.floor(fraction * 100) / 100;
+          if (!beside && rounded !== progress && controller === own) set({ progress: rounded });
+        },
+      });
       if (digest !== expected.sha256) throw new Error('The downloaded update does not match the signed release.');
       if (platform === 'win32' && windowsPublisher) await verifyAuthenticode(file);
-      // Turning updates off, or the shell stopping, while the file was being
-      // checked: this download is no longer wanted.
-      if (stopped || controller !== own) throw new Error('The update download was stopped.');
+      // Turning updates off, the shell stopping, or a Restart to update
+      // while the file was being checked: this download is no longer wanted.
+      if (stopped || committed || controller !== own) throw new Error('The update download was stopped.');
+      // The signed manifest and its signature are kept beside the download,
+      // so the next launch can verify it again and offer it at once rather
+      // than fetching the whole file a second time. The manifest is written
+      // last, under a temporary name and then renamed, so a folder holding a
+      // release.json is one whose every other file is already in place; one
+      // without is a download that never finished, and the next launch
+      // deletes it.
+      try {
+        fs.writeFileSync(path.join(dir, NOTES_NAME), JSON.stringify({ notes: typeof raw?.body === 'string' ? raw.body.slice(0, 6_000) : '' }));
+        fs.writeFileSync(path.join(dir, SIGNATURE_NAME), signatureBytes);
+        const temp = path.join(dir, `${MANIFEST_NAME}.partial`);
+        fs.writeFileSync(temp, manifestBytes);
+        fs.renameSync(temp, path.join(dir, MANIFEST_NAME));
+      } catch (err) {
+        log('warn', 'could not keep the update for the next launch', { error: err.message });
+      }
     } catch (err) {
-      removeDownloads();
+      removeFolder(dir);
       throw err;
+    } finally {
+      if (fetching === mine) fetching = null;
+      settle();
     }
-    // The signed manifest and its signature are kept beside the download, so
-    // the next launch can verify it again and offer it at once rather than
-    // fetching the whole file a second time.
-    try {
-      fs.writeFileSync(path.join(downloadDir, MANIFEST_NAME), manifestBytes);
-      fs.writeFileSync(path.join(downloadDir, SIGNATURE_NAME), signatureBytes);
-      fs.writeFileSync(path.join(downloadDir, NOTES_NAME), JSON.stringify({ notes: typeof raw?.body === 'string' ? raw.body.slice(0, 6_000) : '' }));
-    } catch (err) {
-      log('warn', 'could not keep the update for the next launch', { error: err.message });
-    }
-    ready = { version, file, sha256: expected.sha256 };
+    const replaced = ready?.version ?? '';
+    ready = { version, dir, file, sha256: expected.sha256, releaseUrl: url, notes: text };
     controller = null;
-    log('info', 'update downloaded and verified', { version });
+    // The update this one replaces, and anything else left over, goes now.
+    tidy();
+    log('info', 'update downloaded and verified', replaced ? { version, replaced } : { version });
     set({ status: 'ready', error: '', progress: null });
   }
 
   /** macOS: unpack the verified ZIP and make sure it is this app, at the new version. */
   async function stageMacApp() {
-    const staged = path.join(downloadDir, 'staged');
+    // Inside the ready update's own folder, which nothing else writes or removes.
+    const staged = path.join(ready.dir, 'staged');
     fs.rmSync(staged, { recursive: true, force: true });
     await mac.extractZip(ready.file, staged);
     const apps = fs.readdirSync(staged).filter((entry) => entry.endsWith('.app'));
@@ -727,41 +829,100 @@ export function createUpdater({
   }
 
   /**
+   * One version folder from an earlier session, trusted only as far as it was
+   * the first time: the kept manifest must verify against the update key and
+   * name the folder's own version — so a folder renamed to a higher version
+   * is refused — and list this computer's file at the size and SHA-256 the
+   * kept file really has, with Authenticode too when a publisher is
+   * configured. Every file is a plain file in the folder, never a link
+   * followed elsewhere. A definite refusal is marked `refused`; anything else
+   * (a file Windows still holds open, a verifier that did not answer) is not,
+   * and that folder is left alone this launch rather than deleted.
+   */
+  async function verifyKept(version, dir) {
+    const refuse = (why) => Object.assign(new Error(why), { refused: true });
+    const plainFile = (name) => {
+      const file = path.join(dir, name);
+      let stat;
+      try {
+        stat = fs.lstatSync(file);
+      } catch (err) {
+        if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') throw refuse(`${name} is missing`);
+        throw err;
+      }
+      if (!stat.isFile()) throw refuse(`${name} is not a plain file`);
+      return { file, size: stat.size };
+    };
+    const kept = plainFile(MANIFEST_NAME);
+    if (kept.size > MAX_MANIFEST_BYTES) throw refuse('the kept manifest is too large');
+    const keptSignature = plainFile(SIGNATURE_NAME);
+    if (keptSignature.size > MAX_SIGNATURE_BYTES) throw refuse('the kept signature is too large');
+    const bytes = fs.readFileSync(kept.file);
+    const signature = fs.readFileSync(keptSignature.file, 'latin1');
+    let manifest;
+    try { manifest = verifyReleaseManifest(bytes, signature, publicKeys, { version }); } catch (err) { throw refuse(err.message); }
+    const name = updateAssetName(version, platform, arch);
+    const expected = manifestAsset(manifest, name);
+    if (!expected) throw refuse('the kept manifest does not list this update');
+    const { file, size } = plainFile(name);
+    if (size !== expected.size || await sha256File(file) !== expected.sha256) throw refuse('the kept update changed');
+    if (platform === 'win32' && windowsPublisher) {
+      // A verifier that failed to run is no verdict; a signature it read and
+      // did not accept is.
+      const verdict = await windows.verifySignature(file);
+      if (!signatureMatches(verdict, windowsPublisher)) throw refuse('the kept update is not signed by the Zelos publisher');
+    }
+    let notesKept = '';
+    try {
+      const parsed = JSON.parse(fs.readFileSync(plainFile(NOTES_NAME).file, 'utf8'));
+      notesKept = typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 6_000) : '';
+    } catch { notesKept = ''; }
+    return { version, dir, file, sha256: expected.sha256, releaseUrl: `${REPOSITORY}/releases/tag/v${version}`, notes: notesKept };
+  }
+
+  /**
    * An update downloaded in an earlier session, offered again at launch
-   * without a network request. Trusted only as far as it was the first time:
-   * the kept manifest must verify against the update key, name a version newer
-   * than this one, and list this computer's file at the size and SHA-256 the
-   * kept file really has. Anything else is deleted, and the next check
-   * downloads afresh.
+   * without a network request. Only plain folders named as a version newer
+   * than this app are considered; they are verified highest first and the
+   * first that verifies is ready — after a crash mid-replacement that is the
+   * newer one when it finished, the older one when it did not. A folder that
+   * is definitely refused is deleted; one that could not be checked is held
+   * for this launch. Resolves to the names held, which the launch tidy keeps
+   * (QA, 2026-10-10, TT-3485).
    */
   async function restoreReady() {
-    const manifestPath = path.join(downloadDir, MANIFEST_NAME);
-    if (!fs.existsSync(manifestPath)) return;
+    const held = [];
+    let entries;
     try {
-      const bytes = fs.readFileSync(manifestPath);
-      const signature = fs.readFileSync(path.join(downloadDir, SIGNATURE_NAME), 'latin1');
-      let version = '';
-      try { version = JSON.parse(bytes.toString('utf8'))?.version; } catch { version = ''; }
-      if (compareVersions(version, currentVersion) <= 0) throw new Error('not newer');
-      const manifest = verifyReleaseManifest(bytes, signature, publicKeys, { version });
-      const name = updateAssetName(version, platform, arch);
-      const expected = manifestAsset(manifest, name);
-      const file = path.join(downloadDir, name);
-      if (!expected || fs.statSync(file).size !== expected.size || await sha256File(file) !== expected.sha256) throw new Error('changed');
-      if (platform === 'win32' && windowsPublisher) await verifyAuthenticode(file);
-      let kept = {};
-      try { kept = JSON.parse(fs.readFileSync(path.join(downloadDir, NOTES_NAME), 'utf8')); } catch { kept = {}; }
-      ready = { version, file, sha256: expected.sha256 };
-      set({
-        status: 'ready', error: '', progress: null, latestVersion: version,
-        releaseUrl: `${REPOSITORY}/releases/tag/v${version}`,
-        notes: typeof kept?.notes === 'string' ? kept.notes.slice(0, 6_000) : '',
-      });
-      log('info', 'an update downloaded earlier is ready', { version });
+      if (!fs.lstatSync(downloadDir).isDirectory()) return held;
+      entries = fs.readdirSync(downloadDir, { withFileTypes: true });
     } catch {
-      ready = null;
-      removeDownloads();
+      return held;
     }
+    const newer = (name) => { try { return compareVersions(name, currentVersion) > 0; } catch { return false; } };
+    const versions = entries
+      .filter((entry) => entry.isDirectory() && VERSION.test(entry.name) && newer(entry.name))
+      .map((entry) => entry.name)
+      .sort((a, b) => compareVersions(b, a));
+    for (const version of versions) {
+      const dir = path.join(downloadDir, version);
+      try {
+        ready = await verifyKept(version, dir);
+      } catch (err) {
+        if (err?.refused) {
+          log('info', 'a kept update did not verify and was removed', { version, error: err.message });
+          removeFolder(dir);
+        } else {
+          log('warn', 'a kept update could not be checked; it is left for the next launch', { version, error: err?.message });
+          held.push(version);
+        }
+        continue;
+      }
+      set({ status: 'ready', error: '', progress: null, latestVersion: version, releaseUrl: ready.releaseUrl, notes: ready.notes });
+      log('info', 'an update downloaded earlier is ready', { version });
+      return held;
+    }
+    return held;
   }
 
   /* ----------------------------- checks ---------------------------- */
@@ -826,9 +987,32 @@ export function createUpdater({
       set(release);
       return snapshot();
     }
+    const isNewer = kept && info.updateAvailable && compareVersions(info.latestVersion, kept.version) > 0;
+    if (isNewer && fetchIt) {
+      // A newer release while one is ready: it downloads into its own folder
+      // beside the ready one, quietly. Until it has verified, the ready update
+      // is what the screen describes and what Restart installs; if it fails,
+      // only its own folder goes (QA, 2026-10-10, TT-3485).
+      set(release);
+      download(info.latestVersion, raw, own, { beside: true, releaseUrl: info.releaseUrl, notes: info.notes }).catch((err) => {
+        if (controller === own) {
+          controller = null;
+          nextAttemptAt = now() + RETRY_INTERVAL_MS;
+          log('warn', 'a newer update could not be downloaded; the ready one is kept', { version: info.latestVersion, error: err?.message });
+        }
+        tidy();
+      });
+      return snapshot();
+    }
     if (kept) {
+      // Nothing newer than this app any more, or the newest release is older
+      // than the ready one — the publisher pulled it. Dropped before anything
+      // newer has been verified, on purpose: a withdrawn release is not
+      // installed on the strength of having been downloaded before it was
+      // withdrawn. Security over availability. (A newer release found by a
+      // check that does not download is offered in its place, as before.)
       ready = null;
-      removeDownloads();
+      tidy();
     }
     if (!info.updateAvailable) {
       controller = null;
@@ -841,7 +1025,10 @@ export function createUpdater({
       return snapshot();
     }
     set({ status: 'checking', ...release });
-    download(info.latestVersion, raw, own).catch((err) => { if (controller === own) fail(err); });
+    download(info.latestVersion, raw, own, { releaseUrl: info.releaseUrl, notes: info.notes }).catch((err) => {
+      if (controller === own) fail(err);
+      tidy();
+    });
     return snapshot();
   }
 
@@ -878,9 +1065,12 @@ export function createUpdater({
         set({ error: err.message });
         return false;
       }
+      // Only the update that failed is removed; a newer one still being
+      // fetched beside it is that download's to keep or remove.
       if (ready === preparing) ready = null;
-      removeDownloads();
+      removeFolder(preparing.dir);
       fail(err);
+      tidy();
       return false;
     }
     if (ready === preparing) set({ error: '' });
@@ -902,7 +1092,10 @@ export function createUpdater({
       }
       readLastAttempt();
       removeMacCopy();
-      await restoreReady();
+      // Then everything else in the folder goes: versions that did not win,
+      // what the old one-update-at-a-time layout left at the top, anything
+      // that is not a plain version folder.
+      tidy({ launch: true, hold: await restoreReady() });
       nextAttemptAt = now() + FIRST_CHECK_DELAY_MS;
       first = setTimer(() => {
         first = null;
@@ -932,13 +1125,15 @@ export function createUpdater({
       if (typeof auto !== 'boolean') return snapshot();
       settings = { ...settings, auto };
       save();
-      // Turning updates off stops a download in progress; one that is already
-      // verified and waiting stays ready, because the person can still choose it.
-      if (!auto && (status === 'downloading' || status === 'checking')) {
-        controller?.abort();
+      // Turning updates off stops a check or download in progress — including
+      // a newer release downloading beside a ready one, which only the status
+      // did not show. That download removes its own folder as it stops; one
+      // that is already verified and waiting stays ready, because the person
+      // can still choose it (QA, 2026-10-10, TT-3485).
+      if (!auto && controller) {
+        controller.abort();
         controller = null;
-        removeDownloads();
-        status = 'idle';
+        if (status !== 'ready') status = 'idle';
         progress = null;
       }
       changed();
@@ -975,15 +1170,19 @@ export function createUpdater({
 
     /** "Remind me later": hide the banner until Zelos is next opened. */
     snoozeBanner() {
-      if (latestVersion) snoozed = latestVersion;
+      const { latestVersion: version } = shown();
+      if (version) snoozed = version;
       changed();
       return snapshot();
     },
 
     /** "Skip this version": no banner for it again; a newer version still gets one. */
     skipBanner() {
-      if (latestVersion) {
-        settings = { ...settings, skipped: latestVersion };
+      // The version the banner names — the ready one — not a newer release
+      // that may still be downloading behind it.
+      const { latestVersion: version } = shown();
+      if (version) {
+        settings = { ...settings, skipped: version };
         save();
       }
       changed();
@@ -1242,7 +1441,7 @@ fi
 
 export function macSwapLauncher({ spawn }) {
   return ({ pid, target, incoming, resultFile, version, dir }, onError) => {
-    const script = path.join(dir, 'swap.sh');
+    const script = path.join(dir, SWAP_NAME);
     fs.writeFileSync(script, MAC_SWAP_SCRIPT, { mode: 0o700 });
     const child = spawn('/bin/sh', [script, String(pid), target, incoming, resultFile, version], {
       detached: true, stdio: 'ignore', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
