@@ -1397,7 +1397,9 @@ function instructionsFor(state, ai) {
   ];
   if (!state.enabled) {
     lines.push('AI access is currently switched OFF in Zelos, so no tools are available. The person who '
-      + `owns this machine can turn it on in ${SHARE_SETTINGS}.`);
+      + `owns this machine can turn it on in ${SHARE_SETTINGS}. When they do, ask for the tool list again: `
+      + 'Zelos announces the change to a client connected over stdio, and over HTTP the next tools/list '
+      + 'shows it.');
   } else {
     const on = SCOPES.filter((s) => state.on.has(s));
     lines.push(`Scopes the owner has enabled: ${on.length ? on.join(', ') : 'none'}.`);
@@ -1615,7 +1617,12 @@ async function dispatch(request, ctx) {
       const asked = isObject(params) && typeof params.protocolVersion === 'string' ? params.protocolVersion : null;
       return ok(id, {
         protocolVersion: asked && SUPPORTED_PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSION,
-        capabilities: { tools: { listChanged: false } },
+        /* Only a transport that can speak first says so: stdio can send
+           notifications/tools/list_changed, a stateless POST cannot. It was
+           `false` everywhere, and a client connected while sharing was off
+           kept "no tools are available" for the whole session (QA,
+           2026-10-10, TT-3496). */
+        capabilities: { tools: { listChanged: ctx.canNotify === true } },
         serverInfo: { name: SERVER_NAME, title: 'Zelos', version: packageVersion() },
         instructions: instructionsFor(rt.state, rt.ai),
       });
@@ -1720,8 +1727,35 @@ export function createStdioServer({
   transport = 'stdio',
   tokenId = null,
   scopes = null,
+  watchMs = 2_000,
 } = {}) {
   const decoder = new TextDecoder('utf-8');
+  /* What tools/list would answer right now, as a key. Watched once the client
+     has initialized, and a change — sharing switched on or off, a scope
+     turned on or off — is announced with notifications/tools/list_changed, so
+     a client that cached its list at connect learns it without reconnecting
+     (TT-3496). The config is the same cached reader the requests use. */
+  const toolsKey = () => {
+    try {
+      return toolsForState(runtimeFrom({ config, scopes }).state).map((t) => t.name).join(',');
+    } catch {
+      return null;
+    }
+  };
+  let watch = null;
+  let announced = null;
+  function startWatching() {
+    // A session with fixed scopes (a token's) does not follow the config.
+    if (watch || !(watchMs > 0) || scopes) return;
+    announced = toolsKey();
+    watch = setInterval(() => {
+      const now = toolsKey();
+      if (now === null || now === announced) return;
+      announced = now;
+      write({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+    }, watchMs);
+    watch.unref?.();
+  }
   let pending = '';
   /* Set when a message runs past MAX_LINE_CHARS with no newline in sight. The
      buffer is thrown away at that point and everything up to the next newline
@@ -1766,8 +1800,10 @@ export function createStdioServer({
       client = cap(request.params.clientInfo.name, 60) || null;
     }
 
-    const res = await handle(request, { db, config, logger, transport, client, tokenId, scopes });
+    const res = await handle(request, { db, config, logger, transport, client, tokenId, scopes, canNotify: true });
     write(res);
+    // Once the client says the handshake is done, as the spec's lifecycle has it.
+    if (isObject(request) && request.method === 'notifications/initialized') startWatching();
     return res;
   }
 
@@ -1814,6 +1850,7 @@ export function createStdioServer({
   function finish() {
     if (finished) return;
     finished = true;
+    if (watch) { clearInterval(watch); watch = null; }
     input.off?.('data', onData);
     input.off?.('end', finish);
     input.off?.('close', finish);
@@ -1858,6 +1895,52 @@ export function createStdioServer({
  * call rather than on the next restart. That is what makes revocation mean
  * something for a server a desktop client keeps alive for days.
  */
+/**
+ * The config, re-read only when the file has changed (TT-3496).
+ *
+ * The tool-list watch asks every two seconds, and loadConfig is not a quiet
+ * read: it renames an unparseable file aside and repeats its warnings to
+ * stderr, which AI clients keep in their logs. So an idle server re-reading on
+ * every tick could move a half-saved config.json out of the way.
+ *
+ * The same reader decides what a request may do, so "changed" must never miss
+ * a revocation. mtime and size alone can: on HFS+, FAT or a network share the
+ * mtime is whole seconds, and switching one scope off and another on keeps the
+ * size. The inode changes on every app save (it renames a new file into place)
+ * and ctime on an edit in place, so both are in the stamp; and the file is
+ * read again at least once a minute whatever the stamp says, which also keeps
+ * the timezone loadConfig resolves at read time current — and brings back its
+ * side effects (a warning, the rename of an unparseable file) at most that
+ * often, rather than every two seconds.
+ */
+export function cachedConfigReader({ file, load, now = Date.now, stat = fs.statSync, freshMs = 1_000, maxAgeMs = 60_000 }) {
+  let cached = null;
+  let checkedAt = 0;
+  let loadedAt = 0;
+  let seen = null;
+  const stamp = () => {
+    try {
+      const st = stat(file);
+      return `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
+    } catch {
+      return 'absent';
+    }
+  };
+  return () => {
+    const t = now();
+    // A clock that jumped back is stale too, or a revocation would wait for it.
+    if (cached && t >= checkedAt && t - checkedAt <= freshMs) return cached;
+    checkedAt = t;
+    const current = stamp();
+    if (!cached || current !== seen || t - loadedAt > maxAgeMs) {
+      cached = load();
+      seen = current;
+      loadedAt = t;
+    }
+    return cached;
+  };
+}
+
 export async function serveStdio(opts = {}) {
   let db = opts.db ?? null;
   let owned = null;
@@ -1869,18 +1952,7 @@ export async function serveStdio(opts = {}) {
   }
 
   let config = opts.config ?? null;
-  if (!config) {
-    let cached = null;
-    let cachedAt = 0;
-    config = () => {
-      const now = Date.now();
-      if (!cached || now - cachedAt > 1_000) {
-        cached = loadConfig();
-        cachedAt = now;
-      }
-      return cached;
-    };
-  }
+  if (!config) config = cachedConfigReader({ file: paths().configFile, load: loadConfig });
 
   const server = createStdioServer({ ...opts, db, config });
   server.start();

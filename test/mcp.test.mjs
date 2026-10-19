@@ -830,6 +830,7 @@ describe('JSON-RPC 2.0', () => {
     assert.equal(res.jsonrpc, '2.0');
     assert.equal(res.id, 1);
     assert.equal(res.result.protocolVersion, '2024-11-05', 'a supported version the client asked for is echoed');
+    // A direct call (the HTTP path) cannot speak first, so it does not say it will.
     assert.equal(res.result.capabilities.tools.listChanged, false);
     assert.equal(res.result.serverInfo.name, 'zelos');
     assert.match(res.result.serverInfo.version, /^\d+\.\d+\.\d+/);
@@ -1947,4 +1948,89 @@ test('Zelos sends people to the Settings tab that exists (TT-3431)', async () =>
     const src = fs.readFileSync(path.join(ROOT, ...rel), 'utf8');
     assert.doesNotMatch(src, /Settings → AI access/, `${rel} still names "Settings → AI access"`);
   }
+});
+
+
+test('a client connected while sharing is off is told when it comes on, over stdio (TT-3496)', async () => {
+  /* QA, 2026-10-10: the server declared tools.listChanged: false and sent no
+     notification, so a client that cached its tool list at connect kept
+     "AI access is currently switched OFF … no tools are available" for the
+     whole session. A scope switched on later was the same. */
+  let current = cfg(ALL_ON, { enabled: false });
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let text = '';
+  output.on('data', (chunk) => { text += chunk.toString('utf8'); });
+  const server = createStdioServer({ db: null, config: () => current, input, output, watchMs: 10 });
+  server.start();
+  const messages = () => text.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const waitFor = async (pred, what) => {
+    for (let i = 0; i < 200 && !pred(); i += 1) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(pred(), `timed out waiting for ${what}`);
+  };
+
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'T', version: '1' } } })}\n`);
+  await waitFor(() => messages().some((m) => m.id === 1), 'the handshake');
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+  const init = messages().find((m) => m.id === 1);
+  assert.equal(init.result.capabilities.tools.listChanged, true, 'stdio can announce, and should say so');
+  assert.match(init.result.instructions, /ask for the tool list again/);
+
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(messages().filter((m) => m.method === 'notifications/tools/list_changed').length, 0, 'announced with nothing changed');
+
+  current = cfg(ALL_ON); // the owner switches sharing on
+  await waitFor(() => messages().some((m) => m.method === 'notifications/tools/list_changed'), 'the announcement');
+
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })}\n`);
+  await waitFor(() => messages().some((m) => m.id === 2), 'the new list');
+  assert.ok(messages().find((m) => m.id === 2).result.tools.length > 0, 'the tools are there once asked again');
+
+  const announced = () => messages().filter((m) => m.method === 'notifications/tools/list_changed').length;
+  // A change that alters no tool (bodies on/off) is not announced…
+  const before = announced();
+  current = cfg(ALL_ON_NO_BODIES);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(announced(), before, 'announced a change that alters no tool');
+  // …and switching off is.
+  current = cfg(ALL_ON, { enabled: false });
+  await waitFor(() => announced() === before + 1, 'switching off announced');
+
+  input.end();
+  await server.done;
+});
+
+
+test('the config reader re-reads only on a change, and never misses a revocation (TT-3496)', () => {
+  /* Idle polling must not re-read (loadConfig renames a half-saved file and
+     repeats warnings), but the same reader decides what a request may do — so
+     a save with the same size in the same mtime second must still be seen. */
+  const { cachedConfigReader } = mcp;
+  let clock = 0;
+  let loads = 0;
+  let st = { ino: 1, mtimeMs: 1_700_000_000_000, ctimeMs: 1_700_000_000_000, size: 120 };
+  let value = { v: 'A' };
+  const read = cachedConfigReader({ file: 'x', load: () => { loads += 1; return value; }, now: () => clock, stat: () => st });
+
+  assert.equal(read().v, 'A');
+  assert.equal(loads, 1);
+  for (let i = 0; i < 20; i += 1) { clock += 2_000; read(); }
+  assert.equal(loads, 1 + Math.floor(40_000 / 60_001), 'an idle, unchanged file was read again');
+
+  // Same size, same whole-second mtime — only the inode differs, as an atomic save makes it.
+  value = { v: 'B' };
+  st = { ...st, ino: 2 };
+  clock += 1_500;
+  assert.equal(read().v, 'B', 'a same-size save in the same second was missed');
+
+  // An edit in place changes ctime.
+  value = { v: 'C' };
+  st = { ...st, ctimeMs: st.ctimeMs + 1 };
+  clock += 1_500;
+  assert.equal(read().v, 'C');
+
+  // And nothing is trusted for longer than a minute.
+  value = { v: 'D' };
+  clock += 61_000;
+  assert.equal(read().v, 'D');
 });
