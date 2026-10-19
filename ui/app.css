@@ -36,9 +36,19 @@
   --ground-3: rgba(255, 255, 255, 0.095);
   --paper: rgba(255, 255, 255, 0.045);
 
-  --ink: #ededf0;    /* 19.8:1 on black */
-  --ink-2: #a6a9b4;  /*  8.9:1 */
-  --ink-3: #7c808c;  /*  5.3:1 — still AA at body size */
+  --ink: #ededf0;    /* 18.0:1 on black */
+  --ink-2: #a6a9b4;  /*  9.0:1 */
+  /* Dim, but measured where it is read: under the ambient glow where its layers
+     overlap most (18% accent on a 320px phone), on a glass pane and on a
+     --ground-2 box inside one, for every preset accent. On plain black the old
+     #7c808c was 5.3:1; under the glow it measured 4.14:1 (TT-3509).
+     test/contrast.test.mjs does the sums. */
+  --ink-3: #9da0a9;  /*  8.0:1 on black, >= 4.5:1 under the glow */
+  /* Small dim text on an event's accent wash (agenda and calendar places). The
+     wash adds another 15% of accent on top of the glow, and no dim grey clears
+     4.5:1 there for the brighter presets, so this is --ink-3's hue lifted until
+     it does. */
+  --ink-on-wash: #aaadb4;  /*  9.4:1 on black */
 
   /*
      The accent as *type*. A user is free to pick something dark, and a dark hex
@@ -886,7 +896,7 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 .agenda-time { flex: none; font-size: 0.75rem; color: var(--lapis); }
 .agenda-title { font-size: 0.9375rem; }
-.agenda-where { font-size: 0.75rem; color: var(--ink-3); }
+.agenda-where { font-size: 0.75rem; color: var(--ink-on-wash); }
 .agenda-item.is-past { opacity: 0.5; }
 .agenda-item.is-live { border-left-color: var(--accent); background: var(--accent-wash); }
 
@@ -1099,7 +1109,7 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: var(--chip-lines, 20);
 }
-.chip-where { font-size: 0.625rem; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-where { font-size: 0.625rem; color: var(--ink-on-wash); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .now-line {
   position: absolute;
@@ -1796,7 +1806,8 @@ textarea.input:focus,
   font-weight: 700;
 }
 
-.scope-state { font-size: 0.8125rem; color: var(--ink-3); }
+/* Always inside .scope-exposing, on the accent wash. */
+.scope-state { font-size: 0.8125rem; color: var(--ink-on-wash); }
 .scope-state.is-on { color: var(--accent-text); font-weight: 600; }
 
 .scope-confirm {
@@ -2014,6 +2025,7 @@ textarea.input:focus,
 .setup-status-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding: 0.4rem 0; color: var(--ink-2); }
 .setup-status-list li span { flex: 1 1 15rem; overflow-wrap: anywhere; }
 .account.is-connection-target { border-color: var(--accent-edge); background: var(--accent-wash); }
+.account.is-connection-target .account-host { color: var(--ink-on-wash); }
 .connection-recovery { margin: 0.75rem 0; }
 .connection-recovery .quiet-note { overflow-wrap: anywhere; }
 
