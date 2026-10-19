@@ -781,9 +781,10 @@ export function createUpdater({
       // A folder for this version already here is one the launch could not
       // check, or one a crash left. Now that the release's own manifest has
       // verified, it is checked as the launch would: one that passes is
-      // offered as it is, without fetching the file again; one definitely
-      // refused is replaced; one that still cannot be checked is left alone
-      // and this attempt fails, to be tried again later.
+      // offered as it is, without fetching the file again; anything else —
+      // refused, or still not checkable — is replaced by a fresh download,
+      // which is checked in full, so one stuck folder cannot block this
+      // version for good.
       let present = false;
       try { present = fs.lstatSync(dir).isDirectory(); } catch { present = false; }
       if (present) {
@@ -791,18 +792,25 @@ export function createUpdater({
           adopted = await verifyKept(version, dir);
           keepFolder = true;
         } catch (err) {
-          if (!err?.refused) {
-            keepFolder = true;
-            throw err;
-          }
+          if (!err?.refused) log('warn', 'could not check a kept update; fetching it again', { version, error: err.message });
         }
       }
       if (adopted) {
-        if (stopped || committed || controller !== own) throw new Error('The update download was stopped.');
+        if (stopped || committed || controller !== own) {
+          // Still a good update; kept for the next attempt or launch.
+          held.add(version);
+          throw new Error('The update download was stopped.');
+        }
         held.delete(version);
       } else {
         held.delete(version);
-        fs.rmSync(dir, { recursive: true, force: true });
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } catch (err) {
+          // Usually a file Windows still holds. Left for a later tidy.
+          log('warn', 'could not remove a kept update', { version, error: err.message });
+          throw new Error('Zelos could not check the update it downloaded earlier. It will try again later.');
+        }
         if (!beside) set({ status: 'downloading', progress: 0 });
         const digest = await downloadToFile(asset.url, file, {
           fetchImpl, signal: own.signal, expectedSize: expected.size, setTimer, clearTimer,

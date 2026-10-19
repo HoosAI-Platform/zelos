@@ -1401,6 +1401,27 @@ describe('the update folder at launch', () => {
     assert.equal(await h.updater.prepareInstall(), true);
   });
 
+  it('a folder that still cannot be checked is replaced by a fresh download, not left to block that version', async () => {
+    const newer = fixture('1.9.1');
+    await bothFolders();
+    // Authenticode cannot answer for the kept 1.9.1 at launch nor when it is
+    // next wanted; only the freshly downloaded file gets an answer.
+    let unanswered = 2;
+    const h = windowsUpdater(newer, {
+      publisher: PUBLISHER,
+      duringVerify: (file) => {
+        if (file.includes('1.9.1') && unanswered > 0) { unanswered -= 1; throw new Error('PowerShell did not answer'); }
+      },
+    });
+    assert.equal((await h.updater.start()).latestVersion, '1.9.0');
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => h.updater.state().latestVersion === '1.9.1', '1.9.1 to be downloaded afresh');
+    assert.ok(h.github.seen.some((x) => x.url === download('1.9.1', 'Zelos-1.9.1-setup-x64.exe')), 'its installer is fetched again');
+    assert.equal(h.updater.state().error, '');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.1']);
+    assert.equal(await h.updater.prepareInstall(), true);
+  });
+
   it('a folder the launch could not check survives the tidying that follows a failed download', async () => {
     const latest = fixture('1.9.2');
     const tampered = Buffer.from(latest.payload);
