@@ -26,7 +26,7 @@
  */
 
 import { el, button, meander } from '../lib/dom.js';
-import { modelPanel, mailPanel, calendarPanel, askClaude } from './settings.js';
+import { modelPanel, mailPanel, calendarPanel, askClaude, forgetOutcomes } from './settings.js';
 import {
   state, subscribe, startSweep, markOnboarded, refresh, notify,
 } from '../lib/store.js';
@@ -54,6 +54,10 @@ let sampleError = '';
 
 function go(stepId, rerender) {
   step = stepId;
+  // Each step mounts a Settings panel, which keeps what it last said about a
+  // save across a redraw. A step is a new screen: the AI step's "Working."
+  // must not greet someone who comes back to it from Email (TT-3448).
+  forgetOutcomes();
   rerender();
 }
 

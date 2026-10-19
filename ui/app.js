@@ -37,7 +37,7 @@ import { renderOwed } from './views/owed.js';
 import { renderCalendar, tickNowLine } from './views/calendar.js';
 import { renderSearch } from './views/search.js';
 import { renderAsk } from './views/ask.js';
-import { renderSettings } from './views/settings.js';
+import { renderSettings, forgetOutcomes } from './views/settings.js';
 import { renderOnboarding } from './views/onboarding.js';
 
 // Search carries no count. Every other number in the rail is a claim about work
@@ -604,6 +604,9 @@ function closeSetupUpdates() {
  */
 let renderQueued = false;
 
+/** Whether the outcomes Settings keeps were said on the setup screens or on the board. */
+let outcomesOnboarding = null;
+
 function editingInMain() {
   // The rule itself lives in ui/lib/editing.js so the test suite can name the
   // selector it checks. A button inside an open editor still counts: Tabbing
@@ -701,6 +704,13 @@ function render({ force = false } = {}) {
   }
 
   const onboarding = showOnboarding();
+  // Setup starting or finishing is a move to another screen, as a change of
+  // route is: what a Settings panel last said about a save is not carried
+  // into it (TT-3448; onRoute() has the reason).
+  if (onboarding !== outcomesOnboarding) {
+    outcomesOnboarding = onboarding;
+    forgetOutcomes();
+  }
   if (onboarding) {
     setupActive = true;
     // The flow gets the whole window: no rail, no tab bar, nothing to click past.
@@ -931,6 +941,11 @@ function onRoute() {
   const beforeSub = route.sub;
   route = next;
   routeHash = window.location.hash || '#/now';
+  // A Settings panel keeps what it last said about a save across the redraw
+  // the save causes (ui/views/settings.js, statusLine). That is for the
+  // person still looking at it: one who went to another view or tab and came
+  // back finds the panel as it is, not "Saved." from a visit ago (TT-3448).
+  if (before !== route.view || beforeSub !== route.sub) forgetOutcomes();
   render({ force: true });
   if (before !== route.view) {
     // A new view starts at its top. Same-view re-renders (a deferred board

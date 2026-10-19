@@ -3531,9 +3531,16 @@ class PlainNode {
 
   querySelectorAll() { return []; }
 
-  /** Fire a listener the way a browser would: `this` is the node, as is the target. */
+  /**
+   * Fire a listener the way a browser would: `this` is the node, as is the
+   * target. input and change bubble, as they do in a browser, so a listener a
+   * whole panel holds hears its fields (TT-3448); the rest stay on the node.
+   */
   fire(type) {
-    for (const fn of this.listeners.get(type) ?? []) fn.call(this, { target: this, currentTarget: this, preventDefault() {} });
+    const bubbles = type === 'input' || type === 'change';
+    for (let n = this; n; n = bubbles ? n.parentNode : null) {
+      for (const fn of n.listeners?.get(type) ?? []) fn.call(n, { target: this, currentTarget: n, preventDefault() {} });
+    }
   }
 }
 
@@ -3694,6 +3701,8 @@ function runAppScenario({ initiallyConfigured = true, storageUnavailable = false
       const plainWalk = ${plainWalk.toString()};
       const textOf = ${textOf.toString()};
       const findButton = ${findButton.toString()};
+      const plainHidden = ${plainHidden.toString()};
+      const onScreen = ${onScreen.toString()};
       const storage = () => {
         const values = new Map();
         return {
@@ -3715,6 +3724,18 @@ function runAppScenario({ initiallyConfigured = true, storageUnavailable = false
       };
       // focusout and pointerup re-check on a zero timeout; this lets those run.
       const afterTimers = () => new Promise(resolve => setTimeout(resolve, 5));
+      // A mouse press, in the order the shell sees one. In Chromium a click
+      // focuses the button it lands on, and focus then stays there; fire('click')
+      // alone leaves focus where it was, which is not the order a person
+      // produces — and the order decides whether the save's own redraw is held
+      // back (TT-3465) or runs before the handler writes its outcome (TT-3448).
+      const press = async (node) => {
+        node.focus();
+        fireDocument('pointerdown');
+        node.fire('click');
+        fireDocument('pointerup');
+        await afterTimers();
+      };
       globalThis.window = {
         location: { href: ${JSON.stringify(href)}, host: '127.0.0.1', hash: '#/now' },
         history: { replaceState() {} }, addEventListener: (name, fn) => { windowEvents[name] = fn; }, scrollTo() {},
@@ -3977,6 +3998,539 @@ test('a panel with nothing to type into still runs a queued redraw when focus mo
     await tabTo(findButton(view, 'Copy the folder path'));
     assert.notEqual(main().firstChild, view, 'focus on a button in Your data must let the queued redraw run');
   ` });
+});
+
+/**
+ * Settings never showed the outcome of a save (QA, 2026-10-10, TT-3448).
+ * saveConfig() moves rev and the shell redraws the view, and the click
+ * handler then wrote "Saved." into a line that was no longer on the page.
+ * Marked panels now hold that redraw back while focus stays on Save
+ * (TT-3465), so the outcome has to survive it twice over: when focus leaves
+ * and the held redraw runs, and when a redraw lands while the save is still
+ * in flight. Both orders, through the real shell, with press() for the click
+ * so focus lands on the button as it does in a browser.
+ */
+const OUTCOME_SETUP = `
+  ${TAB_TO_SAVE_SETUP}
+  const tabpanel = () => plainWalk(main()).find(n => n.getAttribute('role') === 'tabpanel');
+  const seen = () => onScreen(tabpanel());
+  // Focus goes somewhere outside the panel — the rail, the page.
+  const leave = async () => {
+    document.activeElement = document.body;
+    fireDocument('focusout');
+    await afterTimers();
+  };
+  const openFold = async (label) => {
+    const toggle = plainWalk(tabpanel()).find(n => n.tag === 'button' && (n.attributes.class || '').includes('unfold-toggle') && textOf(n).endsWith(label));
+    assert.ok(toggle, 'the panel has a drawer called ' + label);
+    await press(toggle);
+  };
+  // Holds one api call until release() is called: the save is still in
+  // flight while the scenario makes something else happen.
+  const hold = (name) => {
+    const real = api[name];
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    api[name] = async (...args) => { await gate; api[name] = real; return real(...args); };
+    return async () => { release(); await settle(); await afterTimers(); };
+  };
+`;
+
+/**
+ * The four panels whose Save sits in a plain div. AI is its Advanced form's
+ * Save, Privacy's number is under its own Advanced; for those two the drawer
+ * the status line or the field sits in has to come back open as well.
+ */
+const OUTCOME_PANELS = [
+  { sub: 'you', find: `n => n.tag === 'input' && n.getAttribute('placeholder') === 'Nemo Hale'`, typed: 'Ada Lovelace', said: 'Saved. Zelos uses it the next time it checks.' },
+  { sub: 'model', fold: 'Advanced', find: `n => n.tag === 'input' && n.value === 'local-test'`, typed: 'local-better', said: 'Saved.' },
+  { sub: 'sweep', find: `n => n.tag === 'select' && n.value === '6'`, typed: '8', event: 'change', said: 'Saved. The new times apply from the next check.' },
+  { sub: 'privacy', fold: 'Advanced', find: `n => n.tag === 'input' && n.getAttribute('type') === 'number' && n.value === '4000'`, typed: '6000', said: 'Saved.' },
+];
+
+for (const { sub, fold: drawer = null, find, typed, event = 'input', said } of OUTCOME_PANELS) {
+  const steps = `
+    ${OUTCOME_SETUP}
+    await openSettings(${JSON.stringify(sub)});
+    const view = main().firstChild;
+    ${drawer ? `await openFold(${JSON.stringify(drawer)});` : ''}
+    const control = plainWalk(tabpanel()).find(${find});
+    assert.ok(control, 'the panel has the control under test');
+    assert.ok(!plainHidden(control), 'the control is on screen');
+    control.focus();
+    control.value = ${JSON.stringify(typed)};
+    control.fire(${JSON.stringify(event)});
+    const save = plainWalk(tabpanel()).filter(n => n.tag === 'button' && textOf(n) === 'Save').pop();
+    assert.ok(save, 'the panel has a Save button');
+    const said = ${JSON.stringify(said)};
+    // After a redraw: the line is a new node, so read it off the new panel.
+    const sayIt = (when) => {
+      assert.notEqual(main().firstChild, view, 'the premise: the view was redrawn ' + when);
+      assert.ok(seen().includes(said), 'the outcome must be on screen ' + when + ', saw: ' + seen());
+      ${drawer ? `assert.ok(plainWalk(tabpanel()).some(n => (n.attributes.class || '').includes('unfold-toggle') && textOf(n).endsWith(${JSON.stringify(drawer)}) && n.getAttribute('aria-expanded') === 'true'),
+        'the ' + ${JSON.stringify(drawer)} + ' drawer must come back open ' + when);
+      assert.ok(plainWalk(tabpanel()).some(n => n.tag === 'input' && n.value === ${JSON.stringify(typed)} && !plainHidden(n)),
+        'the saved value must be on screen in its drawer ' + when);` : ''}
+    };
+  `;
+
+  test(`Settings → ${sub} shows the outcome of Save after its own redraw, with focus left on Save (TT-3448)`, () => {
+    runAppScenario({ scenario: `
+      ${steps}
+      await press(save);
+      await settle();
+      // Focus is on Save, inside a marked panel: the save's redraw is held.
+      assert.equal(main().firstChild, view, 'the premise: the redraw waits while focus is on Save');
+      assert.ok(seen().includes(said), 'the outcome is on screen while focus stays on Save');
+      await leave();
+      sayIt('once focus leaves and the held redraw runs');
+    ` });
+  });
+
+  test(`Settings → ${sub} shows the outcome of Save when a redraw lands while it is in flight (TT-3448)`, () => {
+    runAppScenario({ scenario: `
+      ${steps}
+      const release = hold('saveConfig');
+      await press(save);
+      assert.ok(seen().includes('Saving…'), 'the save says it is working');
+      // Focus moves off, and a check finishes: the panel is redrawn under the save.
+      await leave();
+      await checkFinishes();
+      assert.notEqual(main().firstChild, view, 'the premise: a check redrew the view mid-save');
+      assert.ok(seen().includes('Saving…'), 'the redrawn panel must still say the save is working, saw: ' + seen());
+      await release();
+      sayIt('after a redraw that landed mid-save');
+    ` });
+  });
+}
+
+/**
+ * The AI panel's "Check it works": test, then save, then "Working. Zelos will
+ * use Claude." — said after the save's redraw, so the line it was written into
+ * had gone. The renderer test further down asserts the same sentence on a
+ * panel nothing ever redraws; this is that check through the real shell.
+ */
+const GUIDED_AI_SETUP = `
+  // The Anthropic preset as the server sends it, as far as the card reads it.
+  api.presets = async () => [{ id: 'anthropic', protocol: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.example', keyUrl: 'https://console.anthropic.example/keys', suggestedModels: ['claude-sonnet-5'] }];
+  api.modelKeyStored = async () => ({ stored: false });
+  api.setModelKey = async () => ({ ok: true });
+  api.testModel = async () => ({ ok: true, ms: 12, sample: 'Hello.' });
+`;
+
+const GUIDED_AI_STEPS = `
+  ${OUTCOME_SETUP}
+  await openSettings('model');
+  const view = main().firstChild;
+  const card = plainWalk(tabpanel()).find(n => n.tag === 'button' && textOf(n).startsWith('Claude, by Anthropic'));
+  assert.ok(card, 'the Claude card is offered');
+  await press(card);
+  const key = plainWalk(tabpanel()).find(n => n.tag === 'input' && n.getAttribute('type') === 'password' && !plainHidden(n));
+  assert.ok(key, 'the guided card has a key box');
+  key.focus();
+  key.value = 'sk-ant-not-a-real-key';
+  key.fire('input');
+  const check = findButton(tabpanel(), 'Check it works');
+  const said = 'Working. Zelos will use Claude.';
+`;
+
+test('Settings → AI shows "Working. Zelos will use Claude." after Check it works and the redraw its save causes (TT-3448)', () => {
+  runAppScenario({ beforeBoot: GUIDED_AI_SETUP, scenario: `
+    ${GUIDED_AI_STEPS}
+    await press(check);
+    await settle();
+    assert.equal(main().firstChild, view, 'the premise: the redraw waits while focus is on the button');
+    assert.ok(seen().includes(said), 'the outcome is on screen while focus stays on the button');
+    await leave();
+    await settle();
+    assert.notEqual(main().firstChild, view, 'the premise: the held redraw ran');
+    assert.equal(config.model.model, 'claude-sonnet-5', 'the premise: the card saved its model');
+    assert.ok(seen().includes(said), 'the outcome must survive the redraw, saw: ' + seen());
+  ` });
+});
+
+test('Settings → AI shows "Working. Zelos will use Claude." when a redraw lands while the check is in flight (TT-3448)', () => {
+  runAppScenario({ beforeBoot: GUIDED_AI_SETUP, scenario: `
+    ${GUIDED_AI_STEPS}
+    const release = hold('testModel');
+    await press(check);
+    assert.ok(seen().includes('Checking that Claude answers…'), 'the check says it is working');
+    await leave();
+    await checkFinishes();
+    await settle();
+    assert.notEqual(main().firstChild, view, 'the premise: a check redrew the view mid-call');
+    // The redrawn panel opens on the service that is SAVED, and Claude is not
+    // saved until the check passes — so there is no card yet, and the line
+    // has to be under the Advanced drawer, not shut inside it.
+    assert.ok(seen().includes('Checking that Claude answers…'), 'the redrawn panel must still say the check is working, saw: ' + seen());
+    await release();
+    await settle();
+    assert.ok(seen().includes(said), 'the outcome must reach the panel on screen, saw: ' + seen());
+  ` });
+});
+
+/**
+ * Email, Calendars and Other things it can read save from an open editor,
+ * whose redraw is held while focus is in it — and then the panel rebuilds
+ * itself to close the editor, taking the editor's line with it. The editor
+ * now hands its outcome to the panel's own line, naming the account, and that
+ * line keeps it. Each case opens an editor, fills it, and names the button
+ * that saves and what the panel must then say.
+ */
+const EDITOR_SETUP = `
+  // The connector registry as the server describes it, for the editors' pickers.
+  const manifests = JSON.parse(JSON.stringify((await import(${JSON.stringify(fileUrl(ROOT, 'core/connectors/index.mjs'))})).describe()));
+  const shellFetch = globalThis.fetch;
+  globalThis.fetch = async (path, init) => path === '/api/connectors'
+    ? { ok: true, status: 200, text: async () => JSON.stringify({ connectors: manifests }) }
+    : shellFetch(path, init);
+  api.guessMail = async (email) => ({ label: 'iCloud Mail', host: 'imap.mail.me.com', port: 993, secure: true, auth: 'password', signIn: null, clientReady: false, appPasswordUrl: 'https://account.apple.example/manage', note: 'iCloud Mail requires an app-specific password.', known: true });
+  api.setSecret = async () => ({ ok: true });
+  api.testMail = async () => ({ ok: true, mailboxes: [{ name: 'INBOX' }, { name: 'Sent Messages', specialUse: 'sent' }] });
+  api.testCalendar = async () => ({ ok: true, calendars: [{ name: 'Home' }], events: 3 });
+`;
+
+const OUTCOME_EDITORS = [
+  {
+    sub: 'mail',
+    held: 'testMail',
+    open: `
+      await press(findButton(tabpanel(), 'Add an email account'));
+      const address = plainWalk(tabpanel()).find(n => n.tag === 'input' && n.getAttribute('type') === 'email');
+      address.focus();
+      address.value = 'frank@icloud.com';
+      address.fire('change');
+      await settle();
+      const pass = plainWalk(tabpanel()).find(n => n.tag === 'input' && n.getAttribute('type') === 'password');
+      pass.value = 'abcd-efgh-ijkl-mnop';
+      const saveButton = findButton(tabpanel(), 'Connect');
+    `,
+    said: 'Connected frank@icloud.com · 2 mailboxes · sent folder “Sent Messages” · Zelos will also treat frank@icloud.com as your own address — change it under Settings → You.',
+    then: [['Disable', 'Turned off iCloud Mail.'], ['Enable', 'Turned on iCloud Mail.'], ['Remove', 'Removed iCloud Mail.']],
+  },
+  {
+    sub: 'calendars',
+    held: 'testCalendar',
+    open: `
+      await press(plainWalk(tabpanel()).find(n => n.tag === 'button' && textOf(n).startsWith('Google Calendar')));
+      await settle();
+      const url = plainWalk(tabpanel()).find(n => n.tag === 'input' && n.getAttribute('placeholder') === 'https://…/calendar/ical/…');
+      url.focus();
+      url.value = 'https://calendar.example/ical/basic.ics';
+      url.fire('input');
+      const saveButton = findButton(tabpanel(), 'Check it works and save');
+    `,
+    said: 'Saved Google Calendar.',
+    then: [['Remove', 'Removed Google Calendar.']],
+  },
+  {
+    sub: 'sources',
+    held: 'saveConfig',
+    open: `
+      await press(findButton(tabpanel(), 'Add a source'));
+      await settle();
+      const form = plainWalk(tabpanel()).find(n => n.attributes.class === 'account-form');
+      const name = plainWalk(form).find(n => n.tag === 'input' && n.getAttribute('placeholder') === 'Alder notices');
+      name.value = 'Alder notices';
+      name.fire('input');
+      // The first source kind is a feed, whose address is its one required field.
+      const url = plainWalk(form).find(n => n.tag === 'input' && n !== name);
+      url.focus();
+      url.value = 'https://alder.example/feed.xml';
+      url.fire('input');
+      const saveButton = findButton(tabpanel(), 'Save source');
+    `,
+    said: 'Saved Alder notices. Zelos reads it the next time it checks.',
+    then: [['Disable', 'Turned off Alder notices.'], ['Enable', 'Turned on Alder notices.'], ['Remove', 'Removed Alder notices.']],
+  },
+];
+
+for (const { sub, held, open, said, then } of OUTCOME_EDITORS) {
+  const steps = `
+    ${OUTCOME_SETUP}
+    await openSettings(${JSON.stringify(sub)});
+    ${open}
+    assert.ok(saveButton, 'the editor has its save button');
+    const said = ${JSON.stringify(said)};
+  `;
+
+  test(`Settings → ${sub} keeps the outcome of a save on the panel after the editor closes (TT-3448)`, () => {
+    runAppScenario({ beforeBoot: EDITOR_SETUP, scenario: `
+      ${steps}
+      await press(saveButton);
+      await settle();
+      // The panel rebuilt itself to close the editor: the editor's line is gone.
+      assert.ok(!plainWalk(root).includes(saveButton), 'the premise: the editor closed');
+      assert.ok(seen().includes(said), 'the panel must say what was saved, saw: ' + seen());
+      await leave();
+      assert.ok(seen().includes(said), 'and keep saying it once focus leaves, saw: ' + seen());
+    ` });
+  });
+
+  test(`Settings → ${sub} keeps the outcome of a save when a redraw lands while it is in flight (TT-3448)`, () => {
+    runAppScenario({ beforeBoot: EDITOR_SETUP, scenario: `
+      ${steps}
+      const view = main().firstChild;
+      const release = hold(${JSON.stringify(held)});
+      await press(saveButton);
+      await leave();
+      await checkFinishes();
+      assert.notEqual(main().firstChild, view, 'the premise: a check redrew the view mid-save');
+      await release();
+      await settle();
+      assert.ok(seen().includes(said), 'the panel on screen must say what was saved, saw: ' + seen());
+    ` });
+  });
+  // The kept outcome is the panel's last word, so every button on an account
+  // card that changes it has to say what it did — or the line goes on saying
+  // "Saved" about an account that has just been removed.
+  test(`Settings → ${sub}: ${then.map(([label]) => label).join(', ')} on an account replaces the kept outcome (TT-3448)`, () => {
+    runAppScenario({ beforeBoot: EDITOR_SETUP, scenario: `
+      ${steps}
+      await press(saveButton);
+      await settle();
+      assert.ok(seen().includes(said), 'the premise: the save said so, saw: ' + seen());
+      let last = said;
+      for (const [label, next] of ${JSON.stringify(then)}) {
+        const pressed = findButton(tabpanel(), label);
+        assert.ok(pressed, 'the account card has ' + label);
+        await press(pressed);
+        await settle();
+        await leave();
+        assert.ok(seen().includes(next), label + ' must say what it did, saw: ' + seen());
+        assert.ok(!seen().includes(last), label + ' must not leave the last outcome standing, saw: ' + seen());
+        last = next;
+      }
+    ` });
+  });
+}
+
+test('a Remove whose save is refused says why on the panel line, and keeps the account (TT-3448)', () => {
+  const sources = OUTCOME_EDITORS.find((e) => e.sub === 'sources');
+  runAppScenario({ beforeBoot: EDITOR_SETUP, scenario: `
+    ${OUTCOME_SETUP}
+    await openSettings('sources');
+    ${sources.open}
+    await press(saveButton);
+    await settle();
+    // A refusal, not a crash: an unhandled rejection would end this process.
+    api.saveConfig = async () => { throw new Error('The server refused the change.'); };
+    await press(findButton(tabpanel(), 'Remove'));
+    await settle();
+    await leave();
+    assert.ok(seen().includes('The server refused the change.'), 'the refusal must be on the panel line, saw: ' + seen());
+    assert.ok(!seen().includes('Removed'), 'nothing was removed, saw: ' + seen());
+    assert.ok(seen().includes('Alder notices'), 'the account is still listed');
+  ` });
+});
+
+/**
+ * An AI program on this computer, chosen and checked. The redraw after the
+ * save used to rebuild the panel on the expert form — the probe never put
+ * the saved runtime's card back, as the presets do for a hosted service —
+ * so "Working." went into a line inside the shut Advanced drawer.
+ */
+test('Settings → AI shows the outcome of Check it works for an AI program on this computer after the redraw (TT-3448)', () => {
+  runAppScenario({ beforeBoot: `
+    ${GUIDED_AI_SETUP}
+    api.probeLocal = async () => [{ label: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', models: [{ id: 'llama3.2' }] }];
+  `, scenario: `
+    ${OUTCOME_SETUP}
+    await openSettings('model');
+    const view = main().firstChild;
+    const runtime = plainWalk(tabpanel()).find(n => n.tag === 'button' && textOf(n).startsWith('An AI program on this computer — Ollama'));
+    assert.ok(runtime, 'the runtime is offered');
+    await press(runtime);
+    await press(findButton(tabpanel(), 'Check it works'));
+    await settle();
+    assert.equal(config.model.baseUrl, 'http://127.0.0.1:11434/v1', 'the premise: the runtime was saved');
+    await leave();
+    await settle();
+    assert.notEqual(main().firstChild, view, 'the premise: the held redraw ran');
+    assert.ok(seen().includes('Zelos found Ollama running on this computer.'), 'the saved runtime must get its card back, saw: ' + seen());
+    const line = plainWalk(tabpanel()).find(n => n.tag === 'p' && n.textContent === 'Working. Zelos will use Ollama.');
+    assert.ok(line && !plainHidden(line), 'the outcome must be on screen, saw: ' + seen());
+  ` });
+});
+
+test('Settings → AI shows the outcome of Check it works when the redrawn panel cannot load its services (TT-3448)', () => {
+  // No presets, no card: the line belongs under the Advanced drawer, where it
+  // can be read with the drawer shut, not inside it.
+  runAppScenario({ beforeBoot: GUIDED_AI_SETUP, scenario: `
+    ${GUIDED_AI_STEPS}
+    await press(check);
+    await settle();
+    api.presets = async () => { throw new Error('offline'); };
+    await leave();
+    await settle();
+    assert.notEqual(main().firstChild, view, 'the premise: the held redraw ran');
+    assert.ok(!seen().includes('1. Open'), 'the premise: the redrawn panel has no card');
+    assert.ok(seen().includes(said), 'the outcome must be on screen with the drawer shut, saw: ' + seen());
+  ` });
+});
+
+test('a kept outcome goes with the next edit in the panel, with navigation, and a save that lands after navigating back says nothing (TT-3448)', () => {
+  runAppScenario({ scenario: `
+    ${OUTCOME_SETUP}
+    const said = 'Saved. Zelos uses it the next time it checks.';
+    const nameField = () => plainWalk(tabpanel()).find(n => n.tag === 'input' && n.getAttribute('placeholder') === 'Nemo Hale');
+    const saveButton = () => findButton(tabpanel(), 'Save');
+    const typeInto = (field, text) => {
+      field.value = text;
+      field.fire('input');
+    };
+
+    await openSettings('you');
+    typeInto(nameField(), 'Ada Lovelace');
+    await press(saveButton());
+    await leave();
+    assert.ok(seen().includes(said), 'the premise: the outcome survived the redraw, saw: ' + seen());
+
+    // Typing again: "Saved." is no longer about what is in the field.
+    typeInto(nameField(), 'Ada King');
+    assert.ok(!seen().includes(said), 'the next edit in the panel must take the outcome off the screen');
+    await press(saveButton());
+    await leave();
+    assert.ok(seen().includes(said), 'the premise: saved again');
+    await checkFinishes();
+    assert.ok(seen().includes(said), 'a redraw keeps it, saw: ' + seen());
+    assert.ok(!seen().includes('Saving…'), 'and says nothing stale with it');
+
+    // Away and back: the panel as it is, not what it said a visit ago.
+    await openSettings('sweep');
+    await openSettings('you');
+    assert.ok(!seen().includes(said), 'an outcome must not outlive leaving the tab, saw: ' + seen());
+
+    // A save still in flight when the person left belongs to that visit.
+    const release = hold('saveConfig');
+    await press(saveButton());
+    assert.ok(seen().includes('Saving…'));
+    await openSettings('sweep');
+    await openSettings('you');
+    assert.ok(!seen().includes('Saving…'), 'a save from before leaving must not follow the person back');
+    await release();
+    await settle();
+    assert.ok(!seen().includes(said) && !seen().includes('Saving…'), 'its outcome must land only in its own, detached line, saw: ' + seen());
+  ` });
+});
+
+test('every Settings panel with a kept outcome shows it after a redraw, and the next edit in it takes it away (TT-3448)', () => {
+  // Driven on every tab, so a panel added later has to land on one side of
+  // the line or the other. The outcome is planted through the panel's own
+  // key, as a save would leave it, and a check finishing redraws the view.
+  runAppScenario({ beforeBoot: `
+    api.data = async () => ({ dbBytes: 0, walBytes: 0, messageCount: 0, eventCount: 0, itemCount: 0, accounts: [] });
+  `, scenario: `
+    ${OUTCOME_SETUP}
+    const settings = await import(${JSON.stringify(fileUrl(UI, 'views/settings.js'))});
+    const keeps = ['you', 'model', 'mail', 'calendars', 'sweep', 'privacy', 'sources', 'data'];
+    const all = ['you', 'model', 'mail', 'calendars', 'sweep', 'privacy', 'sources', 'ai', 'data', 'about', 'appearance'];
+    for (const sub of all) {
+      await openSettings(sub);
+      settings.statusLine(sub).good('Kept outcome.');
+      await checkFinishes();
+      assert.equal(seen().includes('Kept outcome.'), keeps.includes(sub),
+        sub + (keeps.includes(sub) ? ' must' : ' must not') + ' keep an outcome across a redraw');
+      if (!keeps.includes(sub)) continue;
+      // A field where the panel has one; otherwise anything inside it, since
+      // what is under test is the panel's own listener.
+      const field = plainWalk(tabpanel()).find(n => ['input', 'select', 'textarea'].includes(n.tag)) || tabpanel().children[0];
+      field.fire('input');
+      assert.ok(!seen().includes('Kept outcome.'), 'an edit in ' + sub + ' must take its kept outcome off the screen');
+      await checkFinishes();
+      assert.ok(!seen().includes('Kept outcome.'), 'and it must not come back with the next redraw in ' + sub);
+    }
+  ` });
+});
+
+test('a keyed status line keeps its outcome for the next line with that key, until forgetOutcomes() (TT-3448)', async (t) => {
+  withPlainDom(t);
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  settings.forgetOutcomes();
+  const first = settings.statusLine('test.panel');
+  first.good('Saved.');
+  // The panel is redrawn: a new line with the same key says the same thing.
+  const second = settings.statusLine('test.panel');
+  assert.equal(second.node.textContent, 'Saved.');
+  assert.equal(second.node.className, 'status is-good');
+  // The old line is still the one a save in flight writes to; the new one shows it.
+  first.bad('The server said no.');
+  assert.equal(second.node.textContent, 'The server said no.');
+  assert.equal(second.node.className, 'status is-bad');
+  // A line without a key is an editor's, and keeps nothing.
+  settings.statusLine().good('Connected.');
+  assert.equal(settings.statusLine().node.textContent, '');
+  // forgetOutcome() takes one panel's line off the screen.
+  settings.forgetOutcome('test.panel');
+  assert.equal(second.node.textContent, '');
+  assert.equal(settings.statusLine('test.panel').node.textContent, '');
+  // After forgetOutcomes(), a line from before writes only into itself.
+  const before = settings.statusLine('test.panel');
+  before.working('Saving…');
+  settings.forgetOutcomes();
+  const after = settings.statusLine('test.panel');
+  assert.equal(after.node.textContent, '', 'an outcome must not outlive forgetOutcomes()');
+  before.good('Saved.');
+  assert.equal(before.node.textContent, 'Saved.');
+  assert.equal(after.node.textContent, '', 'a write from before forgetOutcomes() must not reach the new line');
+  assert.equal(settings.statusLine('test.panel').node.textContent, '');
+});
+
+test('a drawer with an id comes back as it was left, and one without comes back shut (TT-3448)', async (t) => {
+  withPlainDom(t);
+  const { fold } = await import(fileUrl(UI, 'views/settings.js'));
+  const toggleOf = (drawer) => drawer.children[0];
+  const bodyOf = (drawer) => drawer.children[1];
+  const remembered = fold('Advanced', [], { id: 'test.drawer' });
+  toggleOf(remembered).fire('click');
+  const again = fold('Advanced', [], { id: 'test.drawer' });
+  assert.equal(bodyOf(again).hidden, false, 'a remembered drawer must come back open');
+  assert.equal(toggleOf(again).getAttribute('aria-expanded'), 'true');
+  toggleOf(again).fire('click');
+  assert.equal(bodyOf(fold('Advanced', [], { id: 'test.drawer' })).hidden, true, 'and shut once shut');
+  const plain = fold('Advanced', []);
+  toggleOf(plain).fire('click');
+  assert.equal(bodyOf(fold('Advanced', [])).hidden, true, 'a drawer without an id always starts shut');
+});
+
+test('every Settings panel line is keyed by its panel, every editor line is not, and panel drawers carry unique ids (TT-3448)', () => {
+  const src = fs.readFileSync(path.join(UI, 'views', 'settings.js'), 'utf8');
+  const aiSrc = fs.readFileSync(path.join(UI, 'views', 'ai-access.js'), 'utf8');
+  const bodyOf = (name) => {
+    const start = src.search(new RegExp(`function ${name}\\(`));
+    assert.ok(start >= 0, `${name} is missing`);
+    return src.slice(start, src.indexOf('\n}\n', start));
+  };
+  // A panel's line outlives the panel's redraw; an editor's goes with the
+  // editor, which hands its outcome to the panel's line instead.
+  const panels = { youPanel: 'you', modelPanel: 'model', mailPanel: 'mail', calendarPanel: 'calendars', sourcesPanel: 'sources', sweepPanel: 'sweep', privacyPanel: 'privacy', dataPanel: 'data' };
+  for (const [fn, key] of Object.entries(panels)) {
+    const calls = bodyOf(fn).match(/statusLine\([^)]*\)/g) || [];
+    assert.deepEqual(calls, [`statusLine('${key}')`], `${fn} must have one line, keyed '${key}'`);
+  }
+  for (const fn of ['mailForm', 'simpleMailForm', 'calendarForm', 'sourceForm', 'microsoftSignIn', 'googleSignIn']) {
+    for (const call of bodyOf(fn).match(/statusLine\([^)]*\)/g) || []) assert.equal(call, 'statusLine()', `${fn}'s line belongs to its editor and must not be keyed`);
+  }
+
+  // Ids are what a drawer is remembered by: two drawers sharing one would
+  // open and close each other.
+  const ids = [...src.matchAll(/\{ id: '([a-z]+\.[a-z]+)' \}\)/g), ...aiSrc.matchAll(/\{ id: '([a-z]+\.[a-z]+)' \}\)/g)].map((m) => m[1]);
+  assert.equal(new Set(ids).size, ids.length, `a drawer id is used twice: ${ids.join(', ')}`);
+  assert.deepEqual(ids.sort(), ['about.security', 'ai.connect', 'data.experts', 'model.advanced', 'model.more', 'privacy.advanced', 'sweep.advanced']);
+  // Drawers inside an account's editor are not remembered: they go with it.
+  for (const fn of ['mailForm', 'simpleMailForm', 'calendarForm', 'microsoftSignIn', 'googleSignIn']) {
+    assert.doesNotMatch(bodyOf(fn), /fold\([^;]*\{ id:/, `${fn}'s drawers belong to its editor`);
+  }
+
+  // Outcomes are forgotten wherever the screen changes without a change of
+  // Settings tab: setup starting or ending, and each step of setup, whose
+  // AI step mounts the same panel. A change of tab is driven above.
+  const app = fs.readFileSync(path.join(UI, 'app.js'), 'utf8');
+  assert.match(app, /if \(onboarding !== outcomesOnboarding\) \{\s*outcomesOnboarding = onboarding;\s*forgetOutcomes\(\);/,
+    'render() must forget outcomes when setup starts or ends');
+  const onboarding = fs.readFileSync(path.join(UI, 'views', 'onboarding.js'), 'utf8');
+  assert.match(onboarding, /function go\(stepId, rerender\) \{[^}]*forgetOutcomes\(\);[^}]*rerender\(\);/,
+    'each setup step must forget the last one\'s outcomes');
 });
 
 test('first-run setup stays on Email after saving the AI, and can finish even when storage refuses writes', () => {
