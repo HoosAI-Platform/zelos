@@ -457,10 +457,13 @@ true.
    for each plain version folder, highest first: signature, a manifest naming
    the folder's own version, a version newer than the running app, size and
    SHA-256 (and Authenticode, when configured). The first that passes is
-   offered without downloading it a second time; one that fails is deleted,
-   and anything in the folder that is not a plain version folder — a link, a
-   stray file, the files an earlier version of Zelos kept at the top — is
-   removed without being followed. A newer release found while an update is
+   offered without downloading it a second time; one that fails is deleted.
+   One that could not be checked at all — a file Windows still holds open,
+   a signature check that did not answer — is left in place, not offered,
+   and checked again (after the release's own manifest has verified) before
+   that version is ever downloaded again. Anything in the folder that is not
+   a plain version folder — a link, a stray file, the files an earlier
+   version of Zelos kept at the top — is removed without being followed. A newer release found while an update is
    ready downloads into its own folder beside it — at once with automatic
    updates on, and only when the person chooses its Download with them off —
    and the ready update stays offered, and is what **Restart to update**
@@ -469,9 +472,9 @@ true.
    reported at once; automatic ones are retried hourly and reported after
    three in a row. A release pulled back to an older version drops the ready
    update at once, before anything else is verified. While a restart is
-   being prepared and carried out, no check runs and nothing in the folder
-   changes. Public keys that cannot
-   mean anything — small-order points, against which a signature can be forged
+   being prepared and carried out, no check runs and the ready update's
+   folder is not replaced or removed; a download it stopped removes only its
+   own folder. Public keys that cannot mean anything — small-order points, against which a signature can be forged
    without any private key — are refused as if absent. Someone able to change
    the GitHub release, but without the private key, cannot get an update
    accepted. The private key is a secret of a protected GitHub environment

@@ -503,6 +503,14 @@ export function createUpdater({
   // the ready update ("also available — Download"), never in its place.
   let newer = null;
   let quietFailures = 0;         // newer releases that failed beside the ready one, in a row
+  // The newer release a download beside the ready one is fetching, while it
+  // runs: if turning updates off stops it, it is offered again as `newer`.
+  let besideOf = null;
+  // Version folders the launch could not check — a file Windows still held
+  // open, a verifier that did not answer. Not deleted for that: every tidy
+  // this session leaves them, and a download of the same version checks the
+  // folder again before fetching anything (QA, 2026-10-10, TT-3485).
+  const held = new Set();
   let controller = null;
   let tick = null;
   let first = null;
@@ -588,8 +596,8 @@ export function createUpdater({
   }
 
   /**
-   * Remove everything in the download folder except the ready update's folder
-   * and the one being downloaded — the old flat layout's files, versions that
+   * Remove everything in the download folder except the ready update's folder,
+   * the one being downloaded and any the launch could not check — the old flat layout's files, versions that
    * were replaced or failed, anything that is not a plain version folder. An
    * entry is removed, never followed: a symlink is unlinked, not entered. A
    * file the system still holds open is left for next time.
@@ -601,9 +609,9 @@ export function createUpdater({
    * the download folder's own entries are touched — the attempt and result
    * files beside it are not (QA, 2026-10-10, TT-3485).
    */
-  function tidy({ launch = false, hold = [] } = {}) {
+  function tidy({ launch = false } = {}) {
     if (stopped || committed || !downloadDir) return;
-    const keep = new Set(hold);
+    const keep = new Set(held);
     for (const dir of [ready?.dir, fetching?.dir]) if (dir) keep.add(path.basename(dir));
     if (!launch) keep.add(SWAP_NAME);
     let entries;
@@ -765,48 +773,78 @@ export function createUpdater({
     const mine = { version, dir, done: new Promise((resolve) => { settle = resolve; }) };
     fetching = mine;
     const file = path.join(dir, name);
+    // Set when this download must not remove its folder on the way out: a
+    // folder it adopted, or one it could not check.
+    let keepFolder = false;
+    let adopted = null;
     try {
-      fs.rmSync(dir, { recursive: true, force: true });
-      if (!beside) set({ status: 'downloading', progress: 0 });
-      const digest = await downloadToFile(asset.url, file, {
-        fetchImpl, signal: own.signal, expectedSize: expected.size, setTimer, clearTimer,
-        onProgress: (fraction) => {
-          const rounded = Math.floor(fraction * 100) / 100;
-          if (!quiet && rounded !== progress && controller === own) set({ progress: rounded });
-        },
-      });
-      if (digest !== expected.sha256) throw new Error('The downloaded update does not match the signed release.');
-      if (platform === 'win32' && windowsPublisher) await verifyAuthenticode(file);
-      // Turning updates off, the shell stopping, or a Restart to update
-      // while the file was being checked: this download is no longer wanted.
-      if (stopped || committed || controller !== own) throw new Error('The update download was stopped.');
-      // The signed manifest and its signature are kept beside the download,
-      // so the next launch can verify it again and offer it at once rather
-      // than fetching the whole file a second time. The manifest is written
-      // last, under a temporary name and then renamed, so a folder holding a
-      // release.json is one whose every other file is already in place; one
-      // without is a download that never finished, and the next launch
-      // deletes it.
-      try {
-        fs.writeFileSync(path.join(dir, NOTES_NAME), JSON.stringify({ notes: typeof raw?.body === 'string' ? raw.body.slice(0, 6_000) : '' }));
-        fs.writeFileSync(path.join(dir, SIGNATURE_NAME), signatureBytes);
-        const temp = path.join(dir, `${MANIFEST_NAME}.partial`);
-        fs.writeFileSync(temp, manifestBytes);
-        fs.renameSync(temp, path.join(dir, MANIFEST_NAME));
-      } catch (err) {
-        log('warn', 'could not keep the update for the next launch', { error: err.message });
+      // A folder for this version already here is one the launch could not
+      // check, or one a crash left. Now that the release's own manifest has
+      // verified, it is checked as the launch would: one that passes is
+      // offered as it is, without fetching the file again; one definitely
+      // refused is replaced; one that still cannot be checked is left alone
+      // and this attempt fails, to be tried again later.
+      let present = false;
+      try { present = fs.lstatSync(dir).isDirectory(); } catch { present = false; }
+      if (present) {
+        try {
+          adopted = await verifyKept(version, dir);
+          keepFolder = true;
+        } catch (err) {
+          if (!err?.refused) {
+            keepFolder = true;
+            throw err;
+          }
+        }
+      }
+      if (adopted) {
+        if (stopped || committed || controller !== own) throw new Error('The update download was stopped.');
+        held.delete(version);
+      } else {
+        held.delete(version);
+        fs.rmSync(dir, { recursive: true, force: true });
+        if (!beside) set({ status: 'downloading', progress: 0 });
+        const digest = await downloadToFile(asset.url, file, {
+          fetchImpl, signal: own.signal, expectedSize: expected.size, setTimer, clearTimer,
+          onProgress: (fraction) => {
+            const rounded = Math.floor(fraction * 100) / 100;
+            if (!quiet && rounded !== progress && controller === own) set({ progress: rounded });
+          },
+        });
+        if (digest !== expected.sha256) throw new Error('The downloaded update does not match the signed release.');
+        if (platform === 'win32' && windowsPublisher) await verifyAuthenticode(file);
+        // Turning updates off, the shell stopping, or a Restart to update
+        // while the file was being checked: this download is no longer wanted.
+        if (stopped || committed || controller !== own) throw new Error('The update download was stopped.');
+        // The signed manifest and its signature are kept beside the download,
+        // so the next launch can verify it again and offer it at once rather
+        // than fetching the whole file a second time. The manifest is written
+        // last, under a temporary name and then renamed, so a folder holding a
+        // release.json is one whose every other file is already in place; one
+        // without is a download that never finished, and the next launch
+        // deletes it.
+        try {
+          fs.writeFileSync(path.join(dir, NOTES_NAME), JSON.stringify({ notes: typeof raw?.body === 'string' ? raw.body.slice(0, 6_000) : '' }));
+          fs.writeFileSync(path.join(dir, SIGNATURE_NAME), signatureBytes);
+          const temp = path.join(dir, `${MANIFEST_NAME}.partial`);
+          fs.writeFileSync(temp, manifestBytes);
+          fs.renameSync(temp, path.join(dir, MANIFEST_NAME));
+        } catch (err) {
+          log('warn', 'could not keep the update for the next launch', { error: err.message });
+        }
       }
     } catch (err) {
-      removeFolder(dir);
+      if (!keepFolder) removeFolder(dir);
       throw err;
     } finally {
       if (fetching === mine) fetching = null;
       settle();
     }
     const replaced = ready?.version ?? '';
-    ready = { version, dir, file, sha256: expected.sha256, releaseUrl: url, notes: text };
+    ready = adopted ? { ...adopted, releaseUrl: url, notes: text } : { version, dir, file, sha256: expected.sha256, releaseUrl: url, notes: text };
     controller = null;
     newer = null;
+    besideOf = null;
     quietFailures = 0;
     // The update this one replaces, and anything else left over, goes now.
     tidy();
@@ -904,17 +942,15 @@ export function createUpdater({
    * first that verifies is ready — after a crash mid-replacement that is the
    * newer one when it finished, the older one when it did not. A folder that
    * is definitely refused is deleted; one that could not be checked is held
-   * for this launch. Resolves to the names held, which the launch tidy keeps
-   * (QA, 2026-10-10, TT-3485).
+   * (see `held`) rather than deleted (QA, 2026-10-10, TT-3485).
    */
   async function restoreReady() {
-    const held = [];
     let entries;
     try {
-      if (!fs.lstatSync(downloadDir).isDirectory()) return held;
+      if (!fs.lstatSync(downloadDir).isDirectory()) return;
       entries = fs.readdirSync(downloadDir, { withFileTypes: true });
     } catch {
-      return held;
+      return;
     }
     const newer = (name) => { try { return compareVersions(name, currentVersion) > 0; } catch { return false; } };
     const versions = entries
@@ -930,16 +966,15 @@ export function createUpdater({
           log('info', 'a kept update did not verify and was removed', { version, error: err.message });
           removeFolder(dir);
         } else {
-          log('warn', 'a kept update could not be checked; it is left for the next launch', { version, error: err?.message });
-          held.push(version);
+          log('warn', 'a kept update could not be checked; it is left in place', { version, error: err?.message });
+          held.add(version);
         }
         continue;
       }
       set({ status: 'ready', error: '', progress: null, latestVersion: version, releaseUrl: ready.releaseUrl, notes: ready.notes });
       log('info', 'an update downloaded earlier is ready', { version });
-      return held;
+      return;
     }
-    return held;
   }
 
   /* ----------------------------- checks ---------------------------- */
@@ -1025,10 +1060,17 @@ export function createUpdater({
       // update is what the screen describes and what Restart installs; if it
       // fails, only its own folder goes (QA, 2026-10-10, TT-3485).
       const version = info.latestVersion;
+      // What is offered beside the ready update follows what is happening to
+      // it: the person's own download keeps it named, so its progress shows
+      // and Download comes back if it is stopped; a quiet one takes the offer
+      // down, so no Download button sits there that would do nothing.
+      besideOf = { version, releaseUrl: info.releaseUrl };
+      newer = asked ? { ...besideOf } : null;
       set({ ...release, ...(asked ? { progress: 0, error: '' } : {}) });
       download(version, raw, own, { beside: true, quiet: !asked, releaseUrl: info.releaseUrl, notes: info.notes }).catch((err) => {
         if (controller === own) {
           controller = null;
+          besideOf = null;
           nextAttemptAt = now() + RETRY_INTERVAL_MS;
           log('warn', 'a newer update could not be downloaded; the ready one is kept', { version, error: err?.message });
           const said = String(err?.message || 'The download did not complete.');
@@ -1053,6 +1095,7 @@ export function createUpdater({
       ready = null;
       newer = null;
       quietFailures = 0;
+      error = '';
       tidy();
     }
     if (!info.updateAvailable) {
@@ -1136,7 +1179,8 @@ export function createUpdater({
       // Then everything else in the folder goes: versions that did not win,
       // what the old one-update-at-a-time layout left at the top, anything
       // that is not a plain version folder.
-      tidy({ launch: true, hold: await restoreReady() });
+      await restoreReady();
+      tidy({ launch: true });
       nextAttemptAt = now() + FIRST_CHECK_DELAY_MS;
       first = setTimer(() => {
         first = null;
@@ -1150,9 +1194,13 @@ export function createUpdater({
 
     state: snapshot,
 
-    /** The person asked: check now, and download if they have automatic updates on. */
+    /**
+     * The person asked: check now, and download if they have automatic
+     * updates on — with its progress shown, even beside a ready update,
+     * since someone is waiting to see what the check found.
+     */
     checkNow() {
-      return check({ download: settings.auto });
+      return check({ download: settings.auto, asked: true });
     },
 
     /**
@@ -1183,6 +1231,10 @@ export function createUpdater({
         controller = null;
         if (status !== 'ready') status = 'idle';
         progress = null;
+        // A newer release that was downloading beside the ready one is
+        // offered again, as a check with updates off would have offered it.
+        if (besideOf && ready) newer = { ...besideOf };
+        besideOf = null;
       }
       changed();
       return snapshot();
@@ -1204,6 +1256,7 @@ export function createUpdater({
         controller = null;
         interrupted = true;
         progress = null;
+        besideOf = null;
       }
       preparing = true;
       try {
