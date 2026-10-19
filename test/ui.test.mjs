@@ -890,6 +890,155 @@ test('a toast dismisses itself, and an action toast is given longer', async (t) 
   assert.equal(store.state.toast, null);
 });
 
+/**
+ * A failure outranks a success (TT-3493). notify() used to replace whatever
+ * was showing, so a success raised a moment later hid a failure before
+ * anyone could read it.
+ */
+test('a failure is not covered by a later success, and the Undo waits behind it', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  store.notify('Could not update that item: the server is not there', { tone: 'warn' });
+  const undo = () => {};
+  store.notify('Marked done: the invoice', { action: { label: 'Undo', run: undo } });
+  assert.equal(store.state.toast?.tone, 'warn', 'a success must not cover a showing failure');
+
+  // Dismissing the failure brings the waiting Undo forward, still able to undo.
+  store.dismissToast();
+  assert.equal(store.state.toast?.message, 'Marked done: the invoice');
+  assert.equal(store.state.toast?.action?.run, undo);
+
+  // A failure arriving over an Undo pushes it aside, not away.
+  store.notify('Could not save that draft: try again', { tone: 'warn' });
+  assert.equal(store.state.toast?.tone, 'warn');
+  store.dismissToast();
+  assert.equal(store.state.toast?.message, 'Marked done: the invoice', 'the displaced Undo comes back');
+
+  // notify(null) clears the waiting toast too.
+  store.notify('Could not update that item: again', { tone: 'warn' });
+  store.notify('Saved');
+  store.notify(null);
+  assert.equal(store.state.toast, null);
+  store.dismissToast();
+  assert.equal(store.state.toast, null, 'nothing was left waiting');
+});
+
+test('a failure is given longer than a success to be read', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  store.notify('Could not update that item: the server is not there', { tone: 'warn' });
+  t.mock.timers.tick(6_100);
+  assert.equal(store.state.toast?.tone, 'warn', 'a failure outlives the plain six seconds');
+  t.mock.timers.tick(5_800);
+  assert.ok(store.state.toast, 'still there just short of twelve seconds');
+  t.mock.timers.tick(200);
+  assert.equal(store.state.toast, null, 'gone at twelve seconds');
+
+  // A success waiting behind a failure shows when the failure times out.
+  store.notify('Could not update that item: again', { tone: 'warn' });
+  store.notify('Saved');
+  t.mock.timers.tick(12_000);
+  assert.equal(store.state.toast?.message, 'Saved');
+  t.mock.timers.tick(6_000);
+  assert.equal(store.state.toast, null, 'and gets its own fresh clock');
+});
+
+test('a toast left waiting longer than 30 seconds is dropped, not shown late', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  store.notify('Could not update that item: one', { tone: 'warn' });
+  store.notify('Saved');
+  assert.equal(store.state.toast?.message, 'Could not update that item: one', '"Saved" waits');
+  t.mock.timers.tick(10_000);
+  store.notify('Could not update that item: two', { tone: 'warn' });
+  t.mock.timers.tick(10_000);
+  store.notify('Could not update that item: three', { tone: 'warn' });
+  // The third failure ends at 32 s; "Saved" is old news by then.
+  t.mock.timers.tick(11_900);
+  assert.equal(store.state.toast?.message, 'Could not update that item: three');
+  t.mock.timers.tick(100);
+  assert.equal(store.state.toast, null, 'a stale success must not appear long after the fact');
+});
+
+test('a repeated toast keeps its identity only when it carries no action', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  // The same words again restart the clock without a new object, so the app
+  // neither rebuilds the toast nor reads it out a second time.
+  store.notify('Saved');
+  const first = store.state.toast;
+  t.mock.timers.tick(4_000);
+  store.notify('Saved');
+  assert.equal(store.state.toast, first, 'a repeat must keep the same object');
+  t.mock.timers.tick(4_000);
+  assert.equal(store.state.toast, first, 'and restart its clock');
+  t.mock.timers.tick(2_100);
+  assert.equal(store.state.toast, null);
+
+  // Two Undos under the same words undo different things.
+  const undoA = () => {};
+  const undoB = () => {};
+  store.notify('Marked done: the invoice', { action: { label: 'Undo', run: undoA } });
+  const a = store.state.toast;
+  store.notify('Marked done: the invoice', { action: { label: 'Undo', run: undoB } });
+  assert.notEqual(store.state.toast, a, 'a second Undo is a new toast');
+  assert.equal(store.state.toast.action.run, undoB, 'and offers the newer undo');
+});
+
+/**
+ * The race the ticket saw: two items acted on at once, the first request
+ * fails, the second succeeds and raises its Undo after its board refetch.
+ */
+test('two actions in flight: a failure is still showing after the other one succeeds', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const board = {
+    items: [
+      { id: 'a', bucket: 'now', state: 'open', headline: 'chase the survey invoice' },
+      { id: 'b', bucket: 'now', state: 'open', headline: 'book the site visit' },
+    ],
+    counts: {}, events: [], drafts: [], runs: { last: null }, notes: [], first: null, now: null,
+  };
+  const release = {};
+  globalThis.fetch = async (reqPath, init = {}) => {
+    if (init.method === 'POST') {
+      const id = reqPath.split('/')[3];
+      await new Promise((resolve) => { release[id] = resolve; });
+      if (id === 'a') return { ok: false, status: 503, text: async () => '{"error":"the server is not there"}' };
+      return { ok: true, status: 200, text: async () => '{}' };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(board) };
+  };
+  t.after(() => { delete globalThis.fetch; store.notify(null); });
+  store.state.board = { ...store.state.board, ...board };
+
+  const first = store.setItemState('a', 'done');
+  const second = store.setItemState('b', 'done');
+  await settle();
+  release.a();
+  await first;
+  assert.equal(store.state.toast?.tone, 'warn');
+  release.b();
+  await second;
+  assert.equal(store.state.toast?.tone, 'warn', 'the later success must not hide the failure');
+  assert.match(store.state.toast.message, /Could not update that item/);
+  store.dismissToast();
+  assert.equal(store.state.toast?.message, 'Marked done: book the site visit');
+  assert.equal(store.state.toast?.action?.label, 'Undo');
+});
+
 test('done raises an Undo that restores the exact prior state, deadline included', async (t) => {
   stubBrowserGlobals();
   const store = await import(fileUrl(UI, 'lib/store.js'));
@@ -3468,6 +3617,25 @@ test('the skip link focuses the current view without changing its route', () => 
     assert.equal(window.location.hash, '#/today');
     assert.equal(main.firstChild, content, 'the current calendar must stay in place');
     assert.equal(document.activeElement, main);
+  ` });
+});
+
+test('a failure toast interrupts, and its Dismiss brings forward what waited behind it', () => {
+  runAppScenario({ scenario: `
+    const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+    const toastNode = () => plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('toast'));
+    store.notify('Could not update that item: the server is not there', { tone: 'warn' });
+    await settle();
+    assert.equal(toastNode().attributes.role, 'alert', 'a failure is announced at once');
+    store.notify('Saved');
+    await settle();
+    assert.match(textOf(root), /Could not update that item/);
+    assert.doesNotMatch(textOf(root), /Saved/);
+    findButton(toastNode(), 'Dismiss').fire('click');
+    await settle();
+    assert.match(textOf(toastNode()), /Saved/);
+    assert.equal(toastNode().attributes.role, 'status', 'anything else waits its turn to be read');
+    store.notify(null);
   ` });
 });
 

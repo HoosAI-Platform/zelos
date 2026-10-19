@@ -107,24 +107,76 @@ export function emit() {
  * longer — vanishing under a cursor that is on its way to the button is worse
  * than lingering — but it still goes eventually; a permanent toast is a banner
  * that chose the wrong container.
+ *
+ * A failure outranks a success. Two actions in flight at once used to race:
+ * the second one's "Marked done", raised after its board refetch, replaced the
+ * first one's "Could not update that item" before anyone could read it. So a
+ * warning always shows, and is given longer to be read; anything that is not
+ * a warning waits behind it in one pending slot (newest wins) and shows when
+ * the warning ends, unless it has gone stale by then. An Undo pushed aside by
+ * a warning waits in the same slot, because the undo it offers is still real.
  */
 const TOAST_MS = 6_000;
 const TOAST_ACTION_MS = 8_000;
+const TOAST_WARN_MS = 12_000;
+/** A pending toast older than this is old news when its turn comes. */
+const TOAST_PENDING_MS = 30_000;
 let toastTimer = null;
+let pendingToast = null;
 
-export function notify(message, { tone = 'info', action = null } = {}) {
+/** Put `toast` (or nothing) on screen with a fresh clock. Does not emit. */
+function showToast(toast) {
   clearTimeout(toastTimer);
   toastTimer = null;
-  state.toast = message ? { message, tone, action, at: Date.now() } : null;
-  if (state.toast) {
-    toastTimer = setTimeout(() => {
-      toastTimer = null;
-      state.toast = null;
-      emit();
-    }, action ? TOAST_ACTION_MS : TOAST_MS);
-    // A pending toast is no reason to keep a process alive. The browser's
-    // timer id is a number and has no unref; Node's (the tests) does.
-    toastTimer?.unref?.();
+  state.toast = toast;
+  if (!toast) return;
+  const ms = toast.tone === 'warn' ? TOAST_WARN_MS : toast.action ? TOAST_ACTION_MS : TOAST_MS;
+  toastTimer = setTimeout(() => {
+    toastTimer = null;
+    dismissToast();
+  }, ms);
+  // A pending toast is no reason to keep a process alive. The browser's
+  // timer id is a number and has no unref; Node's (the tests) does.
+  toastTimer?.unref?.();
+}
+
+/**
+ * The current toast is done — timed out, dismissed, or its action pressed.
+ * Whatever was waiting behind it takes its place, if it is still fresh.
+ */
+export function dismissToast() {
+  const next = pendingToast && Date.now() - pendingToast.at < TOAST_PENDING_MS ? pendingToast : null;
+  pendingToast = null;
+  showToast(next);
+  emit();
+}
+
+/** notify(null) clears everything, the waiting toast included. */
+export function notify(message, { tone = 'info', action = null } = {}) {
+  if (!message) {
+    pendingToast = null;
+    showToast(null);
+    emit();
+    return;
+  }
+  const current = state.toast;
+  // The same words again restart the clock on the SAME object, so the app
+  // neither rebuilds the toast nor reads it out twice. Not for an action
+  // toast: a second Undo undoes a different thing, even under the same words.
+  if (current && !action && !current.action && current.message === message && current.tone === tone) {
+    showToast(current);
+    return;
+  }
+  const toast = { message, tone, action, at: Date.now() };
+  if (tone === 'warn') {
+    if (current && current.tone !== 'warn' && current.action) pendingToast = current;
+    showToast(toast);
+  } else if (current?.tone === 'warn') {
+    // Nothing on screen changes, so there is nothing to emit.
+    pendingToast = toast;
+    return;
+  } else {
+    showToast(toast);
   }
   emit();
 }

@@ -20,7 +20,7 @@
 import { el, button, meander, replace, focusQuietly } from './lib/dom.js';
 import {
   state, subscribe, refresh, watchSweeps, watchBoard, startSweep, railCounts, timezone,
-  needsOnboarding, onboardingDone, applyAccent, currentAccent, notify, nowMark, checkAgainLine,
+  needsOnboarding, onboardingDone, applyAccent, currentAccent, notify, dismissToast, nowMark, checkAgainLine,
 } from './lib/store.js';
 import { api, hasToken } from './lib/api.js';
 import { BUCKET_LABEL, sweepSummary, sweepDetail, tokenLine } from './lib/format.js';
@@ -371,7 +371,7 @@ function tabbar(current) {
 
 /**
  * The toast, as {node, text}. Its message node is left EMPTY here and filled by
- * announce() once the toast is in the document — a role="status" element that
+ * announce() once the toast is in the document — a live-region element that
  * arrives with its text already written is read by nobody, which meant every
  * failed save and every Undo offer in this app was silent.
  */
@@ -379,19 +379,24 @@ function toastBar() {
   if (!state.toast) return null;
   const action = state.toast.action;
   const text = el('p');
-  const node = el('div', { class: `toast toast-${state.toast.tone}`, role: 'status' }, [
+  // A failure interrupts; anything else waits for a pause in speech.
+  const role = state.toast.tone === 'warn' ? 'alert' : 'status';
+  const node = el('div', { class: `toast toast-${state.toast.tone}`, role }, [
     text,
     action ? button(action.label, {
       class: 'link',
       onClick: () => {
         // Clear first: the action usually re-renders, and a toast describing an
-        // undone thing must not outlive the undo it offered.
+        // undone thing must not outlive the undo it offered. Only a success
+        // carries an action today, so nothing waits behind it to come forward
+        // here; a failure that one day offers "Retry" would need to drop the
+        // waiting toast instead.
         const run = action.run;
-        notify(null);
+        dismissToast();
         run();
       },
     }) : null,
-    button('Dismiss', { class: 'link', onClick: () => notify(null) }),
+    button('Dismiss', { class: 'link', onClick: () => dismissToast() }),
   ]);
   return { node, text };
 }
