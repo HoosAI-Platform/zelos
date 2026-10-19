@@ -528,6 +528,12 @@ export function createUpdater({
   let interrupted = false;
   let installProblem = '';       // an update the last restart did not land; kept for the session
   let snoozed = '';              // a version whose banner waits for the next launch; never saved
+  // Something tidy could not remove — usually the installer that has just
+  // relaunched Zelos, which Windows holds until it exits. Tried again by the
+  // launch timer and every tick until it goes (QA, 2026-10-09, TT-3483).
+  let leftovers = false;
+  // The launch's clean-up, or a retry of it, while it runs off the start path.
+  let cleaning = null;
 
   const log = (level, message, data) => { try { logger?.[level]?.(`updater: ${message}`, data); } catch { /* logging never breaks updating */ } };
 
@@ -600,7 +606,7 @@ export function createUpdater({
    * the one being downloaded and any the launch could not check — the old flat layout's files, versions that
    * were replaced or failed, anything that is not a plain version folder. An
    * entry is removed, never followed: a symlink is unlinked, not entered. A
-   * file the system still holds open is left for next time.
+   * file the system still holds open is left, and tried again (see tidied).
    *
    * Inert once stop() has run or a restart is committed: from then on the
    * folder belongs to the installer or the swap. The swap script itself is
@@ -611,18 +617,17 @@ export function createUpdater({
    */
   function tidy({ launch = false } = {}) {
     if (stopped || committed || !downloadDir) return;
-    const keep = new Set(held);
-    for (const dir of [ready?.dir, fetching?.dir]) if (dir) keep.add(path.basename(dir));
-    if (!launch) keep.add(SWAP_NAME);
+    const keep = keeping(launch);
     let entries;
     try {
       if (!fs.lstatSync(downloadDir).isDirectory()) {
         fs.rmSync(downloadDir, { force: true });
+        tidied(null);
         return;
       }
       entries = fs.readdirSync(downloadDir);
     } catch (err) {
-      if (err?.code !== 'ENOENT') log('warn', 'could not tidy the update folder', { error: err.message });
+      tidied(err?.code === 'ENOENT' ? null : err);
       return;
     }
     let failed = null;
@@ -630,10 +635,81 @@ export function createUpdater({
       if (keep.has(entry)) continue;
       try { fs.rmSync(path.join(downloadDir, entry), { recursive: true, force: true }); } catch (err) { failed ??= err; }
     }
-    if (failed) log('warn', 'could not remove an old update download', { error: failed.message });
     if (!keep.size || (keep.size === 1 && keep.has(SWAP_NAME))) {
       try { fs.rmdirSync(downloadDir); } catch { /* not empty: what is left goes next time */ }
     }
+    tidied(failed);
+  }
+
+  /** What tidy leaves alone, as names in the download folder; asked afresh before each removal. */
+  function keeping(launch) {
+    const keep = new Set(held);
+    for (const dir of [ready?.dir, fetching?.dir]) if (dir) keep.add(path.basename(dir));
+    if (!launch) keep.add(SWAP_NAME);
+    return keep;
+  }
+
+  /**
+   * How a full pass of tidy went. Failing is said once, when it begins, not
+   * on every tick that tries again; `leftovers` then has the launch timer and
+   * the ticks try again until a pass removes everything.
+   */
+  function tidied(failed) {
+    if (failed) {
+      if (!leftovers) log('warn', 'could not remove an old update download; it will be tried again', { error: failed.message });
+      leftovers = true;
+    } else {
+      if (leftovers) log('info', 'old update downloads left earlier were removed');
+      leftovers = false;
+    }
+  }
+
+  /**
+   * tidy() off the start path, and for its retries: the same rules, with the
+   * file system's promises, so a large removal — an update folder, or the
+   * macOS copy beside the app — never holds up opening Zelos. What to keep is
+   * asked again before each entry, since a check may start, or a restart be
+   * committed, while it runs; a download waits for it before claiming a
+   * folder, and a Restart to update before staging. One pass at a time.
+   */
+  function tidyLater({ launch = false } = {}) {
+    if (cleaning) return cleaning;
+    cleaning = (async () => {
+      if (launch) await removeMacCopyLater();
+      if (stopped || committed || !downloadDir) return;
+      let entries;
+      try {
+        if (!(await fs.promises.lstat(downloadDir)).isDirectory()) {
+          await fs.promises.rm(downloadDir, { force: true });
+          tidied(null);
+          return;
+        }
+        entries = await fs.promises.readdir(downloadDir);
+      } catch (err) {
+        tidied(err?.code === 'ENOENT' ? null : err);
+        return;
+      }
+      let failed = null;
+      for (const entry of entries) {
+        // From here the folder belongs to the installer or the swap.
+        if (stopped || committed) return;
+        if (keeping(launch).has(entry)) continue;
+        try { await fs.promises.rm(path.join(downloadDir, entry), { recursive: true, force: true }); } catch (err) { failed ??= err; }
+      }
+      if (stopped || committed) return;
+      const keep = keeping(launch);
+      if (!keep.size || (keep.size === 1 && keep.has(SWAP_NAME))) {
+        try { await fs.promises.rmdir(downloadDir); } catch { /* not empty: what is left goes next time */ }
+      }
+      // Recorded last: a tick that then sees `leftovers` starts a fresh pass
+      // rather than joining this one as it ends.
+      tidied(failed);
+    })().catch((err) => {
+      log('warn', 'could not tidy the update folder', { error: err?.message });
+      tidied(err ?? new Error('tidy failed'));
+    })
+      .finally(() => { cleaning = null; });
+    return cleaning;
   }
 
   /** One version's folder, and nothing outside it; ready.dir is never passed here. */
@@ -667,6 +743,10 @@ export function createUpdater({
    * it did not — whatever the installer or swap script said. On macOS the
    * script's own result says which step failed. Either way the person is told
    * for the rest of this session, and the shell shows it once in a dialog.
+   * True when there was a restart: whatever it was installing is spent either
+   * way, so start() offers nothing kept and the launch's tidy removes it all —
+   * including, on Windows, the installer that has just relaunched Zelos and
+   * may hold its file a while yet (QA, 2026-10-09, TT-3483).
    */
   function readLastAttempt() {
     const read = (file) => {
@@ -680,29 +760,38 @@ export function createUpdater({
     };
     const attempted = attemptFile ? read(attemptFile) : null;
     const swap = resultFile ? parseSwapResult(read(resultFile)) : null;
-    if (attempted === null && !swap) return;
-    // Whatever the restart was installing is spent either way.
-    tidy({ launch: true });
+    if (attempted === null && !swap) return false;
     const version = /^\d+\.\d+\.\d+$/.test(String(attempted ?? '').trim()) ? attempted.trim() : swap?.version;
-    if (!version) return;
+    if (!version) return true;
     if (version === currentVersion) {
       log('info', 'the update was installed', { version });
-      return;
+      return true;
     }
     log('warn', 'the last update did not install', { version, step: swap?.step });
     installProblem = platform === 'darwin'
       ? `Zelos ${version} could not replace this copy of the app, so you are still on ${currentVersion}. Download it from the release page, or allow Zelos in System Settings → Privacy & Security → App Management and try again.`
       : `Zelos ${version} was not installed, so you are still on ${currentVersion}. If Windows asked for permission, the update needs it; otherwise download the installer from the release page.`;
+    return true;
   }
 
   /**
-   * The copy prepareInstall leaves beside the app. No swap can be running when
-   * this is called — at start, the single-instance lock means the last one has
-   * finished — so a copy found then belongs to a restart that never happened.
+   * The copy prepareInstall leaves beside the app, when that restart is
+   * abandoned. No swap can be running then, nor at launch (below), where the
+   * single-instance lock means the last one has finished — so a copy found
+   * then belongs to a restart that never happened.
    */
   function removeMacCopy() {
     if (platform !== 'darwin' || !mac.bundlePath) return;
     try { fs.rmSync(`${mac.bundlePath}${MAC_NEW_SUFFIX}`, { recursive: true, force: true }); } catch { /* left for next time */ }
+  }
+
+  /** The same at launch, off the start path: a whole app bundle can take a while to remove. */
+  async function removeMacCopyLater() {
+    if (platform !== 'darwin' || !mac.bundlePath) return;
+    // A Restart to update waits for this before staging, so a copy here now is
+    // still the old one; checked anyway, so a later change cannot make it race.
+    if (stopped || preparing || committed || ready?.staged) return;
+    try { await fs.promises.rm(`${mac.bundlePath}${MAC_NEW_SUFFIX}`, { recursive: true, force: true }); } catch { /* left for next time */ }
   }
 
   /* ---------------------------- downloads -------------------------- */
@@ -765,7 +854,9 @@ export function createUpdater({
     // check does not stop mid-way — and it removes its own folder when it
     // does. Starting on the same folder before then would have that clean-up
     // delete this download's file.
-    while (fetching) await fetching.done;
+    // Nor may it start while a tidy that runs in the background is part-way
+    // through removing what may be an old folder of the same version.
+    while (fetching || cleaning) await (fetching ? fetching.done : cleaning);
     if (stopped || controller !== own) throw new Error('The update check was stopped.');
     const dir = path.join(downloadDir, version);
     if (!VERSION.test(version) || ready?.dir === dir) throw new Error('The update could not be downloaded.');
@@ -1130,6 +1221,9 @@ export function createUpdater({
     if (!supported || stopped) return;
     tick = setTimer(() => {
       tick = null;
+      // Leftovers are tried again whether or not updates are automatic: they
+      // are only files that should not be there. A clean folder is left alone.
+      if (leftovers) tidyLater();
       if (settings.auto && !working() && (nextAttemptAt === null || now() >= nextAttemptAt)) {
         check({ download: true }).catch((err) => log('warn', 'scheduled check failed', { error: err.message }));
       }
@@ -1182,16 +1276,19 @@ export function createUpdater({
         changed();
         return snapshot();
       }
-      readLastAttempt();
-      removeMacCopy();
-      // Then everything else in the folder goes: versions that did not win,
-      // what the old one-update-at-a-time layout left at the top, anything
-      // that is not a plain version folder.
-      await restoreReady();
-      tidy({ launch: true });
+      const spent = readLastAttempt();
+      // What a restart was installing is not offered again; otherwise the
+      // kept update is found before anything is tidied, so it is kept.
+      if (!spent) await restoreReady();
+      // Then everything else goes — versions that did not win, what the old
+      // one-update-at-a-time layout left at the top, anything that is not a
+      // plain version folder, a copy beside the Mac app — in the background,
+      // so a large removal does not hold up the window.
+      tidyLater({ launch: true });
       nextAttemptAt = now() + FIRST_CHECK_DELAY_MS;
       first = setTimer(() => {
         first = null;
+        if (leftovers) tidyLater();
         if (settings.auto && !working()) check({ download: true }).catch(() => {});
       }, FIRST_CHECK_DELAY_MS);
       first?.unref?.();
@@ -1268,6 +1365,10 @@ export function createUpdater({
       }
       preparing = true;
       try {
+        // The launch's tidy may still be removing an old copy beside the Mac
+        // app, where staging is about to write a new one.
+        if (cleaning) await cleaning;
+        if (stopped || status !== 'ready' || !ready) { rearm(); return false; }
         committed = await prepareReady(ready);
         if (!committed) rearm();
         return committed;

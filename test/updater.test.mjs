@@ -20,7 +20,7 @@ import {
   ATTEMPT_FILE, createUpdater, downloadToFile, isStrongPublicKey, MAC_NEW_SUFFIX, MAC_SWAP_SCRIPT, macReplaceCheck,
   manifestAsset, openReleaseDownload, parseSwapResult, PENDING_DIR, publicKeyFrom, readUpdateSettings, RESULT_FILE,
   signatureMatches, signManifest, updateAssetName, verifyReleaseManifest, windowsReplaceCheck, writeUpdateSettings,
-  CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS, QUIET_FAILURES_SHOWN, RETRY_INTERVAL_MS,
+  CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS, QUIET_FAILURES_SHOWN, RETRY_INTERVAL_MS, TICK_MS,
 } from '../desktop/updater.js';
 import { RELEASE_API, REPOSITORY } from '../core/updates.mjs';
 
@@ -622,7 +622,7 @@ describe('the Windows updater', () => {
       tamper(path.join(sandbox, PENDING_DIR, '1.9.0'), fx);
       const again = windowsUpdater(fx);
       assert.equal((await again.updater.start()).status, 'idle');
-      assert.equal(fs.existsSync(path.join(sandbox, PENDING_DIR)), false, 'the leftovers are deleted');
+      await until(() => !fs.existsSync(path.join(sandbox, PENDING_DIR)), 'the leftovers to be deleted');
     });
   }
 
@@ -635,7 +635,7 @@ describe('the Windows updater', () => {
     first.updater.stop();
     const upgraded = windowsUpdater(fx, { deps: { currentVersion: '1.9.0' } });
     assert.equal((await upgraded.updater.start()).status, 'idle');
-    assert.equal(fs.existsSync(path.join(sandbox, PENDING_DIR)), false);
+    await until(() => !fs.existsSync(path.join(sandbox, PENDING_DIR)), 'the kept update to be deleted');
   });
 
   it('keeps checking while an update is ready: a newer release replaces it, a failed check does not', async () => {
@@ -1348,7 +1348,7 @@ describe('the update folder at launch', () => {
     const { newer } = await bothFolders();
     const h = windowsUpdater(newer);
     assert.equal((await h.updater.start()).latestVersion, '1.9.1');
-    assert.deepEqual(fs.readdirSync(pending()), ['1.9.1']);
+    await until(() => fs.readdirSync(pending()).join() === '1.9.1', '1.9.0 to be removed');
     assert.equal(h.github.seen.length, 0);
   });
 
@@ -1453,7 +1453,7 @@ describe('the update folder at launch', () => {
     const h = windowsUpdater(newer);
     const state = await h.updater.start();
     assert.equal(state.status, 'idle', 'a linked folder is never offered');
-    assert.equal(fs.existsSync(pending()), false, 'and everything in the folder went');
+    await until(() => !fs.existsSync(pending()), 'everything in the folder to go');
     assert.ok(fs.existsSync(path.join(outside, 'Zelos-1.9.1-setup-x64.exe')), 'the link was removed, not followed');
     assert.ok(fs.existsSync(path.join(sandbox, 'escape')), 'nothing outside the folder is touched');
   });
@@ -1472,8 +1472,125 @@ describe('the update folder at launch', () => {
     fs.writeFileSync(path.join(sandbox, ATTEMPT_FILE + '.keep'), 'beside the folder');
     const again = windowsUpdater(fx);
     assert.equal((await again.updater.start()).status, 'idle', 'the launch check downloads it again a minute later');
-    assert.equal(fs.existsSync(pending()), false);
+    await until(() => !fs.existsSync(pending()), 'the old layout to be deleted');
     assert.ok(fs.existsSync(path.join(sandbox, ATTEMPT_FILE + '.keep')), 'files beside the folder are not touched');
+  });
+});
+
+describe('what the tidying could not remove', () => {
+  const pending = (...parts) => path.join(sandbox, PENDING_DIR, ...parts);
+  // A folder this account cannot change stands in for a file Windows still
+  // holds open: the removal fails until it is let go. Root ignores that, and
+  // Windows folder permissions do not work this way.
+  const canLock = process.platform !== 'win32' && process.getuid?.() !== 0;
+  const unlocks = [];
+  /** Make `dir` (with a file inside) impossible to remove until the returned function runs. */
+  function lock(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Zelos-1.8.1-setup-x64.exe'), 'held by the installer');
+    fs.chmodSync(dir, 0o500);
+    const unlock = () => fs.chmodSync(dir, 0o700);
+    unlocks.push(unlock);
+    return unlock;
+  }
+  afterEach(() => { for (const unlock of unlocks.splice(0)) try { unlock(); } catch { /* already gone */ } });
+
+  /** A Windows updater with automatic updates off and a logger the test can read. */
+  function quietUpdater(fx, overrides = {}) {
+    writeUpdateSettings(path.join(sandbox, 'updates.json'), { auto: false });
+    const logged = [];
+    const logger = { info: (m) => logged.push(['info', m]), warn: (m) => logged.push(['warn', m]), error: (m) => logged.push(['error', m]) };
+    const h = windowsUpdater(fx, { ...overrides, deps: { logger, ...overrides.deps } });
+    const said = (level, text) => logged.filter(([l, m]) => l === level && m.includes(text)).length;
+    return { ...h, logged, said };
+  }
+  const LEFT = 'could not remove an old update download';
+  const tick = (h) => h.timers.fire(TICK_MS);
+
+  it('start() returns before the launch\'s tidying has finished, which then removes what is left', async () => {
+    fs.mkdirSync(pending('1.7.0'), { recursive: true });
+    fs.writeFileSync(pending('1.7.0', 'Zelos-1.7.0-setup-x64.exe'), 'an old installer');
+    const h = windowsUpdater(fixture());
+    await h.updater.start();
+    assert.ok(fs.existsSync(pending('1.7.0')), 'nothing is removed on the way to opening the window');
+    await until(() => !fs.existsSync(pending()), 'the folder to be tidied');
+  });
+
+  it('an installer still held after the restart it relaunched is removed by the launch timer once let go', { skip: !canLock }, async () => {
+    // The update landed: 1.8.1 is running, and its installer is still exiting.
+    fs.writeFileSync(path.join(sandbox, ATTEMPT_FILE), '1.8.1\n');
+    const unlock = lock(pending('1.8.1'));
+    fs.writeFileSync(pending('release.json'), 'a small file that goes at once');
+    const h = quietUpdater(fixture());
+    assert.equal((await h.updater.start()).installProblem, '');
+    await until(() => h.said('warn', LEFT) === 1, 'the leftover to be noted');
+    assert.equal(fs.existsSync(pending('release.json')), false, 'what could go, went');
+    assert.ok(fs.existsSync(pending('1.8.1')));
+    unlock();
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => !fs.existsSync(pending()) && h.said('info', 'were removed') === 1, 'the installer to be removed a minute after launch');
+    assert.equal(h.github.seen.length, 0, 'with updates off the launch timer only tidies');
+  });
+
+  it('the old one-update layout\'s files that could not be removed are tried again on later ticks, with updates off, and said once', { skip: !canLock }, async () => {
+    // As earlier versions left it: the installer and its files at the top.
+    fs.mkdirSync(pending(), { recursive: true });
+    fs.writeFileSync(pending('release.json'), '{}');
+    fs.writeFileSync(pending('release-notes.json'), '{}');
+    const unlock = lock(pending('staged'));
+    const h = quietUpdater(fixture());
+    await h.updater.start();
+    await until(() => h.said('warn', LEFT) === 1, 'the leftover to be noted');
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    for (let i = 0; i < 3; i++) {
+      tick(h);
+      await until(() => h.timers.timers.some((t) => !t.cleared && t.ms === TICK_MS), 'the next tick');
+      for (let n = 0; n < 20; n++) await settle();
+    }
+    assert.ok(fs.existsSync(pending('staged')), 'still held');
+    assert.equal(h.said('warn', LEFT), 1, 'said once, not on every tick');
+    unlock();
+    tick(h);
+    await until(() => !fs.existsSync(pending()), 'the leftover to be removed on a tick');
+    assert.equal(h.github.seen.length, 0, 'and nothing was checked: updates are off');
+  });
+
+  it('a clean folder is not touched by the ticks', async () => {
+    const h = windowsUpdater(fixture());
+    await h.updater.start();
+    await until(() => !fs.existsSync(pending()), 'the launch tidy');
+    // Something tidying would remove, put there after the launch; only a
+    // leftover the tidying itself failed on sends the ticks looking.
+    fs.mkdirSync(pending(), { recursive: true });
+    fs.writeFileSync(pending('stray.txt'), 'x');
+    h.updater.setAuto(false);
+    for (let i = 0; i < 3; i++) {
+      h.timers.fire(FIRST_CHECK_DELAY_MS);
+      tick(h);
+      for (let n = 0; n < 20; n++) await settle();
+    }
+    assert.ok(fs.existsSync(pending('stray.txt')));
+  });
+
+  it('nothing is tidied once a Restart to update has been committed', { skip: !canLock }, async () => {
+    const fx = fixture();
+    const first = windowsUpdater(fx);
+    await first.updater.start();
+    await first.updater.checkNow();
+    await until(() => first.updater.state().status === 'ready', 'the download');
+    first.updater.stop();
+    const unlock = lock(pending('1.8.0'));
+    const h = quietUpdater(fx);
+    assert.equal((await h.updater.start()).status, 'ready');
+    await until(() => h.said('warn', LEFT) === 1, 'the leftover to be noted');
+    assert.equal(await h.updater.prepareInstall(), true);
+    unlock();
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    tick(h);
+    for (let n = 0; n < 50; n++) await settle();
+    assert.ok(fs.existsSync(pending('1.8.0')), 'the folder is the installer\'s now');
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [pending('1.9.0', fx.name)]);
   });
 });
 
@@ -1543,7 +1660,7 @@ describe('the Mac updater', () => {
     const h = macUpdater(macFixture());
     fs.mkdirSync(`${h.bundlePath}${MAC_NEW_SUFFIX}`);
     await h.updater.start();
-    assert.equal(fs.existsSync(`${h.bundlePath}${MAC_NEW_SUFFIX}`), false);
+    await until(() => !fs.existsSync(`${h.bundlePath}${MAC_NEW_SUFFIX}`), 'the copy to be removed');
   });
 
   for (const [what, apps] of [
@@ -1577,7 +1694,7 @@ describe('the Mac updater', () => {
     assert.match(state.installProblem, /App Management/);
     for (const left of [path.join(sandbox, 'userData', RESULT_FILE), path.join(sandbox, 'userData', ATTEMPT_FILE),
       path.join(sandbox, 'userData', PENDING_DIR), `${h.bundlePath}${MAC_NEW_SUFFIX}`]) {
-      assert.equal(fs.existsSync(left), false, left);
+      await until(() => !fs.existsSync(left), left);
     }
 
     // "ok" from the script is not taken on trust: the running version decides.

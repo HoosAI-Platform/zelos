@@ -463,7 +463,12 @@ true.
    and checked again (after the release's own manifest has verified) before
    that version is ever downloaded again. Anything in the folder that is not
    a plain version folder — a link, a stray file, the files an earlier
-   version of Zelos kept at the top — is removed without being followed. A newer release found while an update is
+   version of Zelos kept at the top — is removed without being followed,
+   after the launch rather than holding it up. What cannot be removed yet —
+   usually the installer Windows still holds while it relaunches Zelos — is
+   tried again a minute after launch and every fifteen minutes until it goes,
+   whether or not updates are automatic; once a restart to update is under
+   way, nothing it needs is touched. A newer release found while an update is
    ready downloads into its own folder beside it — at once with automatic
    updates on, and only when the person chooses its Download with them off —
    and the ready update stays offered, and is what **Restart to update**
