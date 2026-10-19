@@ -419,11 +419,17 @@ function encodeModifiedUTF7(name) {
  */
 function structureParts(node) {
   const out = [];
-  walkStructure(node, '', false, out);
+  walkStructure(node, '', false, out, false);
   return out;
 }
 
-function walkStructure(node, prefix, insideMessage, out) {
+/**
+ * `enclosed` marks every part that sits inside a message/rfc822 at any depth: an
+ * email carried by this one ("Forward as attachment"), not words its sender
+ * wrote. Those parts keep only their own disposition, which is usually none, so
+ * without the mark an attached email looks like this message's inline body.
+ */
+function walkStructure(node, prefix, insideMessage, out, enclosed) {
   if (!node || node.type !== 'list' || node.value.length === 0) return;
   const items = node.value;
 
@@ -432,7 +438,7 @@ function walkStructure(node, prefix, insideMessage, out) {
     for (const child of items) {
       if (child.type !== 'list') break; // the multipart subtype follows the children
       index++;
-      walkStructure(child, prefix ? `${prefix}.${index}` : String(index), false, out);
+      walkStructure(child, prefix ? `${prefix}.${index}` : String(index), false, out, enclosed);
     }
     return;
   }
@@ -463,9 +469,10 @@ function walkStructure(node, prefix, insideMessage, out) {
     // reliable mark of a part the message draws itself: an HTML body that says
     // <img src="cid:logo@x"> needs a sibling whose Content-ID is <logo@x>.
     contentId: tokenText(items[3]) || null,
+    enclosed,
   });
 
-  if (isMessage) walkStructure(items[8], part, true, out);
+  if (isMessage) walkStructure(items[8], part, true, out, true);
 }
 
 function paramMap(node) {
@@ -487,11 +494,27 @@ function dispositionFrom(node) {
   return { kind, filename: params.get('filename') || params.get('name') || null };
 }
 
-/** The part a human would read: plain text if there is any, otherwise HTML. */
+/**
+ * The part a human would read: the sender's own plain text if there is any,
+ * otherwise their own HTML, and only then anything enclosed.
+ *
+ * The sender's own words come first, whichever of the two they wrote. A message
+ * whose own body is HTML only and which carries an email as an attachment used
+ * to be read as the ATTACHED email's plain text — the model was shown someone
+ * else's words and never the sender's. An attached email is read only when the
+ * message has nothing of its own.
+ *
+ * The trade is deliberate: an HTML-only forward with nothing typed now reads as
+ * its near-empty HTML rather than as the attached email, which is honest about
+ * who wrote what. A size cut-off to tell a stub from a body would be a guess.
+ */
 function chooseTextPart(parts) {
   const inline = parts.filter((p) => p.disposition !== 'attachment');
+  const own = inline.filter((p) => !p.enclosed);
   const pick = (list, subtype) => list.find((p) => p.type === 'text' && p.subtype === subtype);
   return (
+    pick(own, 'plain') ||
+    pick(own, 'html') ||
     pick(inline, 'plain') ||
     pick(inline, 'html') ||
     pick(parts, 'plain') ||
