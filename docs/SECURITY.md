@@ -650,8 +650,17 @@ Token values are shown **once**, at creation, and then live in the secret store
 with your mail password. There is no route and no function that reads one back.
 `config.json` holds `{id, label, ref, createdAt, lastUsedAt}` and nothing else.
 The comparison hashes both sides to 32 bytes and uses `timingSafeEqual`, so it
-leaks neither content nor length. Revoking removes the record **and** the stored
-value, and bites on the next call.
+leaks neither content nor length. Reading a stored token starts a program on
+every OS store (PowerShell on Windows), so after a read the running app keeps
+the SHA-256 of the stored value in memory, never the value, and compares later
+calls against it. Every call, remembered or not, re-reads the token record and
+the master switch from `config.json` first, so a revoked token is refused even
+if removing its stored value failed. The digest is dropped after 60 seconds, and
+sooner when the value is saved or deleted in this app, or when its DPAPI blob or
+`secrets.enc` changes on disk. Only a change made to the macOS Keychain or
+libsecret by another program, or by another Zelos process on the same home, can
+go unseen, for at most those 60 seconds. Revoking removes the record **and** the
+stored value, drops the digest first, and bites on the next call.
 
 ### Scopes are enforced twice
 

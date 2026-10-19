@@ -1093,7 +1093,15 @@ function withSecretLock(ref, operation) {
 
 export async function setSecret(ref, value) {
   assertRef(ref);
-  return withSecretLock(ref, () => writeSecret(ref, value));
+  bumpGeneration(ref);
+  try {
+    return await withSecretLock(ref, () => writeSecret(ref, value));
+  } finally {
+    // Again at the end, and even on a throw: a write that failed half way may
+    // still have changed the store, and an answer remembered from before it
+    // must not outlive it.
+    bumpGeneration(ref);
+  }
 }
 
 async function writeSecret(ref, value) {
@@ -1218,7 +1226,64 @@ async function readExternalSecret(name, ref, legacy = false) {
 
 export async function deleteSecret(ref) {
   assertRef(ref);
-  return withSecretLock(ref, () => removeSecret(ref));
+  bumpGeneration(ref);
+  try {
+    return await withSecretLock(ref, () => removeSecret(ref));
+  } finally {
+    bumpGeneration(ref);
+  }
+}
+
+/* ------------------------------------------------------ change detection
+ * For a caller that remembers something about a stored value — the AI token
+ * check keeps a digest, so that each MCP request on Windows does not start
+ * PowerShell — and has to know when to stop believing it. Two signals, and
+ * neither reveals anything about the value:
+ *
+ *  - a per-(home, ref) generation, bumped by every setSecret and deleteSecret
+ *    in this process, before the write and again after it;
+ *  - for the stores that are plain files, the file's own stamp, which also
+ *    moves when another process or another tool changes it. DPAPI stamps both
+ *    the scoped blob and the older unscoped one, because a read can come from
+ *    either and a save to the scoped one changes which one it comes from.
+ *
+ * The OS keychains offer no stamp that does not cost a spawn, so a change made
+ * to them outside this process is bounded only by the caller's own expiry.
+ */
+const writeGenerations = new Map();
+
+function generationKey(ref) {
+  return `${paths().home}\0${ref}`;
+}
+
+function bumpGeneration(ref) {
+  const key = generationKey(ref);
+  writeGenerations.set(key, (writeGenerations.get(key) ?? 0) + 1);
+}
+
+function fileStamp(file) {
+  try {
+    const stat = fs.statSync(file, { bigint: true });
+    return `${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+  } catch (err) {
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return 'absent';
+    throw err;
+  }
+}
+
+/** -> {gen, stamp}. Equal answers before and after mean nothing Zelos can see has changed. */
+export async function secretVersion(ref) {
+  assertRef(ref);
+  const { name } = await backend();
+  const gen = writeGenerations.get(generationKey(ref)) ?? 0;
+  let stamp = null;
+  if (name === 'windows-dpapi') {
+    const scoped = readNamespace().id === null ? 'unsaved' : fileStamp(dpapiFile(ref));
+    stamp = `${scoped}|${hasLegacyRef(ref) ? fileStamp(dpapiFile(ref, true)) : 'no-legacy'}`;
+  } else if (name === 'encrypted-file') {
+    stamp = fileStamp(storeFile());
+  }
+  return { gen, stamp };
 }
 
 async function removeSecret(ref) {

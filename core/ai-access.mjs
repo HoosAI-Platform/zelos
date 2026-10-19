@@ -37,8 +37,8 @@
 
 import crypto from 'node:crypto';
 
-import { loadConfig, saveConfig, newId, isValidRef } from './config.mjs';
-import { setSecret, getSecret, deleteSecret } from './secrets.mjs';
+import { loadConfig, saveConfig, newId, isValidRef, paths } from './config.mjs';
+import { setSecret, getSecret, deleteSecret, secretVersion } from './secrets.mjs';
 import { SCOPES, aiConfig as mcpAiConfig } from './mcp.mjs';
 import { cap } from './safety.mjs';
 import { nowISO } from './time.mjs';
@@ -66,7 +66,55 @@ const MAX_LABEL_CHARS = 60;
  * the window at all. Passing the store in lets one hold a mint open across a
  * revocation and watch which list reaches the disk.
  */
-const STORE = { setSecret, deleteSecret };
+const STORE = { setSecret, deleteSecret, getSecret, secretVersion };
+
+/* ------------------------------------------------------------------ *
+ * What a token check remembers
+ * ------------------------------------------------------------------ */
+
+/**
+ * Reading a stored token is a spawn on every OS store, and on Windows it is a
+ * PowerShell start — about 180 ms — so checking one per MCP request held a
+ * client to roughly five calls a second, one process each (TT-3497). What is
+ * remembered instead is the SHA-256 of the stored value, never the value: a
+ * digest is enough to compare a presented token against, and it is no use to
+ * anything that reads this process's memory and wants to present one.
+ *
+ * A remembered digest is believed only while nothing says it is stale. Every
+ * use re-reads the token record from disk and the master switch with it, so a
+ * revocation or a switch-off in another window bites on the next call exactly
+ * as it did. The store must also report the same version (secretVersion in
+ * core/secrets.mjs): the same write generation in this process, and on the
+ * file-backed stores the same file stamp. A change it cannot see — a keychain
+ * edited by another program — is bounded by VERIFIED_TTL_MS.
+ */
+const VERIFIED_TTL_MS = 60_000;
+const verified = new Map();
+// Bumped by every invalidation. A store read that started before one does not
+// get to remember its answer afterwards.
+let verifiedEpoch = 0;
+
+function verifiedKey(record) {
+  return `${paths().home}\0${record.id}\0${record.ref}`;
+}
+
+function sha256(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest();
+}
+
+function forgetVerified(id = null) {
+  verifiedEpoch += 1;
+  if (id === null) { verified.clear(); return; }
+  const home = paths().home;
+  for (const [key, entry] of verified) {
+    if (entry.home === home && entry.id === id) verified.delete(key);
+  }
+}
+
+/** Testing seam: forget every remembered token check. */
+export function resetVerifiedTokens() {
+  forgetVerified();
+}
 
 /* ------------------------------------------------------------------ *
  * Reading the config block
@@ -246,6 +294,7 @@ export async function mintToken({ label, config = loadConfig(), now = nowISO(), 
     }
     saved = saveConfig({ ai: { ...current, tokens: [...current.tokens, token] } });
   } catch (err) {
+    forgetVerified(id);
     await store.deleteSecret(ref).catch(() => {});
     throw err;
   }
@@ -266,6 +315,9 @@ export async function mintToken({ label, config = loadConfig(), now = nowISO(), 
  * is an orphan nobody can see to clean up.
  */
 export async function revokeToken(id, { config = loadConfig(), store = STORE } = {}) {
+  // First, before anything that can wait: a check that remembered this token
+  // must not accept it while the store and the config catch up.
+  forgetVerified(id);
   const token = aiConfig(config).tokens.find((t) => t.id === id)
     ?? liveAi().tokens.find((t) => t.id === id);
   if (!token) return { ok: true, revoked: false, config };
@@ -289,15 +341,18 @@ export async function revokeToken(id, { config = loadConfig(), store = STORE } =
  * Verify a presented bearer token.
  *
  * Order matters. The master switch is checked first, so a token cannot be used
- * to probe anything while AI access is off. Then the id is looked up in config —
- * which is what makes revocation immediate — and only then is the stored value
- * fetched and compared in constant time.
+ * to probe anything while AI access is off. Then the id is looked up in config,
+ * the caller's and then the one on disk — which is what makes revocation
+ * immediate — and only then is the stored value fetched and compared in
+ * constant time. A digest remembered from an earlier
+ * read stands in for that fetch only while the disk and the store both say
+ * nothing has changed — see "What a token check remembers" above.
  *
  * Returns `{ok, token, reason}`. `token` is the config record (no value), and
  * `reason` is for the caller's own log, never for the response body: telling an
  * unauthenticated caller *why* it failed is telling it which half to fix.
  */
-export async function verifyToken(presented, { config = loadConfig() } = {}) {
+export async function verifyToken(presented, { config = loadConfig(), store = STORE, now = Date.now() } = {}) {
   const current = aiConfig(config);
   if (!current.enabled) return { ok: false, token: null, reason: 'ai-access-disabled' };
 
@@ -314,9 +369,48 @@ export async function verifyToken(presented, { config = loadConfig() } = {}) {
     return { ok: false, token: null, reason: id ? 'unknown-token' : 'malformed-token' };
   }
 
+  // The caller's config may be a snapshot from before a revocation or a
+  // switch-off — the HTTP layer holds one for the life of the process — so the
+  // record and the switch are confirmed on disk before anything is believed or
+  // read. That is what makes a revocation whose store delete failed (which
+  // revokeToken tolerates) still a revocation.
+  const key = verifiedKey(record);
+  const live = liveAi();
+  const liveRecord = live.tokens.find((t) => t.id === record.id && t.ref === record.ref);
+  if (!live.enabled || !liveRecord) {
+    verified.delete(key);
+    constantTimeEqual(typeof presented === 'string' ? presented : '', DECOY);
+    return { ok: false, token: null, reason: live.enabled ? 'unknown-token' : 'ai-access-disabled' };
+  }
+
+  const remembered = verified.get(key);
+  if (remembered) {
+    let version = null;
+    try { version = await store.secretVersion(record.ref); } catch { /* not believed; read the store */ }
+    if (version && verified.get(key) === remembered
+        && now - remembered.at < VERIFIED_TTL_MS && now >= remembered.at
+        && remembered.createdAt === liveRecord.createdAt
+        && remembered.gen === version.gen && remembered.stamp === version.stamp) {
+      // A mismatch here is answered without going back to the store: a stream
+      // of wrong guesses at a real id must not become a stream of spawns.
+      // The faster answer shows by timing that this token was used in the last
+      // minute — only to a caller on loopback who already has its id. Accepted.
+      if (!crypto.timingSafeEqual(sha256(presented.trim()), remembered.digest)) {
+        return { ok: false, token: null, reason: 'mismatch' };
+      }
+      return { ok: true, token: publicRecord(liveRecord), reason: 'ok' };
+    }
+    verified.delete(key);
+  }
+
+  // Taken before the read, so a change during it shows up as a different
+  // version next time rather than being remembered as current.
+  const epoch = verifiedEpoch;
+  let version = null;
+  try { version = await store.secretVersion(record.ref); } catch { /* then nothing is remembered */ }
   let stored = null;
   try {
-    stored = await getSecret(record.ref);
+    stored = await store.getSecret(record.ref);
   } catch (err) {
     log.warn('ai: could not read a token from the secret store', { id: record.id, error: err.message });
   }
@@ -324,15 +418,22 @@ export async function verifyToken(presented, { config = loadConfig() } = {}) {
     constantTimeEqual(presented, DECOY);
     return { ok: false, token: null, reason: 'no-stored-value' };
   }
+  // Remembered after any read that found a value, matched or not, so a wrong
+  // guess repeated at a real id costs one read, not one each.
+  if (version && epoch === verifiedEpoch) {
+    verified.set(key, {
+      home: paths().home, id: liveRecord.id, digest: sha256(stored), createdAt: liveRecord.createdAt, at: now, gen: version.gen, stamp: version.stamp,
+    });
+  }
   if (!constantTimeEqual(presented.trim(), stored)) {
     return { ok: false, token: null, reason: 'mismatch' };
   }
 
-  return {
-    ok: true,
-    token: { id: record.id, label: record.label, createdAt: record.createdAt, lastUsedAt: record.lastUsedAt },
-    reason: 'ok',
-  };
+  return { ok: true, token: publicRecord(liveRecord), reason: 'ok' };
+}
+
+function publicRecord(record) {
+  return { id: record.id, label: record.label, createdAt: record.createdAt, lastUsedAt: record.lastUsedAt };
 }
 
 /**
@@ -389,6 +490,9 @@ export function setAiSettings({ enabled, scopes } = {}) {
   if (enabled !== undefined) {
     if (typeof enabled !== 'boolean') throw new TypeError('enabled must be true or false');
     next.enabled = enabled;
+    // Every check reads the switch from disk anyway; this keeps nothing
+    // remembered across an off-and-on.
+    if (!enabled) forgetVerified();
   }
 
   if (scopes !== undefined) {
