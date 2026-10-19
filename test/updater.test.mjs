@@ -20,7 +20,7 @@ import {
   ATTEMPT_FILE, createUpdater, downloadToFile, isStrongPublicKey, MAC_NEW_SUFFIX, MAC_SWAP_SCRIPT, macReplaceCheck,
   manifestAsset, openReleaseDownload, parseSwapResult, PENDING_DIR, publicKeyFrom, readUpdateSettings, RESULT_FILE,
   signatureMatches, signManifest, updateAssetName, verifyReleaseManifest, windowsReplaceCheck, writeUpdateSettings,
-  CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS, QUIET_FAILURES_SHOWN, RETRY_INTERVAL_MS, TICK_MS,
+  CHECK_INTERVAL_MS, CHECK_SLACK_MS, FIRST_CHECK_DELAY_MS, QUIET_FAILURES_SHOWN, RETRY_INTERVAL_MS, TICK_MS,
 } from '../desktop/updater.js';
 import { RELEASE_API, REPOSITORY } from '../core/updates.mjs';
 
@@ -771,7 +771,7 @@ describe('the Windows updater', () => {
     tick().fn();
     await until(() => h.updater.state().status === 'error', 'the failed check');
     const failedAt = h.github.seen.length;
-    now += RETRY_INTERVAL_MS - 1;
+    now += RETRY_INTERVAL_MS - CHECK_SLACK_MS - 1;
     tick().fn();
     await settle();
     assert.equal(h.github.seen.length, failedAt);
@@ -784,6 +784,101 @@ describe('the Windows updater', () => {
     tick().fn();
     await settle();
     assert.equal(h.github.seen.length, failedAt + 1);
+  });
+
+  /**
+   * A Windows updater on the clock it really has: the launch check a minute in,
+   * then a tick every TICK_MS from launch. Each release lookup takes `latency`
+   * and records when it began, counted from launch.
+   */
+  async function onTheClock(fx, { latency = 0 } = {}) {
+    const launch = 1_000_000;
+    let now = launch;
+    const asked = [];
+    const h = windowsUpdater(fx, { deps: { now: () => now }, github: { override: { [RELEASE_API]: async () => {
+      asked.push(now - launch);
+      now += latency;
+      return Response.json(fx.release);
+    } } } });
+    await h.updater.start();
+    now = launch + FIRST_CHECK_DELAY_MS;
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => asked.length === 1 && h.updater.state().status !== 'checking', 'the launch check');
+    let ticks = 0;
+    const tickAt = async (at) => {
+      now = launch + at;
+      h.timers.timers.find((t) => !t.cleared && t.ms === TICK_MS).fn();
+      await until(() => h.updater.state().status !== 'checking', 'the tick');
+    };
+    return {
+      ...h, asked, tickAt,
+      /** Run the ticks up to and including the one `count` ticks after launch. */
+      tickTo: async (count) => { while (ticks < count) await tickAt(++ticks * TICK_MS); },
+    };
+  }
+
+  const HOURS = 60 * 60 * 1000;
+
+  it('checks on the tick six hours after the last check, not a tick later', async () => {
+    const h = await onTheClock(fixture('1.8.1'));
+    await h.tickTo(6 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS], 'the launch check, then the tick at six hours');
+    await h.tickTo(12 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS, 12 * HOURS], 'and every six hours after that');
+  });
+
+  it('a check is not due a whole tick early, only within half a tick', async () => {
+    const h = await onTheClock(fixture('1.8.1'));
+    await h.tickTo(6 * HOURS / TICK_MS - 1);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS], 'not at five hours forty-five');
+    const due = FIRST_CHECK_DELAY_MS + CHECK_INTERVAL_MS;
+    await h.tickAt(due - CHECK_SLACK_MS - 1);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS], 'not more than half a tick early');
+    await h.tickAt(due - CHECK_SLACK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, due - CHECK_SLACK_MS], 'but half a tick early is near enough');
+  });
+
+  it('a check asked for in the first minute stands in for the launch check', async () => {
+    const launch = 1_000_000;
+    let now = launch;
+    const fx = fixture('1.8.1');
+    const asked = [];
+    const h = windowsUpdater(fx, { deps: { now: () => now }, github: { override: { [RELEASE_API]: async () => {
+      asked.push(now - launch);
+      return Response.json(fx.release);
+    } } } });
+    await h.updater.start();
+    now = launch + 30_000;
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status !== 'checking', 'the asked check');
+    now = launch + FIRST_CHECK_DELAY_MS;
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await settle();
+    assert.deepEqual(asked, [30_000], 'no second check at one minute');
+  });
+
+  it('retries a failed check on the tick an hour later, not a tick after that', async () => {
+    const fx = fixture('1.8.1');
+    fx.release.prerelease = true;
+    const h = await onTheClock(fx);
+    assert.equal(h.updater.state().status, 'error');
+    await h.tickTo(3);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS], 'not again within the hour');
+    await h.tickTo(8);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 1 * HOURS, 2 * HOURS], 'hourly, each on the tick nearest the hour');
+  });
+
+  it('a slow check is timed from when it began, so the network does not push the next one back', async () => {
+    const fx = fixture('1.8.1');
+    // Ten minutes is more than half a tick: timed from the answer, the next
+    // check would miss its tick even with the slack.
+    const h = await onTheClock(fx, { latency: 10 * 60 * 1000 });
+    fx.release.prerelease = true;
+    await h.tickTo(6 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS], 'six hours after the last check began');
+    assert.equal(h.updater.state().status, 'error');
+    await h.tickTo(7 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS, 7 * HOURS], 'and the retry an hour after the failed one began');
   });
 
   it('stop() ends the schedule and an in-flight download', async () => {
@@ -1002,7 +1097,7 @@ describe('a newer release while an update is ready', () => {
     assert.equal(h.updater.skipBanner().banner, '');
     assert.equal(readUpdateSettings(path.join(sandbox, 'updates.json')).skipped, '1.9.0', 'Skip this version skips the version the banner named');
     const lookups = h.lookups();
-    h.advance(RETRY_INTERVAL_MS - 1);
+    h.advance(RETRY_INTERVAL_MS - CHECK_SLACK_MS - 1);
     h.tick().fn();
     await settle();
     assert.equal(h.lookups(), lookups, 'not again within the hour');

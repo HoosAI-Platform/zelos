@@ -69,6 +69,16 @@ export const RETRY_INTERVAL_MS = 60 * 60 * 1000;
 export const FIRST_CHECK_DELAY_MS = 60 * 1000;
 /** The clock is consulted this often, so a laptop that slept past a check catches up. */
 export const TICK_MS = 15 * 60 * 1000;
+/**
+ * A tick runs a check that is due within this much, rather than leaving it to
+ * the next tick. The clock only looks every TICK_MS, so a check due a moment
+ * after a tick would otherwise wait almost a whole tick: six hours became six
+ * hours and a quarter (QA, 2026-10-10, TT-3445). With half a tick of slack a
+ * check runs on the tick nearest the time it was due, so it may come up to
+ * 7.5 minutes early. Monotonic timers stop while a computer sleeps, so a check
+ * can still come later than that after a sleep; the next tick catches it up.
+ */
+export const CHECK_SLACK_MS = TICK_MS / 2;
 
 const METADATA_TIMEOUT_MS = 20_000;
 /**
@@ -585,11 +595,12 @@ export function createUpdater({
     changed();
   };
 
-  const fail = (err) => {
+  /** `from` is when the attempt began, for a failed check; otherwise the retry counts from now. */
+  const fail = (err, from = now()) => {
     const message = err?.message || 'The update could not be completed.';
     log('warn', 'update attempt failed', { error: message });
     controller = null;
-    nextAttemptAt = now() + RETRY_INTERVAL_MS;
+    nextAttemptAt = from + RETRY_INTERVAL_MS;
     set({ status: 'error', error: message, progress: null });
   };
 
@@ -1112,6 +1123,11 @@ export function createUpdater({
     const timer = setTimer(() => own.abort(), METADATA_TIMEOUT_MS);
     timer?.unref?.();
     if (!kept) set({ status: 'checking', error: '', progress: null });
+    // The next check is timed from when this one began, not from when its
+    // answer came: the tick re-arms from launch, so counting from the answer
+    // put the next check a little after a tick and a slow network pushed it
+    // later still (TT-3445).
+    const startedAt = now();
     let raw, info;
     try {
       raw = await fetchLatestRelease({ fetchImpl, signal: own.signal });
@@ -1121,17 +1137,17 @@ export function createUpdater({
       if (controller !== own) return snapshot();
       if (kept) {
         controller = null;
-        nextAttemptAt = now() + RETRY_INTERVAL_MS;
+        nextAttemptAt = startedAt + RETRY_INTERVAL_MS;
         log('warn', 'update check failed; the ready update is kept', { error: err?.message });
         return snapshot();
       }
-      fail(own.signal.aborted && !stopped ? new Error('The update check timed out.') : err);
+      fail(own.signal.aborted && !stopped ? new Error('The update check timed out.') : err, startedAt);
       return snapshot();
     }
     clearTimer(timer);
     if (controller !== own) return snapshot();
     checkedAt = now();
-    nextAttemptAt = checkedAt + CHECK_INTERVAL_MS;
+    nextAttemptAt = startedAt + CHECK_INTERVAL_MS;
     const release = { latestVersion: info.latestVersion, releaseUrl: info.releaseUrl, notes: info.notes };
     if (kept && info.latestVersion === kept.version) {
       // The ready update is the latest again: nothing newer to offer, and no
@@ -1224,7 +1240,7 @@ export function createUpdater({
       // Leftovers are tried again whether or not updates are automatic: they
       // are only files that should not be there. A clean folder is left alone.
       if (leftovers) tidyLater();
-      if (settings.auto && !working() && (nextAttemptAt === null || now() >= nextAttemptAt)) {
+      if (settings.auto && !working() && (nextAttemptAt === null || now() + CHECK_SLACK_MS >= nextAttemptAt)) {
         check({ download: true }).catch((err) => log('warn', 'scheduled check failed', { error: err.message }));
       }
       schedule();
@@ -1289,7 +1305,9 @@ export function createUpdater({
       first = setTimer(() => {
         first = null;
         if (leftovers) tidyLater();
-        if (settings.auto && !working()) check({ download: true }).catch(() => {});
+        // A check the person asked for in the first minute already counts.
+        const due = nextAttemptAt === null || now() + CHECK_SLACK_MS >= nextAttemptAt;
+        if (settings.auto && due && !working()) check({ download: true }).catch(() => {});
       }, FIRST_CHECK_DELAY_MS);
       first?.unref?.();
       schedule();
