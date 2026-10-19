@@ -50,7 +50,7 @@ import { AuthError, RateLimitError } from './http.mjs';
 /** The public API. A user on GitHub Enterprise Server overrides it; see `fields`. */
 const DEFAULT_API = 'https://api.github.com';
 
-/** Where a person mints the thing they are being asked to paste. */
+/** Where a person mints the thing they are being asked to paste, on github.com. */
 const TOKEN_URL = 'https://github.com/settings/tokens';
 
 /**
@@ -620,7 +620,7 @@ function clockOf(ctx) {
  * secret-hash unblock in core/sweep.mjs are exactly the behaviour that should
  * follow, whichever of the three causes it was; only the words change.
  */
-function explainAuth(err) {
+function explainAuth(err, settings) {
   if (!(err instanceof AuthError)) return err;
   if (err.status === 403) {
     return new AuthError(
@@ -633,7 +633,7 @@ function explainAuth(err) {
   }
   return new AuthError(
     'GitHub refused the token (401). An expired, revoked or regenerated personal access token reads '
-    + 'exactly like this. Mint a new one at https://github.com/settings/tokens and paste it in Settings '
+    + `exactly like this. Mint a new one at ${tokenUrlOf(settings)} and paste it in Settings `
     + '— Zelos will not keep trying with the one it has.',
     { status: err.status ?? 401 },
   );
@@ -665,6 +665,30 @@ export function apiBaseOf(settings) {
   return (raw || DEFAULT_API).replace(/\/+$/, '');
 }
 
+/**
+ * Where THIS user mints a token: the web host behind the API address they gave.
+ *
+ * A GitHub Enterprise user sent to github.com mints a token that their own
+ * server has never heard of, pastes it, and gets the same 401 again. GitHub
+ * Enterprise Server serves its API under `/api/v3` on the web host itself;
+ * github.com and GHE.com (`api.<name>.ghe.com`) serve it from an `api.`
+ * subdomain of the web host. An address that does not parse falls back to
+ * github.com, which is where the default points anyway.
+ */
+export function tokenUrlOf(settings) {
+  let url;
+  try {
+    url = new URL(apiBaseOf(settings));
+  } catch {
+    return TOKEN_URL;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return TOKEN_URL;
+  const onPath = url.pathname === '/api' || url.pathname.startsWith('/api/');
+  const host = !onPath && url.hostname.startsWith('api.') ? url.hostname.slice(4) : url.hostname;
+  if (!host || host.startsWith('.')) return TOKEN_URL;
+  return `${url.protocol}//${host}${url.port ? `:${url.port}` : ''}/settings/tokens`;
+}
+
 const keepCount = (settings) => Math.max(1, Math.min(Number(settings?.maxItems) || DEFAULT_KEEP, MAX_NOTIFICATIONS));
 
 export default {
@@ -678,9 +702,12 @@ export default {
   credential: {
     label: 'Personal access token',
     help: 'A classic token needs the `notifications` scope (`repo` includes it). A fine-grained token needs '
-      + 'read access to Notifications. Zelos only ever reads: nothing it can do with this token changes '
-      + 'anything in your account.',
+      + 'read access to Notifications. On GitHub Enterprise, mint it on your own server, not github.com. '
+      + 'Zelos only ever reads: nothing it can do with this token changes anything in your account.',
     url: TOKEN_URL,
+    /* The address the form links above is github.com's, because the form shows
+       it before an API address is typed. Doctor asks this instead, once one is. */
+    urlFor: (settings) => tokenUrlOf(settings),
     required: true,
     /* `as: 'header'` and never a query string. GitHub accepts `Bearer` and
        `token` as prefixes; `Bearer` is the one core/log.mjs redacts BY SHAPE as
@@ -865,7 +892,7 @@ export default {
       try {
         res = await ctx.http.get(url, { headers, accept: ACCEPT });
       } catch (err) {
-        throw explainAuth(err);
+        throw explainAuth(err, settings);
       }
 
       if (page === 1) pollIntervalMs = pollIntervalFrom(res.headers, pollIntervalMs);
@@ -1010,12 +1037,12 @@ export default {
    */
   async check(source, ctx) {
     const base = apiBaseOf(source?.settings);
-    /* The module constant, not `this.credential.url`. A `check` reached through
+    /* A module function, not `this.credential.url`. A `check` reached through
        a destructured reference — which is exactly how a future doctor refactor
        would reach it — has no receiver, and a diagnostic that throws
        "cannot read properties of undefined" is the one crash a diagnostic may
        never have. */
-    const mint = `Mint one at ${TOKEN_URL} with the \`notifications\` scope ticked, then paste it in Settings → Sources.`;
+    const mint = `Mint one at ${tokenUrlOf(source?.settings)} with the \`notifications\` scope ticked, then paste it in Settings → Sources.`;
 
     let res;
     try {
@@ -1049,7 +1076,7 @@ export default {
           action: null,
         };
       }
-      const explained = explainAuth(err);
+      const explained = explainAuth(err, source?.settings);
       return {
         status: 'fail',
         detail: `${base}: ${explained?.message || String(err)}`,

@@ -142,6 +142,7 @@ export function assertShape(c, seen = new Set()) {
     if (!isPlainObject(cr)) bad('credential must be an object or null');
     if (!nonEmpty(cr.label)) bad('credential needs a label — it is what the user is asked to paste');
     if (cr.required !== undefined && typeof cr.required !== 'boolean') bad('credential.required must be a boolean');
+    if (cr.urlFor !== undefined && typeof cr.urlFor !== 'function') bad('credential.urlFor must be a function');
     if (cr.send !== undefined) {
       const s = cr.send;
       if (!isPlainObject(s)) bad('credential.send must be an object');
