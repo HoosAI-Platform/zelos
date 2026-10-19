@@ -847,6 +847,8 @@ describe('JSON-RPC 2.0', () => {
   test('the instructions say plainly what is shared', async () => {
     const off = await handle(rpc('initialize'), { db: null, config: cfg(ALL_ON, { enabled: false }) });
     assert.match(off.result.instructions, /switched OFF/i);
+    // And it names the tab that exists (TT-3431).
+    assert.ok(off.result.instructions.includes(mcp.SHARE_SETTINGS), off.result.instructions);
     const noBodies = await handle(rpc('initialize'), { db: null, config: cfg(ALL_ON_NO_BODIES) });
     assert.match(noBodies.result.instructions, /bodies are NOT shared/i);
     const bodies = await handle(rpc('initialize'), { db: null, config: cfg(ALL_ON) });
@@ -1302,6 +1304,7 @@ describe('the stdio transport', () => {
     assert.ok(parsed[0].result.instructions.includes('OFF'));
     assert.deepEqual(parsed[1].result.tools, []);
     assert.equal(parsed[2].error.code, ERROR_CODES.AI_DISABLED);
+    assert.ok(parsed[2].error.message.includes(mcp.SHARE_SETTINGS), `the refusal names another place: ${parsed[2].error.message}`);
   });
 
   test('serveStdio runs until stdin closes', async () => {
@@ -1928,4 +1931,20 @@ describe('the board an AI reads is the board the app shows', () => {
     assert.equal(/\bimport\s*\(/.test(MCP_SOURCE), false,
       'a dynamic import is a specifier decided at run time; this file may not have one');
   });
+});
+
+test('Zelos sends people to the Settings tab that exists (TT-3431)', async () => {
+  /* QA, 2026-10-10: "Settings → AI access" was named to people and, through
+     the MCP instructions, to the AI clients on this machine — no tab has that
+     name; it is "Share with another AI (advanced)". */
+  const { SHARE_SETTINGS } = mcp;
+  const settingsSrc = fs.readFileSync(path.join(ROOT, 'ui', 'views', 'settings.js'), 'utf8');
+  const tab = /\{ id: 'ai', label: '([^']+)' \}/.exec(settingsSrc)?.[1];
+  assert.ok(tab, 'the sharing tab could not be found in settings.js');
+  assert.equal(SHARE_SETTINGS, `Settings → ${tab}`);
+  // And nothing a person or an AI client reads still names the old one.
+  for (const rel of [['core', 'mcp.mjs'], ['core', 'server.mjs']]) {
+    const src = fs.readFileSync(path.join(ROOT, ...rel), 'utf8');
+    assert.doesNotMatch(src, /Settings → AI access/, `${rel} still names "Settings → AI access"`);
+  }
 });

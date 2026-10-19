@@ -73,7 +73,7 @@ import {
   aiConfig, effectiveScopes, listTokens, mintToken as mintAiToken, revokeToken, setAiSettings,
   verifyToken, touchToken, listAccessLog, SCOPES, SCOPE_INFO,
 } from './ai-access.mjs';
-import { handle as mcpHandle } from './mcp.mjs';
+import { handle as mcpHandle, SHARE_SETTINGS } from './mcp.mjs';
 import { sampleStatus, seedSampleData, clearSampleData } from './sample-data.mjs';
 import { complete, stream, listModels, probeLocal, isLocalAddress, PRESETS } from './llm.mjs';
 import { helpLinks, platformName, HELP_STEPS } from './help.mjs';
@@ -2938,7 +2938,7 @@ async function handleMcp(ctx) {
   if (!ai.enabled) {
     sendJSON(res, 403, {
       error: 'AI access is off',
-      detail: 'Turn it on in Settings → AI access. Nothing is exposed until a human does.',
+      detail: `Turn it on in ${SHARE_SETTINGS}. Nothing is exposed until a human does.`,
     });
     return;
   }

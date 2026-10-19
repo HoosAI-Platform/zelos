@@ -82,6 +82,15 @@ import {
    dynamic import at all. */
 import { capNowBucket } from './sweep.mjs';
 
+/**
+ * Where a person turns sharing on, as the Settings tab is actually named
+ * (ui/views/settings.js, tab id `ai`). Zelos sent people — and, through the
+ * MCP instructions, the AI clients on this machine — to "Settings → AI
+ * access", which no tab is called (QA, 2026-10-10, TT-3431). test/mcp.test.mjs
+ * holds this to the tab's label.
+ */
+export const SHARE_SETTINGS = 'Settings → Share with another AI (advanced)';
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 
@@ -1388,7 +1397,7 @@ function instructionsFor(state, ai) {
   ];
   if (!state.enabled) {
     lines.push('AI access is currently switched OFF in Zelos, so no tools are available. The person who '
-      + 'owns this machine can turn it on in Settings → AI access.');
+      + `owns this machine can turn it on in ${SHARE_SETTINGS}.`);
   } else {
     const on = SCOPES.filter((s) => state.on.has(s));
     lines.push(`Scopes the owner has enabled: ${on.length ? on.join(', ') : 'none'}.`);
@@ -1515,7 +1524,7 @@ function callTool(params, rt) {
     audit({ tool: name, scope: grantsOf(def).join('+'), rows: 0, ok: false, detail: 'AI access is off' });
     throw new RpcError(
       ERROR_CODES.AI_DISABLED,
-      'AI access is switched off in Zelos. The owner of this machine can turn it on in Settings → AI access.',
+      `AI access is switched off in Zelos. The owner of this machine can turn it on in ${SHARE_SETTINGS}.`,
     );
   }
   if (!permits(def, rt.state)) {
