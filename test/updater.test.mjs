@@ -796,6 +796,96 @@ describe('the Windows updater', () => {
   });
 });
 
+describe('a Restart to update in progress', () => {
+  /* The restart is three steps the shell takes in turn: prepareInstall checks
+     the ready update, leaveBoard saves drafts and stops the core, and install
+     hands over. Nothing the clock does in between may change what is handed
+     over (QA, 2026-10-10, TT-3485). */
+
+  /** A Windows updater with 1.9.0 ready, whose later release lookups wait for the test. */
+  async function readyWithHeldChecks() {
+    let now = 1_000_000;
+    const fx = fixture();
+    let hold = false;
+    const held = [];
+    const h = windowsUpdater(fx, {
+      deps: { now: () => now },
+      // A lookup that ignores being stopped, as a slow network can: only the
+      // updater's own bookkeeping can keep its answer from mattering.
+      github: { override: { [RELEASE_API]: async () => (hold ? new Promise((resolve) => held.push(resolve)) : Response.json(fx.release)) } },
+    });
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    hold = true;
+    const newer = fixture('1.9.1');
+    const tick = () => h.timers.timers.find((t) => !t.cleared && t.ms !== FIRST_CHECK_DELAY_MS && t.ms > 30_000);
+    return {
+      ...h, fx, newer, held, tick,
+      advance: (ms) => { now += ms; },
+      lookups: () => h.github.seen.filter((x) => x.url === RELEASE_API).length,
+      // Answer every waiting lookup with 1.9.1, the newer release.
+      answer: () => { while (held.length) held.shift()(Response.json(newer.release)); },
+    };
+  }
+
+  it('a scheduled check that falls during the shutdown does not run, and the prepared update is installed', async () => {
+    const h = await readyWithHeldChecks();
+    assert.equal(await h.updater.prepareInstall(), true);
+    // Drafts are saving; six hours have passed and the clock ticks.
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await settle();
+    assert.equal(h.lookups(), 1, 'no check while a restart is under way');
+    h.answer();
+    await settle();
+    h.updater.stop();
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [path.join(sandbox, PENDING_DIR, h.fx.name)]);
+  });
+
+  it('a check already running when Restart is chosen is stopped, and its answer changes nothing', async () => {
+    const h = await readyWithHeldChecks();
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.held.length === 1, 'the scheduled lookup');
+    assert.equal(h.updater.state().status, 'ready');
+    assert.equal(await h.updater.prepareInstall(), true);
+    h.answer(); // 1.9.1 is out — but this check was stopped
+    await settle();
+    await settle();
+    assert.ok(!h.github.seen.some((x) => x.url.includes('1.9.1')), 'nothing of the newer release is fetched');
+    assert.equal(h.updater.state().status, 'ready');
+    h.updater.stop();
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [path.join(sandbox, PENDING_DIR, h.fx.name)]);
+  });
+
+  it('stop() stops a check made while an update is ready, so the update survives to be installed', async () => {
+    const h = await readyWithHeldChecks();
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.held.length === 1, 'the scheduled lookup');
+    // The shell's shutdown: stop first, then the hand-off a moment later.
+    h.updater.stop();
+    h.answer();
+    await settle();
+    await settle();
+    assert.ok(!h.github.seen.some((x) => x.url.includes('1.9.1')));
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [path.join(sandbox, PENDING_DIR, h.fx.name)]);
+  });
+
+  it('a restart that does not go ahead lets the clock check again', async () => {
+    const h = await readyWithHeldChecks();
+    assert.equal(await h.updater.prepareInstall(), true);
+    h.updater.abandonInstall(); // drafts would not save; nothing is staged on Windows
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.lookups() === 2, 'the next scheduled check');
+  });
+});
+
 describe('the Mac updater', () => {
   const macFixture = (apps = { 'Zelos.app': { id: 'app.zelos.desktop', version: '1.9.0' } }) =>
     fixture('1.9.0', { platform: 'darwin', arch: 'arm64', payload: macZip(apps) });

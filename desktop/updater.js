@@ -482,6 +482,15 @@ export function createUpdater({
   let stopped = false;
   let installFailed = null;
   let preparing = false;         // a Restart to update is checking or staging the ready update
+  // A Restart to update whose checks passed: from the moment prepareInstall
+  // says yes until install() hands over or abandonInstall() says the restart
+  // is off. Drafts are saved and the core stopped in between, which can take
+  // a while, and nothing may change the ready update under it — the shell
+  // installs whatever `ready` is when it gets there (QA, 2026-10-10, TT-3485).
+  let committed = false;
+  // prepareInstall stopped a check or download to make way for the restart;
+  // if the restart then does not happen, that work is due again at once.
+  let interrupted = false;
   let installProblem = '';       // an update the last restart did not land; kept for the session
   let snoozed = '';              // a version whose banner waits for the next launch; never saved
 
@@ -757,9 +766,23 @@ export function createUpdater({
 
   /* ----------------------------- checks ---------------------------- */
 
-  const busy = () => ['checking', 'downloading', 'ready', 'installing'].includes(status);
-  /** Busy with the network or an install; a ready update still lets a check run. */
-  const working = () => preparing || ['checking', 'downloading', 'installing'].includes(status);
+  /**
+   * Busy with the network, a restart or an install; a ready update still lets
+   * a check run. The controller is what says a check or download is in flight,
+   * not the status: a check made while an update is ready leaves the status at
+   * 'ready', and reading only the status let a scheduled check start in the
+   * middle of a Restart to update — after prepareInstall, while drafts were
+   * saving — find a newer release and delete the update the shell was about
+   * to install, so Zelos quit without updating (QA, 2026-10-10, TT-3485).
+   */
+  const working = () => preparing || committed || controller !== null || ['checking', 'installing'].includes(status);
+
+  /** A Restart to update that did not go ahead: anything it stopped is due again now. */
+  function rearm() {
+    if (!interrupted) return;
+    interrupted = false;
+    nextAttemptAt = now();
+  }
 
   /**
    * Look for a newer release and, when `download` is true, fetch it. Resolves
@@ -929,9 +952,21 @@ export function createUpdater({
      */
     async prepareInstall() {
       if (status !== 'ready' || !ready || preparing) return false;
+      // A check or download running beside the ready update stops here: left
+      // running, it could replace or delete the update while the restart is
+      // being prepared, and the shell would install nothing. Stopped, its own
+      // clean-up touches only what it was writing (QA, 2026-10-10, TT-3485).
+      if (controller) {
+        controller.abort();
+        controller = null;
+        interrupted = true;
+        progress = null;
+      }
       preparing = true;
       try {
-        return await prepareReady(ready);
+        committed = await prepareReady(ready);
+        if (!committed) rearm();
+        return committed;
       } finally {
         preparing = false;
       }
@@ -961,6 +996,11 @@ export function createUpdater({
      * stays ready, so the next Restart to update prepares it again.
      */
     abandonInstall() {
+      // Cleared before anything else: a Windows restart has nothing staged,
+      // and returning early with the latch still set would stop every later
+      // check for the rest of the session.
+      committed = false;
+      rearm();
       if (!ready?.staged || status !== 'ready') return;
       ready.staged = undefined;
       removeMacCopy();
@@ -1010,7 +1050,11 @@ export function createUpdater({
       clearTimer(tick);
       clearTimer(first);
       tick = first = null;
-      if (status === 'downloading' || status === 'checking') controller?.abort();
+      // Whatever is in flight stops, whatever the status says: a check made
+      // while an update is ready leaves the status at 'ready', and one left
+      // running could delete the update the installer is about to be handed.
+      controller?.abort();
+      controller = null;
     },
   };
 }
