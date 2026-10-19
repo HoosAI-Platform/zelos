@@ -394,7 +394,7 @@ export function foldedList(items, render, { visible = 8, moreLabel = 'show the o
 export function emptyState({ title, detail, action = null }) {
   return el('div', { class: 'empty' }, [
     meander({ class: 'empty-rule' }),
-    el('h3', { class: 'empty-title', text: title }),
+    el('h2', { class: 'empty-title', text: title }),
     detail ? el('p', { class: 'empty-detail', text: detail }) : null,
     action,
   ]);

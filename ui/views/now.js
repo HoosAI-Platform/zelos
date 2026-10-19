@@ -140,7 +140,7 @@ function failureBanner(trouble, navigate) {
     : `${counted === 1 ? 'One account or calendar' : `${counted} accounts or calendars`} could not be read. Everything else on the board is from this check — whatever those hold is not.`;
 
   return el('div', { class: `banner ${whole ? 'banner-bad' : 'banner-warn'}`, role: 'status' }, [
-    el('h3', {
+    el('h2', {
       class: 'banner-title',
       text: whole ? 'The last check failed' : 'The last check could not read everything',
     }),

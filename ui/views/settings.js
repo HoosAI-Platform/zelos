@@ -3697,7 +3697,7 @@ export function renderSettings(ctx) {
     tabs,
     errors.length
       ? el('div', { class: 'banner banner-warn', role: 'status' }, [
-        el('h3', { class: 'banner-title', text: 'Still incomplete' }),
+        el('h2', { class: 'banner-title', text: 'Still incomplete' }),
         el('ul', { class: 'banner-list' }, errors.map((e) => el('li', { text: `${e.path}: ${e.message}` }))),
       ])
       : null,

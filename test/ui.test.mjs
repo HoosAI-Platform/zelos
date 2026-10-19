@@ -3666,7 +3666,7 @@ const GUESSES = {
   'frank@icloud.com': { label: 'iCloud Mail', host: 'imap.mail.me.com', port: 993, secure: true, auth: 'password', signIn: null, clientReady: false, appPasswordUrl: 'https://account.apple.com/account/manage', note: 'iCloud Mail requires an app-specific password. This provider does not accept your normal password over IMAP.', known: true },
 };
 
-function runAppScenario({ initiallyConfigured = true, storageUnavailable = false, beforeBoot = '', scenario }) {
+function runAppScenario({ initiallyConfigured = true, storageUnavailable = false, href = 'http://127.0.0.1/?t=test', beforeBoot = '', scenario }) {
   // Run the actual shell in its own process: its subscriptions and timers live
   // for the whole page, and must not leak into the renderer tests in this file.
     const script = `
@@ -3688,7 +3688,7 @@ function runAppScenario({ initiallyConfigured = true, storageUnavailable = false
       globalThis.sessionStorage = storage();
       const windowEvents = {};
       globalThis.window = {
-        location: { href: 'http://127.0.0.1/?t=test', host: '127.0.0.1', hash: '#/now' },
+        location: { href: ${JSON.stringify(href)}, host: '127.0.0.1', hash: '#/now' },
         history: { replaceState() {} }, addEventListener: (name, fn) => { windowEvents[name] = fn; }, scrollTo() {},
         matchMedia: () => ({ matches: true }),
       };
@@ -6737,4 +6737,126 @@ test('every view has exactly one level-one heading, however often it redraws (TT
   const rule = /\.visually-hidden \{([^}]+)\}/.exec(css)?.[1] || '';
   assert.match(rule, /clip: rect\(0, 0, 0, 0\)/);
   assert.doesNotMatch(rule, /display:\s*none|visibility:\s*hidden/, 'that would hide it from a screen reader too');
+});
+
+test('headings never skip a level, and every whole-page screen is a main landmark (TT-3512)', () => {
+  /* QA, 2026-10-10: the no-key and server-down screens had no main landmark,
+     and Settings → About went from the "Settings" h1 straight to an h3 — as
+     did Search's hits, Now's banners, the empty states and the source
+     reports. Every view and every Settings tab, booted for real — on a board
+     with something on it, because an empty board draws none of those. */
+  const settingsSrc = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
+  const panelsBlock = /\nconst PANELS = \[([\s\S]*?)\n\];/.exec(settingsSrc)?.[1] || '';
+  const panels = [...panelsBlock.matchAll(/\bid: '([a-z-]+)'/g)].map((m) => m[1]);
+  assert.ok(panels.length >= 11 && panels.includes('model') && panels.includes('appearance'),
+    'ui/views/settings.js no longer declares PANELS where this reader looks: ' + panels.join(', '));
+  runAppScenario({ beforeBoot: `
+    const { ApiError } = await import(${JSON.stringify(fileUrl(UI, 'lib/api.js'))});
+    // A configured calendar makes the calendar view lay out a time grid.
+    globalThis.getComputedStyle = () => ({ getPropertyValue: () => '' });
+    // The desktop shell's backup bridge, so Your data draws its backup panel.
+    window.zelos = { desktop: true, createBackup: async () => null, restoreBackup: async () => null };
+    const at = '2026-08-12T08:00:00-04:00';
+    const item = (id, bucket, extra = {}) => ({ id, bucket, state: 'open', headline: 'Item ' + id, urgency: 2, first_seen: at, ...extra });
+    config = {
+      ...config,
+      mail: [{ id: 'work', label: 'Work mail', user: 'me@example.com', host: 'imap.example.com', port: 993 }],
+      calendars: [{ id: 'home', label: 'Home calendar', url: 'https://example.com/home.ics' }],
+    };
+    api.config = async () => ({ config, errors: [{ path: 'mail[0].host', message: 'is not answering' }], secretRefs: [] });
+    api.state = async () => ({
+      items: [
+        item('n1', 'now'), item('n2', 'now'), item('t1', 'today'), item('s1', 'soon'),
+        item('p1', 'promised'), item('w1', 'waiting'), item('note1', 'note'),
+        item('z1', 'now', { state: 'snoozed', snoozed_until: '2026-08-13T09:00:00-04:00' }),
+      ],
+      drafts: [{ id: 'd1', item_id: 'p1', state: 'pending', to_email: 'ann@example.com', subject: 'Re: the survey', body: 'Here it is.' }],
+      events: [], notes: ['A quiet week otherwise.'], counts: { now: 2, today: 1, promised: 1, waiting: 1, note: 1 },
+      // A partial failure: the run finished, one source did not.
+      runs: { last: { ok: true, started_at: at, ended_at: at, stats: {
+        sourcesFailed: 1,
+        sources: [{ id: 'work', kind: 'mail', label: 'Work mail', ok: false, error: 'Login refused' }, { id: 'home', kind: 'calendar', label: 'Home calendar', ok: true }],
+      } } },
+      sourceStatus: [
+        { id: 'work', configKey: 'mail', label: 'Work mail', ok: false, error: 'Login refused', lastAttemptAt: at, lastSuccessAt: null },
+        { id: 'home', configKey: 'calendars', label: 'Home calendar', ok: true, lastAttemptAt: at, lastSuccessAt: at },
+      ],
+      now: '2026-08-12T09:00:00-04:00',
+    });
+    api.search = async () => ({ results: [
+      { kind: 'mail', title: 'The survey invoice', excerpt: 'Attached is the invoice.', ref: { kind: 'mail', id: 'm1' } },
+      { kind: 'note', title: 'Thursday plans', excerpt: 'Bring the plans.', ref: { kind: 'note', id: 'x1' } },
+    ] });
+    // Not in this build: its own banner, under the Settings h1.
+    api.ai = async () => { throw new ApiError('GET /api/ai failed (404)', { status: 404, path: '/api/ai' }); };
+  `, scenario: `
+    // Inside <main>: the rail's "The board" h2 sits before it, outside.
+    const levels = () => plainWalk(plainWalk(root).find((n) => n.tag === 'main') || root)
+      .filter((n) => /^h[1-6]$/.test(n.tag))
+      .map((n) => ({ level: Number(n.tag[1]), text: textOf(n) }));
+    const check = (where, expected = []) => {
+      const hs = levels().filter((h) => h.text);
+      let previous = 0;
+      for (const h of hs) {
+        assert.ok(h.level <= previous + 1, where + ': h' + previous + ' → h' + h.level + ' at "' + h.text + '"');
+        previous = h.level;
+      }
+      // The seeded headings really drew, at the level they belong at: a check
+      // that passes over nothing proves nothing, and an h3 after an h3 is no
+      // skip even where it should have been an h2.
+      const drawn = hs.map((h) => 'h' + h.level + ' ' + h.text);
+      for (const want of expected) {
+        assert.ok(drawn.includes(want), where + ' drew no "' + want + '": ' + drawn.join(' | '));
+      }
+    };
+    const go = async (route) => { window.location.hash = '#/' + route; windowEvents.hashchange(); await settle(); };
+    const seeded = {
+      now: ['h2 The last check could not read everything', 'h2 Item n1', 'h3 Item note1', 'h2 Work mail', 'h2 Home calendar', 'h3 Item z1'],
+      today: ['h3 Item t1', 'h3 Item s1'],
+      owed: ['h3 Re: the survey', 'h3 Item p1', 'h3 Item w1'],
+      search: ['h2 Nothing searched yet'],
+    };
+    const tabs = {
+      ai: ['h2 Not available in this build'],
+      data: ['h2 Back up and restore'],
+      about: ['h2 Updates'],
+    };
+    for (const route of ['now', 'today', 'owed', 'calendar', 'search', 'ask']) {
+      await go(route);
+      check(route, seeded[route] || []);
+    }
+    // Search with hits on screen, not just its opening state.
+    await go('search');
+    const form = plainWalk(root).find((n) => n.tag === 'form' && n.attributes.role === 'search');
+    plainWalk(form).find((n) => n.tag === 'input' && n.attributes.type === 'search').value = 'survey';
+    form.fire('submit');
+    await settle();
+    check('search with hits', ['h2 The survey invoice', 'h2 Thursday plans']);
+    for (const panel of ${JSON.stringify(panels)}) {
+      await go('settings/' + panel);
+      check('settings/' + panel, ['h2 Still incomplete', ...(tabs[panel] || [])]);
+    }
+  ` });
+
+  // The whole-page screens, reached the way people reach them. Each is the
+  // root's only child and a main landmark, holding its h1 where it has one.
+  const screen = (title) => `
+    const top = root.firstChild;
+    assert.equal(root.children.length, 1);
+    assert.equal(top.tag, 'main', 'the screen is a ' + top.tag + ', not a main landmark');
+    assert.equal(top.attributes.class, 'screen');
+    ${title ? `assert.deepEqual(plainWalk(top).filter((n) => n.tag === 'h1').map(textOf), [${JSON.stringify(title)}]);` : ''}
+  `;
+  // No ?t= in the address: no key.
+  runAppScenario({ href: 'http://127.0.0.1/', scenario: screen('This page has no session key') });
+  // The server is gone.
+  runAppScenario({ beforeBoot: `api.health = async () => { throw new Error('connect ECONNREFUSED'); };`,
+    scenario: screen('Zelos is not answering') });
+  // Still opening: the first health check has not answered.
+  runAppScenario({ beforeBoot: `api.health = () => new Promise(() => {});`, scenario: screen('') });
+
+  // And with no JavaScript at all.
+  const html = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
+  const noscript = /<noscript>([\s\S]*?)<\/noscript>/.exec(html)?.[1] || '';
+  assert.match(noscript, /^\s*<main class="screen">[\s\S]*<h1 [^>]*>[^<]+<\/h1>[\s\S]*<\/main>\s*$/, 'the no-JavaScript screen is not a main landmark');
 });

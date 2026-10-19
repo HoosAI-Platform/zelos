@@ -36,7 +36,7 @@ export function backupPanel() {
     }
   }
   return el('div', { class: 'stack backup-panel' }, [
-    el('h3', { text: 'Back up and restore' }),
+    el('h2', { class: 'panel-heading', text: 'Back up and restore' }),
     el('p', { class: 'quiet-note', text: 'Save your archive, captures, drafts, item history, settings and portable credentials in one backup file. Treat this file like your private data folder; it is not password protected.' }),
     el('div', { class: 'row-inline' }, [save, restore]),
     el('p', { class: 'quiet-note', text: 'Restore checks the file before you confirm, saves a recovery copy of your current data, then restarts Zelos. Close other Zelos sessions and connected AI clients first. Passwords held by your computer’s password storage may need reconnecting on another computer.' }),

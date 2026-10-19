@@ -406,8 +406,11 @@ function toastBar() {
 
 /* ------------------------------------------------------------- whole screens */
 
+/* The three whole-page screens are <main>, not a div: they are the page, and
+   with no landmark at all their content sat outside every region axe and a
+   screen reader's landmark list know about (QA, 2026-10-10, TT-3512). */
 function bootScreen() {
-  return el('div', { class: 'screen' }, [
+  return el('main', { class: 'screen' }, [
     el('p', { class: 'screen-mark', text: 'ΖΗΛΟΣ' }),
     meander(),
     el('p', { class: 'screen-line', text: 'Opening the board…' }),
@@ -416,7 +419,7 @@ function bootScreen() {
 
 function fatalScreen() {
   const f = state.fatal;
-  return el('div', { class: 'screen' }, [
+  return el('main', { class: 'screen' }, [
     el('p', { class: 'screen-mark', text: 'ΖΗΛΟΣ' }),
     meander(),
     el('h1', { class: 'screen-title', text: f.title }),
@@ -433,7 +436,7 @@ function noTokenScreen() {
   // shell. The desktop app has a menu and no terminal (window.zelos is the
   // mark its preload leaves); a browser tab has the address the terminal
   // printed, which is what carries the key a bookmark strips.
-  return el('div', { class: 'screen' }, [
+  return el('main', { class: 'screen' }, [
     el('p', { class: 'screen-mark', text: 'ΖΗΛΟΣ' }),
     meander(),
     el('h1', { class: 'screen-title', text: 'This page has no session key' }),

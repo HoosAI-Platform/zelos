@@ -55,7 +55,7 @@ function manualUpdatesPanel({ reason = '' } = {}) {
     },
   });
   return el('div', { class: 'stack update-panel' }, [
-    el('h3', { text: 'Updates' }),
+    el('h2', { class: 'panel-heading', text: 'Updates' }),
     reason ? el('p', { class: 'quiet-note', text: reason }) : null,
     el('p', { class: 'quiet-note', text: 'Checks GitHub only when you press the button. Your email, calendar and AI keys are not included.' }),
     el('div', { class: 'row-inline' }, check), status, result,
@@ -119,7 +119,7 @@ function desktopUpdatesPanel(bridge) {
     el('div', { class: 'check-row' }, [box, el('label', { class: 'check-label', for: id, text: 'Install updates automatically' })]),
     el('p', { class: 'field-hint', text: 'Zelos periodically checks for updates and gets them ready in the background. Nothing is installed until you choose Restart to update. Your email, calendar and AI keys are never shared.' }),
   ]);
-  const panel = el('div', { class: 'stack update-panel' }, [el('h3', { text: 'Updates' }), field, problemNote, status, controls, release]);
+  const panel = el('div', { class: 'stack update-panel' }, [el('h2', { class: 'panel-heading', text: 'Updates' }), field, problemNote, status, controls, release]);
   let state = null;
   let problem = '';
   let shown = '';
