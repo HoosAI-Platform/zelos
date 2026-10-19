@@ -1417,6 +1417,15 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 /* Setup has no tab bar for a toast to clear, so it sits at the bottom edge
    at every width, as it does on the wide board. */
 .shell-bare .toast { bottom: 1.5rem; }
+/* Setup's update bar lines up with the step above it. Empty, it takes no room. */
+/* Hidden from JS while it holds nothing, so it is never an empty landmark. */
+.setup-bar {
+  display: grid;
+  gap: var(--gap);
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 0 clamp(0.9rem, 3vw, 2rem) 4rem;
+}
 .view-onboarding {
   display: grid;
   gap: var(--gap);

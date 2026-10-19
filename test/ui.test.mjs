@@ -3720,7 +3720,7 @@ test('a toast raised during first-run setup is shown and can be heard', () => {
     const shell = plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('shell-bare'));
     const slot = toast.parentNode;
     assert.equal(slot.attributes.class, 'toast-slot');
-    assert.deepEqual(shell.children.map(n => n.attributes.id || n.attributes.class), ['toast-slot', 'main'],
+    assert.deepEqual(shell.children.map(n => n.attributes.id || n.attributes.class), ['toast-slot', 'main', 'setup-bar'],
       'the slot sits before <main>, so an Undo is reached before the view');
     const main = plainWalk(root).find(n => n.attributes.id === 'main');
     store.notify('a second toast');
@@ -3789,6 +3789,150 @@ test('the toast raised while loading the made-up week survives the handover to t
     const toast = plainWalk(root).find(n => hasClass(n, 'toast'));
     assert.equal(toast, toastInSetup, 'the toast must be the same node on both sides of the handover');
     assert.equal(toast.attributes.role, 'status');
+  ` });
+});
+
+/**
+ * The desktop app with an updater, for runAppScenario's beforeBoot. Unlike the
+ * plain harness, assigning the hash fires hashchange, as a browser does, and
+ * replaceState is recorded and does not: so a restore by assignment, which
+ * would re-render the step, shows up as a second route change.
+ */
+const desktopUpdater = (updaterState, { hash = '#/now', sampleData = true } = {}) => `
+  const replaced = [];
+  let currentHash = ${JSON.stringify(hash)};
+  window.location = {
+    href: 'http://127.0.0.1/?t=test', host: '127.0.0.1',
+    get hash() { return currentHash; },
+    set hash(value) { currentHash = value; windowEvents.hashchange?.(); },
+  };
+  window.history = { replaceState(_state, _title, url) { replaced.push(url); currentHash = url; } };
+  const ok = async () => ({ ok: true });
+  window.zelos = { desktop: true, updates: {
+    state: async () => ({ ok: true, state: ${JSON.stringify(updaterState)} }),
+    snooze: ok, restart: ok, skip: ok, check: ok, download: ok, setAuto: ok,
+  } };
+  ${sampleData ? '' : `
+  globalThis.fetch = async path => {
+    if (path === '/api/sweep/stream') return new Promise(() => {});
+    assert.equal(path, '/api/sample-data');
+    return { ok: false, status: 404, text: async () => JSON.stringify({ error: 'not found' }) };
+  };`}
+`;
+
+const DOWNLOADING = { supported: true, status: 'downloading', currentVersion: '1.9.4', latestVersion: '1.9.5', progress: 0.4, auto: true, banner: null };
+
+/**
+ * The desktop menu's "Check for updates" sends the window to #/settings/about.
+ * Setup used to swallow that: the check ran, and nothing on screen said so
+ * (TT-3481).
+ */
+test('"Check for updates" during setup shows the Updates panel without leaving the step', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING), scenario: `
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    const step = main.firstChild;
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    const aside = () => plainWalk(root).find(n => n.tag === 'aside');
+    assert.equal(aside().hidden, true, 'an empty bar is no landmark');
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.equal(aside().hidden, false);
+    assert.match(textOf(root), /Downloading Zelos 1\\.9\\.5… 40%/);
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is still showing');
+    assert.equal(plainWalk(root).find(n => n.attributes.id === 'main'), main);
+    assert.equal(main.firstChild, step, 'the step was not re-rendered, so nothing half typed is lost');
+    assert.doesNotMatch(textOf(main), /Downloading/, 'the panel sits beside the step, not in it');
+    const bar = plainWalk(root).find(n => n.tag === 'aside');
+    assert.equal(bar.attributes['aria-label'], 'Zelos updates');
+    assert.match(textOf(bar), /Downloading Zelos 1\\.9\\.5/);
+    assert.equal(window.location.hash, '#/now', 'the address is the step\\'s again');
+    assert.deepEqual(replaced, ['#/now'], 'put back with replaceState, not an assignment');
+    // A second menu click is a second route change, and is answered again,
+    // by the panel already open: rebuilding it would drop focus inside it.
+    const panel = plainWalk(bar).find(n => (n.attributes.class || '').includes('update-panel'));
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.deepEqual(replaced, ['#/now', '#/now']);
+    assert.equal(main.firstChild, step);
+    assert.equal(plainWalk(bar).find(n => (n.attributes.class || '').includes('update-panel')), panel);
+    findButton(root, 'Close').fire('click');
+    assert.equal(aside().hidden, true, 'closed and empty again');
+  ` });
+});
+
+test('an update ready to install is announced during setup, by the one banner', () => {
+  const ready = { ...DOWNLOADING, status: 'ready', progress: null, banner: '1.9.5' };
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(ready, { sampleData: false }), scenario: `
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    assert.match(textOf(root), /Zelos 1\\.9\\.5 is ready to install\\./);
+    assert.equal(plainWalk(root).find(n => n.tag === 'aside').hidden, false, 'the banner keeps its bar showing');
+    const banners = () => plainWalk(root).filter(n => n.attributes.class === 'update-banner-slot');
+    assert.equal(banners().length, 1);
+    const banner = banners()[0];
+    findButton(root, 'Look around first').fire('click');
+    await settle();
+    assert.ok(plainWalk(root).some(n => n.attributes.class === 'chrome'), 'setup handed over to the board');
+    assert.deepEqual(banners(), [banner], 'the same banner moves to the board; a second one would poll forever');
+    assert.equal(banner.parentNode.attributes.class, 'topbar');
+  ` });
+});
+
+test('closing the setup Updates panel puts focus back where it was', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING), scenario: `
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    const start = findButton(root, 'Set up Zelos');
+    start.focus();
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.equal(document.activeElement, start, 'opening the panel does not move focus');
+    findButton(root, 'Close').fire('click');
+    await settle();
+    assert.doesNotMatch(textOf(root), /Downloading/);
+    assert.equal(document.activeElement, start);
+
+    // The step moved on while the panel was open: the node that had focus is
+    // gone, so focus goes to the step's <main>.
+    findButton(root, 'Set up Zelos').focus();
+    window.location.hash = '#/settings/about';
+    await settle();
+    findButton(root, 'Set up Zelos').fire('click');
+    await settle();
+    assert.match(textOf(main), /Step 2 of 5/);
+    findButton(root, 'Close').fire('click');
+    await settle();
+    assert.equal(document.activeElement, main);
+  ` });
+});
+
+test('About is turned away only while setup is showing', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING, { sampleData: false }), scenario: `
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.deepEqual(replaced, ['#/now'], 'setup keeps its address');
+    findButton(root, 'Look around first').fire('click');
+    await settle();
+    assert.ok(plainWalk(root).some(n => n.attributes.class === 'chrome'), 'setup is finished');
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.equal(window.location.hash, '#/settings/about');
+    assert.deepEqual(replaced, ['#/now'], 'nothing turned away once setup is done');
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    assert.match(textOf(main), /Downloading Zelos 1\\.9\\.5/, 'Settings → About shows its own panel');
+    assert.ok(!plainWalk(root).some(n => n.tag === 'aside'), 'setup\\'s bar went with setup');
+  ` });
+});
+
+test('a reload at #/settings/about during setup comes back at setup\'s own address, with the panel open', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING, { hash: '#/settings/about' }), scenario: `
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    assert.equal(window.location.hash, '#/now');
+    assert.deepEqual(replaced, ['#/now']);
+    // It may have been a menu click that landed during the boot screen, so
+    // the panel it asked for opens; after a plain reload it is one Close away.
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    assert.match(textOf(root), /Downloading Zelos 1\\.9\\.5/);
+    assert.doesNotMatch(textOf(main), /Downloading/);
+    assert.ok(findButton(root, 'Close'));
   ` });
 });
 
