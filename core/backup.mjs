@@ -228,6 +228,10 @@ function verifyFiles(home, files) {
 /** Caller has paused writers. The SQLite snapshot includes committed WAL data. */
 export function createBackup({ home, db, destination, appVersion, config = DEFAULTS, now = new Date() }) {
   home = dataHome(home);
+  // A folder that is not there threw a bare ENOENT, which the desktop could only
+  // answer with its generic "close other Zelos and AI clients" advice
+  // (QA, 2026-10-10, TT-3506).
+  if (!exists(path.dirname(path.resolve(destination)))) throw failure('the folder you chose does not exist. Choose another folder and try again.');
   const parent = directory(path.dirname(path.resolve(destination)));
   destination = path.join(parent, path.basename(destination));
   const prior = exists(destination);

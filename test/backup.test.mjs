@@ -213,6 +213,15 @@ describe('portable backup and restore', () => {
     assert.equal(fs.readFileSync(destination, 'utf8'), 'keep me');
   });
 
+  it('names a missing destination folder rather than failing with a bare ENOENT (TT-3506)', () => {
+    const fx = fixture('source');
+    // The desktop shows a "Backup: " message as it is; anything else becomes the
+    // generic "check that other Zelos and AI clients are closed" advice.
+    assert.throws(() => createBackup({ ...fx, destination: path.join(dir, 'gone', 'Zelos.zelos-backup'), appVersion: version }),
+      /^Error: Backup: the folder you chose does not exist/);
+    assert.ok(!fs.readdirSync(fx.home).some((name) => name.startsWith('.backup-')), 'nothing is staged for a backup that cannot be written');
+  });
+
   it('automatically rolls back a mid-replacement failure and leaves the recovery archive', () => {
     const source = fixture('source'); const target = fixture('target');
     const prepared = restorePreparation(target, save(source).file);
