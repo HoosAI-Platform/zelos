@@ -612,6 +612,25 @@ test('parseFeed reads what a feed means, not what its markup says', () => {
   }
 });
 
+test('REGRESSION: an Atom author with a uri or email is sent by their name alone', () => {
+  /* The whole <author> element was read as text, so a person construct with a
+     <uri> became the sender "Ines Calder http://…/ines". */
+  const atom = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom"><title>T</title>'
+    + '<entry><id>e1</id><author><name>Ines Calder</name><uri>https://calder.example/ines</uri>'
+    + '<email>ines@calder.example</email></author></entry>'
+    + '<entry><id>e2</id><author>\n  <uri>https://calder.example/</uri>\n  <name>Kit Alder</name>\n</author></entry>'
+    + '</feed>');
+  assert.equal(atom.entries[0].author, 'Ines Calder');
+  assert.equal(atom.entries[1].author, 'Kit Alder', 'the name is found wherever it sits in the construct');
+
+  // RSS's <author> is plain text and <dc:creator> a name; both read as before.
+  const rss = parseFeed('<rss><channel><item><guid>g1</guid><author>dana@vance.example (Dana Vance)</author></item>'
+    + '<item><guid>g2</guid><dc:creator><![CDATA[Nemo Hale]]></dc:creator><author>x@y.example</author></item>'
+    + '</channel></rss>');
+  assert.equal(rss.entries[0].author, 'dana@vance.example (Dana Vance)');
+  assert.equal(rss.entries[1].author, 'Nemo Hale');
+});
+
 test('REGRESSION: an escaped ampersand in a link is decoded, because it is a row identity', () => {
   /* Found by pointing this connector at NASA's real feed instead of a fixture.
      Two of ten entries came back as
