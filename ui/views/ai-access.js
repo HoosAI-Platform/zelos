@@ -89,6 +89,9 @@ const SHORT = {
   people: 'your contacts',
 };
 
+/** The short names above that are plural, so the sentence after one says "are", not "is" (QA, 2026-10-10, TT-3498). */
+const PLURAL_NAMES = new Set(['mail.metadata', 'drafts', 'people']);
+
 /**
  * The scope list this panel falls back to when there is no server to ask — the
  * closed set from SPEC-v2 §1, so the "not in this build" screen can still teach
@@ -569,7 +572,7 @@ export function aiAccessPanel() {
     const tail = v.enabled ? '' : ' The switch is still off, so nothing is shared yet.';
     const extra = scope.exposing && next ? ' Mail headers come with it.' : '';
     run(() => api.saveAi({ scopes: { [scope.id]: next } }), {
-      message: `${noun} ${next ? 'is now readable' : 'is no longer readable'}.${extra}${tail}`,
+      message: `${noun} ${PLURAL_NAMES.has(scope.id) ? 'are' : 'is'} ${next ? 'now readable' : 'no longer readable'}.${extra}${tail}`,
     });
   }
 
