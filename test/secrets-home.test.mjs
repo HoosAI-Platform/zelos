@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-secret-homes-'));
 process.env.ZELOS_HOME = path.join(scratch, 'initial');
 process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
 process.env.ZELOS_LOG_LEVEL = 'silent';
-const { describeCommand, setSecret, getSecret, deleteSecret, listRefs, resetBackendCache } = await import('../core/secrets.mjs');
+const { describeCommand, ensureNamespace, setSecret, getSecret, deleteSecret, listRefs, resetBackendCache } = await import('../core/secrets.mjs');
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
 function useHome(name) {
@@ -20,6 +21,8 @@ function useHome(name) {
 }
 
 function addresses() {
+  // describeCommand only reads the identity; giving a fresh home one is a save's job.
+  ensureNamespace();
   return ['macos-keychain', 'libsecret', 'windows-dpapi'].map((name) => {
     const command = describeCommand({ name, action: 'get', ref: 'model.default' });
     return name === 'windows-dpapi' ? command.env.ZELOS_SECRET_FILE : command.args.at(-1);
@@ -214,3 +217,138 @@ for (const action of ['set', 'delete']) {
       'other legacy homes keep their shared key');
   });
 }
+
+/* A home restored onto another computer (TT-3438). DPAPI needs no binary to
+   answer "is it saved?" — that is a file check — so these force the backend
+   and point %LOCALAPPDATA% at a scratch folder instead of the real profile. */
+function fakeDpapi(t, name, { local = 'empty', refs = ['model.default'], legacyRefs = [] } = {}) {
+  const priorLocal = process.env.LOCALAPPDATA;
+  t.after(() => {
+    if (priorLocal === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = priorLocal;
+    process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
+    resetBackendCache();
+  });
+  const localAppData = path.join(scratch, `${name}-localappdata`);
+  if (local === 'unset') delete process.env.LOCALAPPDATA;
+  else process.env.LOCALAPPDATA = localAppData;
+  if (local === 'empty') fs.mkdirSync(localAppData);
+  process.env.ZELOS_SECRETS_BACKEND = 'windows-dpapi';
+  const home = useHome(name);
+  // The namespace is written before the index so that it records exactly the
+  // legacy refs each case asks for, not every indexed ref.
+  const id = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(home, 'secrets.namespace.json'), JSON.stringify({ version: 1, id, legacyRefs }));
+  const index = path.join(home, 'secrets.index.json');
+  fs.writeFileSync(index, JSON.stringify({ refs }));
+  return { home, id, index, localAppData, indexText: fs.readFileSync(index, 'utf8') };
+}
+
+test('a DPAPI home restored onto another computer lists none of the keys it cannot read, and keeps them indexed', async (t) => {
+  const { index, indexText } = fakeDpapi(t, 'dpapi-restored');
+  assert.deepEqual(await listRefs(), [], 'a key this computer has never stored must not show as saved');
+  assert.equal(fs.readFileSync(index, 'utf8'), indexText,
+    'hidden, not forgotten: pointing %LOCALAPPDATA% back at the right profile must find the keys again');
+});
+
+for (const local of ['unset', 'missing']) {
+  test(`a DPAPI home whose %LOCALAPPDATA% is ${local} still lists its keys, because that is the wrong address, not an empty store`, async (t) => {
+    const { index, indexText } = fakeDpapi(t, `dpapi-local-${local}`, { local });
+    assert.deepEqual(await listRefs(), ['model.default']);
+    assert.equal(fs.readFileSync(index, 'utf8'), indexText);
+  });
+}
+
+test('a restored DPAPI home still lists a key it can read from the older unscoped store', async (t) => {
+  const { localAppData } = fakeDpapi(t, 'dpapi-restored-legacy', { legacyRefs: ['model.default'] });
+  fs.mkdirSync(path.join(localAppData, 'Zelos', 'secrets'), { recursive: true });
+  fs.writeFileSync(path.join(localAppData, 'Zelos', 'secrets', 'model.default.dpapi'), '00');
+  assert.deepEqual(await listRefs(), ['model.default']);
+});
+
+test('a DPAPI home with blobs in its own fallback folder keeps listing them once %LOCALAPPDATA% is set', async (t) => {
+  // Saved on a launch without %LOCALAPPDATA%: those keys belong to this
+  // account, so their absence from the real profile is not "on another computer".
+  const { home, id, index, indexText } = fakeDpapi(t, 'dpapi-fallback-folder');
+  fs.mkdirSync(path.join(home, 'dpapi', 'Zelos', 'secrets', id), { recursive: true });
+  assert.deepEqual(await listRefs(), ['model.default']);
+  assert.equal(fs.readFileSync(index, 'utf8'), indexText);
+});
+
+test('a restored DPAPI home keeps an older key indexed when another home has stored keys on this computer', async (t) => {
+  // <LOCALAPPDATA>\Zelos\secrets exists because some other home saved there,
+  // so the older unscoped store answers "not here" for model.default. That is
+  // not proof the key was deleted: this home has never stored anything on this
+  // computer, so its key is as absent-here as any other.
+  const { localAppData, index, indexText } = fakeDpapi(t, 'dpapi-restored-shared', { legacyRefs: ['model.default'] });
+  fs.mkdirSync(path.join(localAppData, 'Zelos', 'secrets', crypto.randomBytes(16).toString('hex')), { recursive: true });
+  assert.deepEqual(await listRefs(), []);
+  assert.equal(fs.readFileSync(index, 'utf8'), indexText, 'a key this pass never saw deleted must stay indexed');
+});
+
+test('a key missing on this computer does not stop listRefs asking about the keys after it', async (t) => {
+  // mail.m_1 has no blob anywhere here; model.default comes after it and is
+  // readable from the older unscoped store. An unanswered probe would leave
+  // model.default listed anyway, so the proof is that its blob was looked for.
+  const { localAppData } = fakeDpapi(t, 'dpapi-order', {
+    refs: ['mail.m_1', 'model.default'], legacyRefs: ['model.default'],
+  });
+  const legacyBlob = path.join(localAppData, 'Zelos', 'secrets', 'model.default.dpapi');
+  fs.mkdirSync(path.dirname(legacyBlob), { recursive: true });
+  fs.writeFileSync(legacyBlob, '00');
+  // Listed either way — a probed 'yes' and an unprobed 'unknown' look the
+  // same from outside — so prove the legacy blob was actually looked for.
+  const exists = t.mock.method(fs, 'existsSync');
+  assert.deepEqual(await listRefs(), ['model.default']);
+  assert.ok(exists.mock.calls.some((call) => call.arguments[0] === legacyBlob),
+    'model.default was listed without being asked about');
+});
+
+test('reading a DPAPI key with no blob answers null without starting PowerShell', { skip: needsExecutableStub }, async (t) => {
+  fakeDpapi(t, 'dpapi-no-spawn');
+  const directory = path.join(scratch, 'dpapi-no-spawn-bin');
+  fs.mkdirSync(directory);
+  const spawned = path.join(directory, 'spawned');
+  fs.writeFileSync(path.join(directory, 'powershell.exe'),
+    `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(spawned)}, 'ran');\nprocess.exit(44);\n`, { mode: 0o700 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = directory + path.delimiter + previousPath;
+  t.after(() => { process.env.PATH = previousPath; });
+  assert.equal(await getSecret('model.default'), null);
+  assert.equal(fs.existsSync(spawned), false, 'a missing file is already the answer');
+});
+
+test('looking for a credential in a home that has never saved one gives it no identity', async (t) => {
+  // secrets.namespace.json is part of the home, so a read that wrote one would
+  // put an identity into every backup and copy of a home that never needed it
+  // (TT-3503). Only a save, or forgetting a pre-upgrade key, creates it.
+  const priorLocal = process.env.LOCALAPPDATA;
+  t.after(() => {
+    if (priorLocal === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = priorLocal;
+    process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
+    resetBackendCache();
+  });
+  process.env.LOCALAPPDATA = path.join(scratch, 'fresh-dpapi-localappdata');
+  fs.mkdirSync(process.env.LOCALAPPDATA);
+  process.env.ZELOS_SECRETS_BACKEND = 'windows-dpapi';
+  const home = useHome('fresh-dpapi');
+  assert.equal(await getSecret('model.default'), null);
+  assert.deepEqual(await listRefs(), []);
+  assert.deepEqual(await deleteSecret('mail.m_1'), { ok: true, deleted: false });
+  assert.equal(fs.existsSync(path.join(home, 'secrets.namespace.json')), false);
+});
+
+test('a home that gets its identity never shows anyone a half-written one', () => {
+  // An empty secrets.namespace.json is damaged, not missing: replacing it could
+  // hand a home a second identity and orphan every key saved under the first.
+  const empty = useHome('namespace-empty');
+  fs.writeFileSync(path.join(empty, 'secrets.namespace.json'), '');
+  assert.throws(() => ensureNamespace(), /namespace is damaged/);
+  // So the record has to appear whole. It is written to a temporary file and
+  // linked into place, and nothing but the record is left behind.
+  const home = useHome('namespace-created');
+  const { id } = ensureNamespace();
+  assert.match(id, /^[0-9a-f]{32}$/);
+  assert.equal(ensureNamespace().id, id, 'a second call reads the first identity back');
+  assert.deepEqual(fs.readdirSync(home).filter((name) => name.startsWith('secrets.')), ['secrets.namespace.json']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'secrets.namespace.json'), 'utf8')).id, id);
+});

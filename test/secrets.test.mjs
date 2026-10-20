@@ -13,7 +13,7 @@ process.env.ZELOS_HOME = path.join(HOME_ROOT, 'home');
 const secrets = await import('../core/secrets.mjs');
 const {
   backend, setSecret, getSecret, deleteSecret, listRefs,
-  describeCommand, resetBackendCache, chooseBackend, SERVICE,
+  describeCommand, ensureNamespace, resetBackendCache, chooseBackend, SERVICE,
   TIMEOUTS_MS, ATTEMPTS, setTimeoutsForTest,
 } = secrets;
 
@@ -61,6 +61,9 @@ test.after(() => {
 /* ------------------------------------------------------- argv containment */
 
 test('no command line can carry a secret — describeCommand never receives one', () => {
+  // A scoped address needs the home's credential identity, which only a save
+  // creates; describeCommand itself never writes one.
+  ensureNamespace();
   // The structural guarantee: the only function that builds argv takes a
   // backend, an action and a ref. There is no parameter a value could ride in.
   assert.equal(describeCommand.length, 1);
@@ -84,6 +87,7 @@ test('no command line can carry a secret — describeCommand never receives one'
 });
 
 test('macOS argv matches the spec, and the value is written to stdin twice', () => {
+  ensureNamespace();
   const set = describeCommand({ name: 'macos-keychain', action: 'set', ref: 'model.default' });
   assert.equal(set.file, '/usr/bin/security');
   const account = set.args[set.args.indexOf('-a') + 1];
@@ -105,6 +109,7 @@ test('macOS argv matches the spec, and the value is written to stdin twice', () 
 });
 
 test('Windows DPAPI passes an encoded script and the path by env, never the value', () => {
+  ensureNamespace();
   const set = describeCommand({ name: 'windows-dpapi', action: 'set', ref: 'mail.m_1' });
   assert.equal(set.file, 'powershell.exe');
   assert.ok(set.args.includes('-NoProfile') && set.args.includes('-NonInteractive'));
@@ -131,6 +136,7 @@ test('Windows DPAPI passes an encoded script and the path by env, never the valu
 });
 
 test('libsecret argv matches secret-tool, value on stdin', () => {
+  ensureNamespace();
   const set = describeCommand({ name: 'libsecret', action: 'set', ref: 'mail.m_2' });
   const account = set.args.at(-1);
   assert.match(account, /^[0-9a-f]{32}\.mail\.m_2$/);
@@ -834,6 +840,9 @@ test('a credential write that times out once is not a lost credential', { skip: 
  */
 test('a read that could not be answered is an error, never "no such secret"', { skip: NEEDS_A_SHELL_STUB }, async () => {
   useHome('read-timeout');
+  // A home with no identity has saved nothing scoped and answers null without
+  // asking the keyring; this test is about a keyring that is asked.
+  ensureNamespace();
   const binDir = path.join(HOME_ROOT, 'read-timeout-bin');
   const log = path.join(HOME_ROOT, 'read-timeout-log.txt');
   const realPath = process.env.PATH;
@@ -1150,7 +1159,9 @@ test('Windows CI: DPAPI is the detected backend and really round-trips a secret'
 
   // The module's own idea of where the blob goes, rather than a second copy of
   // that path logic here — a test that guessed the path could pass against a
-  // backend that had written somewhere else entirely.
+  // backend that had written somewhere else entirely. The home needs its
+  // identity first, as setSecret would give it, to have an address at all.
+  ensureNamespace();
   const blob = describeCommand({ name: 'windows-dpapi', action: 'set', ref: DPAPI_REF }).env.ZELOS_SECRET_FILE;
 
   await setSecret(DPAPI_REF, DPAPI_VALUE);
@@ -1197,6 +1208,7 @@ test('Windows CI: DPAPI is the detected backend and really round-trips a secret'
  * scripts is always a mistake.
  */
 test('the PowerShell scripts use PowerShell escaping, not JavaScript escaping', () => {
+  ensureNamespace();
   for (const action of ['set', 'get']) {
     const cmd = describeCommand({ name: 'windows-dpapi', action, ref: 'mail.m_1' });
     const script = Buffer.from(cmd.args[cmd.args.indexOf('-EncodedCommand') + 1], 'base64')
@@ -1217,6 +1229,7 @@ test('the PowerShell scripts use PowerShell escaping, not JavaScript escaping', 
 });
 
 test('the DPAPI scripts state their own encoding rather than inheriting it', () => {
+  ensureNamespace();
   // The console code page differs by locale, and on a double-byte locale it is
   // not a reversible byte mapping — so a non-ASCII password would be corrupted
   // silently. Both directions must name UTF-8 explicitly.

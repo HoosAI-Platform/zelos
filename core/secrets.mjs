@@ -395,7 +395,7 @@ finally{ [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
 export function describeCommand({ name, action, ref, legacy = false }) {
   if (!isValidRef(ref)) throw new TypeError(`secrets: invalid ref ${JSON.stringify(ref)}`);
   if (!BACKEND_NAMES.includes(name)) throw new TypeError(`secrets: unknown backend ${name}`);
-  const account = name === 'encrypted-file' || legacy ? ref : `${namespaceRecord().id}.${ref}`;
+  const account = name === 'encrypted-file' || legacy ? ref : `${scopedId()}.${ref}`;
 
   if (name === 'macos-keychain') {
     switch (action) {
@@ -446,9 +446,22 @@ export function describeCommand({ name, action, ref, legacy = false }) {
   return null; // encrypted-file is pure JS
 }
 
-function dpapiFile(ref, legacy = false) {
-  const base = process.env.LOCALAPPDATA || path.join(paths().home, 'dpapi');
-  return path.join(base, 'Zelos', 'secrets', ...(legacy ? [] : [namespaceRecord().id]), `${ref}.dpapi`);
+function dpapiFile(ref, legacy = false, base = process.env.LOCALAPPDATA || path.join(paths().home, 'dpapi')) {
+  return path.join(base, 'Zelos', 'secrets', ...(legacy ? [] : [scopedId()]), `${ref}.dpapi`);
+}
+
+/**
+ * Whether a missing DPAPI blob directory can be believed. dpapiFile() falls
+ * back to the Zelos home when %LOCALAPPDATA% is unset, and a variable that
+ * names a folder which does not exist is just as clearly not this account's
+ * real profile — in both cases Zelos is looking in the wrong place, and
+ * nothing it finds missing there says anything about the keys. A
+ * %LOCALAPPDATA% that is set and exists is this account's own store, so a
+ * home whose blobs are not in it was brought here from somewhere else.
+ */
+function dpapiAddressAuthoritative() {
+  const base = process.env.LOCALAPPDATA;
+  return Boolean(base) && fs.existsSync(base);
 }
 
 /* ------------------------------------------------------------- detection */
@@ -756,26 +769,26 @@ function forgetRef(ref) {
 // entries until the next explicit save. Reads never write a migrated value:
 // a concurrent process may be replacing/deleting that key while the OS reads.
 // Never remove the shared legacy entry another older home may still need.
-function namespaceRecord() {
-  const file = path.join(paths().home, 'secrets.namespace.json');
+function namespaceFile() {
+  return path.join(paths().home, 'secrets.namespace.json');
+}
+
+/**
+ * This home's credential identity, read and never written. A home that has
+ * not yet saved anything to an OS store has no identity, and `id` is null:
+ * looking for a key — which is all `doctor`, `listRefs` and every read do —
+ * must not be what gives it one, because the file it would write is part of
+ * the home and a backup or a copy carries it along. Its `legacyRefs` are then
+ * the ones ensureNamespace() would record, so reads see the same thing either
+ * way.
+ */
+function readNamespace() {
   let raw;
   try {
-    raw = fs.readFileSync(file, 'utf8');
+    raw = fs.readFileSync(namespaceFile(), 'utf8');
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
-    const fresh = { version: 1, id: crypto.randomBytes(16).toString('hex'), legacyRefs: readIndex(true) };
-    let fd;
-    try {
-      fd = fs.openSync(file, 'wx', 0o600);
-      fs.writeFileSync(fd, `${JSON.stringify(fresh, null, 2)}\n`);
-      fs.fsyncSync(fd);
-    } catch (writeError) {
-      if (writeError.code === 'EEXIST') return namespaceRecord();
-      throw writeError;
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-    }
-    return fresh;
+    return { version: 1, id: null, legacyRefs: readIndex(true) };
   }
   let record;
   try { record = JSON.parse(raw); } catch { /* fail without replacing the identity */ }
@@ -786,17 +799,82 @@ function namespaceRecord() {
   return record;
 }
 
+/**
+ * The identity, created if this home has none. Only a save and the deletion
+ * of a pre-upgrade key call this, because only they have to record anything:
+ * the save writes under the identity, and the deletion writes a marker that
+ * stops the older unscoped key coming back.
+ */
+export function ensureNamespace() {
+  const file = namespaceFile();
+  const existing = readNamespace();
+  if (existing.id !== null) return existing;
+  const fresh = { version: 1, id: crypto.randomBytes(16).toString('hex'), legacyRefs: existing.legacyRefs };
+  const text = `${JSON.stringify(fresh, null, 2)}\n`;
+  // Written whole beside the real name, then linked into place: a link either
+  // creates the file complete or fails because another process got there
+  // first. Opening the real name and then writing it left a moment where a
+  // reader, or the writer that lost, saw an empty file and called it damaged.
+  const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    let fd;
+    try {
+      fd = fs.openSync(temp, 'wx', 0o600);
+      fs.writeFileSync(fd, text);
+      fs.fsyncSync(fd);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    try {
+      fs.linkSync(temp, file);
+      return fresh;
+    } catch (linkError) {
+      if (linkError.code === 'EEXIST') return readNamespace();
+      // Some filesystems have no hard links; there the old exclusive create
+      // is the best available, narrow window and all.
+      if (linkError.code !== 'EPERM' && linkError.code !== 'ENOTSUP' && linkError.code !== 'ENOSYS') throw linkError;
+    }
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
+  let fd;
+  try {
+    fd = fs.openSync(file, 'wx', 0o600);
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+  } catch (writeError) {
+    if (writeError.code === 'EEXIST') return readNamespace();
+    throw writeError;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return fresh;
+}
+
+/* An OS store address under this home's identity. Every reader checks for a
+   null id before it gets here, so reaching this without one is a missed check,
+   and failing loudly beats inventing an address nothing was ever saved to. */
+function scopedId() {
+  const { id } = readNamespace();
+  if (id === null) throw new Error('secrets: this home has no credential identity yet, so it has no scoped address');
+  return id;
+}
+
 function hasLegacyRef(ref) {
-  const record = namespaceRecord();
-  return record.legacyRefs.includes(ref) && !fs.existsSync(legacyMarker(record, ref));
+  const record = readNamespace();
+  if (!record.legacyRefs.includes(ref)) return false;
+  // Markers are written under the identity, so a home without one has none.
+  return record.id === null || !fs.existsSync(legacyMarker(record, ref));
 }
 
 function legacyMarker(record, ref) {
+  // A tripwire, like scopedId(): every caller has already checked for a null id.
+  if (record.id === null) throw new Error('secrets: this home has no credential identity yet, so it has no migration markers');
   return path.join(paths().home, 'secrets.migrated', `${record.id}.${ref}`);
 }
 
 function forgetLegacyRef(ref) {
-  const record = namespaceRecord();
+  const record = readNamespace();
   if (!record.legacyRefs.includes(ref)) return;
   const file = legacyMarker(record, ref);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -1015,7 +1093,15 @@ function withSecretLock(ref, operation) {
 
 export async function setSecret(ref, value) {
   assertRef(ref);
-  return withSecretLock(ref, () => writeSecret(ref, value));
+  bumpGeneration(ref);
+  try {
+    return await withSecretLock(ref, () => writeSecret(ref, value));
+  } finally {
+    // Again at the end, and even on a throw: a write that failed half way may
+    // still have changed the store, and an answer remembered from before it
+    // must not outlive it.
+    bumpGeneration(ref);
+  }
 }
 
 async function writeSecret(ref, value) {
@@ -1033,6 +1119,7 @@ async function writeSecret(ref, value) {
     return { ok: true, backend: name };
   }
 
+  ensureNamespace();
   if (name === 'windows-dpapi') {
     const desc = describeCommand({ name, action: 'set', ref });
     const { code, stderr } = await runWithRetry(desc.file, desc.args,
@@ -1093,6 +1180,20 @@ async function readSecret(ref) {
 }
 
 async function readExternalSecret(name, ref, legacy = false) {
+  // Nothing has ever been saved under an identity this home does not have.
+  if (!legacy && readNamespace().id === null) return null;
+  // DPAPI's "not found" is a missing file, which Node can see without paying
+  // for a PowerShell start. The script makes the same check and exits
+  // NOT_FOUND_EXIT, so this changes how long the answer takes, not what it is.
+  if (name === 'windows-dpapi') {
+    try {
+      fs.statSync(dpapiFile(ref, legacy));
+    } catch (err) {
+      // Only "there is no such file" is the script's not-found. A file Node
+      // may not look at is PowerShell's to report, as it always was.
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+    }
+  }
   const desc = describeCommand({ name, action: 'get', ref, legacy });
   const { code, stdout, stderr } = await runWithRetry(desc.file, desc.args,
     { env: desc.env, timeoutMs: budgets.access, label: `${name} get ${ref}` });
@@ -1125,7 +1226,64 @@ async function readExternalSecret(name, ref, legacy = false) {
 
 export async function deleteSecret(ref) {
   assertRef(ref);
-  return withSecretLock(ref, () => removeSecret(ref));
+  bumpGeneration(ref);
+  try {
+    return await withSecretLock(ref, () => removeSecret(ref));
+  } finally {
+    bumpGeneration(ref);
+  }
+}
+
+/* ------------------------------------------------------ change detection
+ * For a caller that remembers something about a stored value — the AI token
+ * check keeps a digest, so that each MCP request on Windows does not start
+ * PowerShell — and has to know when to stop believing it. Two signals, and
+ * neither reveals anything about the value:
+ *
+ *  - a per-(home, ref) generation, bumped by every setSecret and deleteSecret
+ *    in this process, before the write and again after it;
+ *  - for the stores that are plain files, the file's own stamp, which also
+ *    moves when another process or another tool changes it. DPAPI stamps both
+ *    the scoped blob and the older unscoped one, because a read can come from
+ *    either and a save to the scoped one changes which one it comes from.
+ *
+ * The OS keychains offer no stamp that does not cost a spawn, so a change made
+ * to them outside this process is bounded only by the caller's own expiry.
+ */
+const writeGenerations = new Map();
+
+function generationKey(ref) {
+  return `${paths().home}\0${ref}`;
+}
+
+function bumpGeneration(ref) {
+  const key = generationKey(ref);
+  writeGenerations.set(key, (writeGenerations.get(key) ?? 0) + 1);
+}
+
+function fileStamp(file) {
+  try {
+    const stat = fs.statSync(file, { bigint: true });
+    return `${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+  } catch (err) {
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return 'absent';
+    throw err;
+  }
+}
+
+/** -> {gen, stamp}. Equal answers before and after mean nothing Zelos can see has changed. */
+export async function secretVersion(ref) {
+  assertRef(ref);
+  const { name } = await backend();
+  const gen = writeGenerations.get(generationKey(ref)) ?? 0;
+  let stamp = null;
+  if (name === 'windows-dpapi') {
+    const scoped = readNamespace().id === null ? 'unsaved' : fileStamp(dpapiFile(ref));
+    stamp = `${scoped}|${hasLegacyRef(ref) ? fileStamp(dpapiFile(ref, true)) : 'no-legacy'}`;
+  } else if (name === 'encrypted-file') {
+    stamp = fileStamp(storeFile());
+  }
+  return { gen, stamp };
 }
 
 async function removeSecret(ref) {
@@ -1141,8 +1299,17 @@ async function removeSecret(ref) {
     return { ok: true, deleted: existed };
   }
 
+  const legacy = hasLegacyRef(ref);
+  // A pre-upgrade key needs its marker, and the marker needs an identity. Any
+  // other key in a home without one was never saved, so there is nothing to
+  // ask the OS store to remove.
+  if (legacy) ensureNamespace();
+  else if (readNamespace().id === null) {
+    forgetRef(ref);
+    return { ok: true, deleted: false };
+  }
+
   if (name === 'windows-dpapi') {
-    const legacy = hasLegacyRef(ref);
     let deleted = true;
     try {
       fs.unlinkSync(dpapiFile(ref));
@@ -1155,7 +1322,6 @@ async function removeSecret(ref) {
     return { ok: true, deleted };
   }
 
-  const legacy = hasLegacyRef(ref);
   const desc = describeCommand({ name, action: 'delete', ref });
   const { code, stderr } = await runWithRetry(desc.file, desc.args,
     { timeoutMs: budgets.access, label: `${name} delete ${ref}` });
@@ -1177,19 +1343,48 @@ async function removeSecret(ref) {
  * values themselves survived in the keychain, which is what made it so quiet:
  * mail kept syncing, while Ask started answering "no model is configured yet"
  * and Settings showed placeholders until every password was re-entered.
+ *
+ * DPAPI has a fourth, 'absent-here': the store answered, and this home's keys
+ * are not in it because they were saved on another computer, or by another
+ * user account on this one. See below.
  */
 async function hasSecret(name, ref, legacy = false) {
+  // A home with no identity yet has saved nothing scoped: no blob, no folder.
+  const unsaved = !legacy && readNamespace().id === null;
   if (name === 'windows-dpapi') {
-    const blob = dpapiFile(ref, legacy);
-    if (fs.existsSync(blob)) return 'yes';
-    if (!legacy && hasLegacyRef(ref)) return hasSecret(name, ref, true);
+    const blob = unsaved ? null : dpapiFile(ref, legacy);
+    if (blob !== null && fs.existsSync(blob)) return 'yes';
+    const ownFolder = blob !== null && fs.existsSync(path.dirname(blob));
+    if (!legacy && hasLegacyRef(ref)) {
+      const old = await hasSecret(name, ref, true);
+      // The older store is shared by every home on this account, so it can
+      // exist while this home has never stored anything here. Its 'no' proves
+      // a deletion only when this home's own folder is here too; otherwise
+      // the rules below decide, as they would for a key with no older copy.
+      if (old !== 'no' || ownFolder) return old;
+    } else if (unsaved) {
+      return 'no';
+    }
     // The blob lives under %LOCALAPPDATA%, and dpapiFile() falls back to the
     // Zelos home when that variable is missing — so a relaunch without it looks
     // in a directory Zelos has never written to, where every ref reads as
     // deleted. A missing directory is not an empty store; it is the wrong
     // address.
-    return fs.existsSync(path.dirname(blob)) ? 'no' : 'unknown';
+    if (ownFolder) return 'no';
+    if (!dpapiAddressAuthoritative()) return 'unknown';
+    // The right address, and this home has never stored anything there: the
+    // home was restored from another computer or user account, whose DPAPI keys
+    // cannot decrypt here even if the blobs had come along. That is not 'no'
+    // — pointing %LOCALAPPDATA% back at the right profile, or saving the key
+    // again, should find the ref still indexed — so listRefs() hides it
+    // without pruning it. One exception: blobs written on an earlier launch
+    // without %LOCALAPPDATA% sit in the home's own fallback folder, and those
+    // keys are this account's, so they stay 'unknown' rather than vanish.
+    if (blob !== null && fs.existsSync(path.dirname(dpapiFile(ref, legacy, path.join(paths().home, 'dpapi'))))) return 'unknown';
+    return 'absent-here';
   }
+
+  if (unsaved) return hasLegacyRef(ref) ? hasSecret(name, ref, true) : 'no';
 
   const desc = describeCommand({ name, action: 'has', ref, legacy });
   try {
@@ -1227,6 +1422,7 @@ export async function listRefs() {
 
   const known = readIndex();
   const alive = [];
+  const removed = new Set();
   let answered = true;
   for (const ref of known) {
     /* Once one ref has gone unanswered the store is not answering, and asking
@@ -1242,17 +1438,20 @@ export async function listRefs() {
     // has said it is gone, and the caller's next getSecret() will find out for
     // real — whereas dropping it turns a five-second keyring stall into a UI
     // that says the account was never set up.
-    if (state !== 'no') alive.push(ref);
+    // 'absent-here' is a DPAPI home whose keys are on another computer: an
+    // answer, so the rest are still asked about, but not one the UI should
+    // show as saved, and not a deletion either.
+    if (state === 'yes' || state === 'unknown') alive.push(ref);
+    if (state === 'no') removed.add(ref);
     if (state === 'unknown') answered = false;
   }
   // Something deleted outside Zelos (Keychain Access, say) should not linger —
   // but only prune when every probe actually answered. Pruning on a partial
   // answer is what made a transient failure permanent: the index is the only
   // record that a keychain item is ours, and there is no way to rebuild it.
-  if (answered && alive.length !== known.length) {
+  if (answered && removed.size > 0) {
     // A credential may have been saved while the OS answered these probes.
     // Remove only the refs this pass actually proved absent.
-    const removed = new Set(known.filter((ref) => !alive.includes(ref)));
     writeIndex(readIndex().filter((ref) => !removed.has(ref)));
   }
   return alive;

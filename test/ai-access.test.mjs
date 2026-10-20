@@ -44,7 +44,7 @@ const ai = await import('../core/ai-access.mjs');
 const { createServer, listen } = await import('../core/server.mjs');
 const db = await import('../core/db.mjs');
 const { loadConfig, saveConfig, paths } = await import('../core/config.mjs');
-const { listRefs, getSecret } = await import('../core/secrets.mjs');
+const { listRefs, getSecret, setSecret, deleteSecret, secretVersion, ensureNamespace, describeCommand, resetBackendCache } = await import('../core/secrets.mjs');
 
 /* ------------------------------------------------------------------ *
  * Harness
@@ -52,6 +52,7 @@ const { listRefs, getSecret } = await import('../core/secrets.mjs');
 
 /** Put the ai block back to "off, nothing minted" between tests. */
 async function resetAi() {
+  ai.resetVerifiedTokens?.();
   const cfg = loadConfig();
   for (const token of ai.aiConfig(cfg).tokens) {
     await ai.revokeToken(token.id, { config: loadConfig() });
@@ -1028,6 +1029,137 @@ test('the whole feature leaves no trace when nobody turns it on', async (t) => {
   assert.equal(ai.aiEnabled(loadConfig()), false);
   assert.deepEqual((await api(ctx, 'GET', '/api/ai')).json.tokens, []);
   assert.equal((await listRefs()).some((r) => r.startsWith('ai.')), false);
+});
+
+/* ================================================================== *
+ * What a token check remembers (TT-3497)
+ *
+ * Reading a stored token is a spawn on every OS store — PowerShell on Windows,
+ * about 180 ms — and it used to happen on every MCP request. The check now
+ * remembers a digest of the stored value. These pin both halves: the store is
+ * read once, and nothing that should stop a token is slowed down by that.
+ * ================================================================== */
+
+/** The real store, with its reads counted. */
+function countingStore(read = getSecret) {
+  const reads = [];
+  return { reads, store: { getSecret: async (ref) => { reads.push(ref); return read(ref); }, secretVersion } };
+}
+
+async function warmToken(label) {
+  await resetAi();
+  const cfg = ai.setAiSettings({ enabled: true });
+  const minted = await ai.mintToken({ label, config: cfg });
+  const counted = countingStore();
+  assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store: counted.store })).ok, true);
+  return { minted, ...counted };
+}
+
+test('a token checked twice is read from the store once', async () => {
+  const { minted, reads, store } = await warmToken('Twice');
+  assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store })).ok, true);
+  assert.deepEqual(reads, [`ai.${minted.token.id}`]);
+});
+
+test('a wrong secret at a real id is refused without another store read', async () => {
+  const { minted, reads, store } = await warmToken('Guessed at');
+  const guess = `zlt_${minted.token.id}_${'A'.repeat(43)}`;
+  for (let i = 0; i < 3; i++) {
+    const verdict = await ai.verifyToken(guess, { config: minted.config, store });
+    assert.deepEqual([verdict.ok, verdict.reason], [false, 'mismatch']);
+  }
+  assert.equal(reads.length, 1, 'a stream of guesses must not become a stream of spawns');
+});
+
+test('a revoked token is refused at once, even by a caller holding the old config', async () => {
+  const { minted, store } = await warmToken('Revoked warm');
+  // The store refuses the delete, which revokeToken tolerates and only warns
+  // about: the value is still there, so the record on disk is all that stands
+  // in the way, and the caller's snapshot still lists it.
+  await ai.revokeToken(minted.token.id, {
+    config: minted.config, store: { deleteSecret: async () => { throw new Error('keychain locked'); } },
+  });
+  const verdict = await ai.verifyToken(minted.value, { config: minted.config, store });
+  assert.deepEqual([verdict.ok, verdict.reason], [false, 'unknown-token']);
+  // And with nothing remembered, so the refusal does not depend on the cache.
+  ai.resetVerifiedTokens?.();
+  const cold = await ai.verifyToken(minted.value, { config: minted.config });
+  assert.deepEqual([cold.ok, cold.reason], [false, 'unknown-token']);
+  await deleteSecret(`ai.${minted.token.id}`);
+});
+
+test('a token record removed on disk is refused, whatever config the caller holds', async () => {
+  const { minted, store } = await warmToken('Removed elsewhere');
+  const live = ai.aiConfig(loadConfig());
+  saveConfig({ ai: { ...live, tokens: [] } });
+  assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store })).ok, false);
+  await deleteSecret(`ai.${minted.token.id}`);
+});
+
+test('the master switch turned off on disk is obeyed, whatever config the caller holds', async () => {
+  const { minted, store } = await warmToken('Switched off elsewhere');
+  // Written straight to config.json, as another process would, so nothing in
+  // this one is told.
+  saveConfig({ ai: { ...ai.aiConfig(loadConfig()), enabled: false } });
+  const verdict = await ai.verifyToken(minted.value, { config: minted.config, store });
+  assert.deepEqual([verdict.ok, verdict.reason], [false, 'ai-access-disabled']);
+});
+
+test('a remembered check expires after a minute and the store is read again', async () => {
+  await resetAi();
+  const cfg = ai.setAiSettings({ enabled: true });
+  const minted = await ai.mintToken({ label: 'Expiring', config: cfg });
+  const { reads, store } = countingStore();
+  const start = 1_000_000;
+  for (const now of [start, start + 59_000]) {
+    assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store, now })).ok, true);
+  }
+  assert.equal(reads.length, 1);
+  assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store, now: start + 60_000 })).ok, true);
+  assert.equal(reads.length, 2);
+});
+
+test('replacing or deleting a token\'s stored value stops the old value at once', async () => {
+  const { minted, reads, store } = await warmToken('Rewritten');
+  const ref = `ai.${minted.token.id}`;
+  await setSecret(ref, `zlt_${minted.token.id}_${'C'.repeat(43)}`);
+  assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store })).ok, false);
+  assert.equal(reads.length, 2, 'a save in this process makes the remembered digest stale');
+  await deleteSecret(ref);
+  const verdict = await ai.verifyToken(`zlt_${minted.token.id}_${'C'.repeat(43)}`, { config: minted.config, store });
+  assert.deepEqual([verdict.ok, verdict.reason], [false, 'no-stored-value']);
+});
+
+test('on DPAPI, a blob changed by another process stops the remembered check', async (t) => {
+  await resetAi();
+  const cfg = ai.setAiSettings({ enabled: true });
+  const minted = await ai.mintToken({ label: 'DPAPI blob', config: cfg });
+  const ref = `ai.${minted.token.id}`;
+  // DPAPI is forced only for the version check; the read itself is a stub,
+  // because a real one would start PowerShell. The blob stands in for one
+  // another Zelos process just rewrote.
+  const priorLocal = process.env.LOCALAPPDATA;
+  t.after(async () => {
+    if (priorLocal === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = priorLocal;
+    process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
+    resetBackendCache();
+    await resetAi();
+  });
+  process.env.LOCALAPPDATA = path.join(HOME, 'dpapi-localappdata');
+  process.env.ZELOS_SECRETS_BACKEND = 'windows-dpapi';
+  resetBackendCache();
+  ensureNamespace();
+  const blob = describeCommand({ name: 'windows-dpapi', action: 'get', ref }).env.ZELOS_SECRET_FILE;
+  fs.mkdirSync(path.dirname(blob), { recursive: true });
+  fs.writeFileSync(blob, '00');
+  const { reads, store } = countingStore(async () => minted.value);
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store })).ok, true);
+  }
+  assert.equal(reads.length, 1);
+  fs.writeFileSync(blob, '0000');
+  assert.equal((await ai.verifyToken(minted.value, { config: minted.config, store })).ok, true);
+  assert.equal(reads.length, 2, 'a different blob is read again, not trusted from memory');
 });
 
 /* ================================================================== *
