@@ -2775,11 +2775,39 @@ test('REGRESSION: the Now view sends a failed sweep to the terminal or desktop.l
   // give, and corrected there first.
   assert.doesNotMatch(src, /zelos\.log/);
   assert.doesNotMatch(src, /The log in your Zelos home/);
-  const failed = /title: 'The last check did not finish',\n\s*detail: ([^\n]+)/.exec(src);
-  assert.ok(failed, 'the failed-sweep empty state is missing');
+  const failed = /const NO_REASON = ([^\n]+)/.exec(src);
+  assert.ok(failed, 'the failed-sweep pointer is missing');
   assert.match(failed[1], /terminal/, 'the CLI case has to say the reason went to the terminal');
   assert.match(failed[1], /desktop\.log/, 'the desktop case has to name the file that exists');
   assert.match(failed[1], /no log file of its own/);
+});
+
+/**
+ * The pointer above lived on an empty state Now could never show: a failed
+ * last run always raises the whole-failure banner, and the banner said only
+ * "The last check failed." The banner is where it has to be (TT-3494).
+ */
+test('a failed check with no reason sends the reader to the terminal or desktop.log, on the banner', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const now = await import(fileUrl(UI, 'views/now.js'));
+  store.state.config = { identity: { timezone: 'UTC' }, model: {}, mail: [{ id: 'm1', label: 'Studio mail', user: 'sam@example.com' }], calendars: [], sources: [] };
+  store.state.health = { model: { configured: true } };
+  store.state.sweep = { running: false, error: null };
+  store.state.board = { ...store.state.board, items: [], notes: [], events: [], counts: {}, finished: [], sourceStatus: [],
+    runs: { last: { ok: false, started_at: '2026-09-09T18:00:00Z', ended_at: '2026-09-09T18:01:00Z' } } };
+  let seen = onScreen(now.renderNow({ tz: 'UTC', navigate() {} }));
+  assert.match(seen, /The last check failed/);
+  assert.match(seen, /the reason is in that terminal/, 'a CLI user is not told where the reason went');
+  assert.match(seen, /desktop\.log, under Board → Show logs/, 'a desktop user is not told where the reason went');
+  assert.ok(findButton(now.renderNow({ tz: 'UTC', navigate() {} }), 'Check again'), 'the banner lost its retry');
+  // A run that did say why says that instead.
+  store.state.board.runs.last.error = 'The AI did not answer in time.';
+  seen = onScreen(now.renderNow({ tz: 'UTC', navigate() {} }));
+  assert.match(seen, /The AI did not answer in time\./);
+  assert.doesNotMatch(seen, /desktop\.log/);
 });
 
 test('REGRESSION: the About panel names /api/mcp as the one call that does not carry the session token', () => {
