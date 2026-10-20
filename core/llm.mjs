@@ -19,7 +19,7 @@
  *     Ollama isn't running" are the same 30 seconds of confusion otherwise.
  */
 
-import { log } from './log.mjs';
+import { log, redact } from './log.mjs';
 import { screenContent, SafetyError } from './safety.mjs';
 import { fetchFailureReason } from './fetch-error.mjs';
 
@@ -748,6 +748,88 @@ function withoutCredentials(text, secrets) {
     if (secret) out = out.split(secret).join('<key withheld>');
   }
   return out;
+}
+
+/**
+ * The same strike-out for error text that is about to leave the process —
+ * a sweep's stream frame, a source's row in the run record — when the
+ * credentials it might quote are the ones Zelos holds rather than the headers
+ * of one request (QA, 2026-10-10, TT-3527).
+ *
+ * Each held value is struck as typed, URL-encoded and JSON-escaped. A value
+ * that is a JSON grant is struck whole, and so is each token in it, however
+ * deeply nested — but only the strings under keys that name a credential
+ * (`refreshToken`, `access_token`, `client_secret`, …). A grant also says
+ * `tokenType: "Bearer"`, its scope and the account's address, and striking
+ * those would shred the very sentence the person needs. Base64 is not matched as text: inside a Basic
+ * `user:pass` or SASL PLAIN's `\0user\0pass`, a short password shares its first
+ * and last characters with its neighbours, and any text form of it leaves some
+ * of it behind. So every run that could be base64 or base64url is decoded, at
+ * each of its first four offsets, and a run whose bytes contain a held value is
+ * struck whole. What is left then goes through log.mjs's `redact`, which masks
+ * anything shaped like a key whether or not Zelos holds it.
+ *
+ * Values under four characters are left alone: striking "abc" out of every
+ * word that contains it would destroy the message and protect nothing. Text
+ * over 16 KB is cut first, since every caller keeps a few hundred characters
+ * and an engine's own error has no ceiling of its own.
+ */
+const MIN_HELD_CHARS = 4;
+const MAX_SCREENED_CHARS = 16 * 1024;
+/** Grant keys whose value is a credential, compared without case or `_`. */
+const CREDENTIAL_KEY = /^(?:(?:access|refresh|id|bearer|session|auth)token|clientsecret|secret|password|pass|apikey|token|codeverifier)$/;
+// Six, not eight: a four-character value is six characters of unpadded base64.
+const ENCODED_RUN = /[A-Za-z0-9+/_-]{6,}={0,2}/g;
+
+export function withoutSecrets(text, values = []) {
+  const held = new Set();
+  // `secret` says whether this string is a credential: a value handed in is;
+  // inside a grant, only what sits under a credential's key.
+  const collect = (value, secret, depth = 0) => {
+    if (depth > 8 || value === null || value === undefined) return;
+    if (typeof value === 'string') {
+      if (secret && value.length >= MIN_HELD_CHARS) held.add(value);
+      if (/^\s*[[{]/.test(value)) {
+        let grant;
+        try { grant = JSON.parse(value); } catch { return; }
+        collect(grant, false, depth + 1);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const inner of value) collect(inner, secret, depth + 1);
+    } else if (typeof value === 'object') {
+      for (const [key, inner] of Object.entries(value)) {
+        collect(inner, secret || CREDENTIAL_KEY.test(key.replace(/[_-]/g, '').toLowerCase()), depth + 1);
+      }
+    }
+  };
+  for (const value of values) collect(value, true);
+  text = String(text).slice(0, MAX_SCREENED_CHARS);
+
+  const forms = new Set();
+  for (const value of held) {
+    forms.add(value);
+    forms.add(encodeURIComponent(value));
+    forms.add(JSON.stringify(value).slice(1, -1));
+  }
+  // Longest first, so a value is struck whole before a shorter form inside it.
+  let out = withoutCredentials(text, [...forms].sort((a, b) => b.length - a.length));
+
+  const needles = [...held].map((value) => Buffer.from(value, 'utf8'));
+  if (needles.length) {
+    out = out.replace(ENCODED_RUN, (run) => {
+      for (let offset = 0; offset < 4 && run.length - offset >= 6; offset += 1) {
+        const body = run.slice(offset).replace(/=+$/, '');
+        for (const encoding of ['base64', 'base64url']) {
+          const bytes = Buffer.from(body, encoding);
+          if (needles.some((needle) => bytes.includes(needle))) return '<key withheld>';
+        }
+      }
+      return run;
+    });
+  }
+  return redact(out);
 }
 
 /**

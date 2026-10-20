@@ -1627,6 +1627,40 @@ test('oauthFor resolves an empty clientId to the configured client, and carries 
   assert.equal(oauthFor({ keyRef: 'mail.m_5' }, config), null);
 });
 
+test('credentialsOf reads a source\'s own credential and a Google sign-in\'s client secret, together', async () => {
+  /* What the sweep and the server strike out of error text before it is stored
+     or shown (QA, 2026-10-10, TT-3527). A Google refresh spends the client
+     secret as well as the grant, so a token endpoint quoting the request back
+     can carry either. */
+  const { googleSecretRefFor, oauthClient } = await import('../core/sources/oauth.mjs');
+  const config = { oauth: { clients: { google: { clientId: '4242-zelos.apps.googleusercontent.com' } } } };
+  const own = 'other.apps.googleusercontent.com';
+  const secretRef = googleSecretRefFor(oauthClient(config, 'google'), own);
+  const store = { 'mail.m_g': '{"kind":"xoauth2","refreshToken":"rt-1"}', [secretRef]: 'GOCSPX-held', 'mail.m_pw': 'hunter2!' };
+  const asked = [];
+  let inFlight = 0;
+  let together = 0;
+  const getSecret = async (ref) => {
+    asked.push(ref);
+    inFlight += 1;
+    together = Math.max(together, inFlight);
+    await new Promise((r) => setImmediate(r));
+    inFlight -= 1;
+    return store[ref] ?? null;
+  };
+
+  const google = await registry.credentialsOf({ keyRef: 'mail.m_g', oauth: { provider: 'google', clientId: own } }, config, getSecret);
+  assert.deepEqual(asked.sort(), ['mail.m_g', secretRef].sort());
+  assert.deepEqual(google.sort(), [store['mail.m_g'], 'GOCSPX-held'].sort());
+  assert.equal(together, 2, 'the two reads ran one after the other');
+
+  asked.length = 0;
+  assert.deepEqual(await registry.credentialsOf({ keyRef: 'mail.m_pw' }, config, getSecret), ['hunter2!']);
+  assert.deepEqual(asked, ['mail.m_pw'], 'a password account has no client secret to read');
+  // A read that fails is skipped, not thrown: the shapes still get masked.
+  assert.deepEqual(await registry.credentialsOf({ keyRef: 'mail.m_x' }, config, async () => { throw new Error('locked'); }), []);
+});
+
 /* ================================================================== *
  * A calendar password over plain http://
  *

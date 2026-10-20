@@ -57,7 +57,7 @@ import { CALENDAR_DEFAULTS, loadConfig, saveConfig, validateConfig, privacyLimit
 /* The registry, so the two places below that used to name source kinds by hand
    ask it instead. It costs this process nothing new: every module it pulls in —
    core/sources/imap.mjs, caldav.mjs, ics.mjs — is already imported below. */
-import { describe as describeConnectors, typesFor, sourceStateKey } from './connectors/index.mjs';
+import { describe as describeConnectors, typesFor, sourceStateKey, heldCredentials } from './connectors/index.mjs';
 import { readSourceStatus } from './source-status.mjs';
 import { createUpdateChecker } from './updates.mjs';
 import { getSecret, setSecret, deleteSecret, listRefs, backend } from './secrets.mjs';
@@ -75,7 +75,7 @@ import {
 } from './ai-access.mjs';
 import { handle as mcpHandle, SHARE_SETTINGS } from './mcp.mjs';
 import { sampleStatus, seedSampleData, clearSampleData } from './sample-data.mjs';
-import { complete, stream, listModels, probeLocal, isLocalAddress, PRESETS } from './llm.mjs';
+import { complete, stream, listModels, probeLocal, isLocalAddress, PRESETS, withoutSecrets } from './llm.mjs';
 import { helpLinks, platformName, HELP_STEPS } from './help.mjs';
 import { safeUrl, screenContent, cap, wrapUntrusted, scrubForPrompt, SafetyError } from './safety.mjs';
 import { fetchFailureReason } from './fetch-error.mjs';
@@ -612,6 +612,62 @@ function openStream(req, res, { heartbeatMs = HEARTBEAT_MS } = {}) {
 const SWEEP_MODES = new Set(['auto', 'light', 'full']);
 
 /**
+ * The credentials a sweep of `config` could quote back, read the way the sweep
+ * reads them (core/connectors/index.mjs `heldCredentials`: each enabled
+ * source's, with a Google sign-in's client secret, and the model key for the
+ * model's own address). Read only when there is error text to screen, because
+ * on some platforms each read is a process, and bounded in time: a store that
+ * does not answer rejects, and the frame goes out plain. Used only to strike
+ * them out of text; never sent anywhere.
+ *
+ * Read here rather than handed over by the engine: a value passed back in a
+ * run's result would travel in the very payload that goes to the page, and a
+ * Scheduler run or an injected engine would have nothing to hand over.
+ */
+function heldSecrets(config) {
+  return heldCredentials(config, getSecret, () => (config?.model?.baseUrl ? modelKeyFor(config.model.baseUrl, config) : null));
+}
+
+/** Whether `value` holds a non-empty string under an `error` key, at any depth. */
+function hasErrorText(value) {
+  if (Array.isArray(value)) return value.some(hasErrorText);
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([k, v]) => (k === 'error' && typeof v === 'string' && v) || hasErrorText(v));
+}
+
+/** `value` with every string in it, at any depth, passed through `fn`. */
+function mapStrings(value, fn) {
+  if (typeof value === 'string') return fn(value);
+  if (Array.isArray(value)) return value.map((v) => mapStrings(v, fn));
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = mapStrings(v, fn);
+  return out;
+}
+
+/**
+ * The Scheduler's status, fit for the page. Its `lastResult` holds whatever a
+ * sweep that threw said, with only key-shaped text masked (core/sweep.mjs), and
+ * GET /api/health serves it — so the held credentials are struck here too
+ * (QA, 2026-10-10, TT-3527). Screened once per result, not on every read: a
+ * board polls this, and each secret read can be a process.
+ */
+const screenedResults = new WeakMap();
+async function screenedSchedulerStatus(status, config) {
+  const last = status?.lastResult;
+  if (!last || typeof last !== 'object' || !hasErrorText(last)) return status;
+  let screening = screenedResults.get(last);
+  if (!screening) {
+    screening = heldSecrets(config).then(
+      (values) => mapStrings(last, (text) => withoutSecrets(text, values)),
+      () => ({ ok: false, error: 'The last sweep failed, and its error could not be checked for saved passwords and keys, so it is not shown.' }),
+    );
+    screenedResults.set(last, screening);
+  }
+  return { ...status, lastResult: await screening };
+}
+
+/**
  * One sweep at a time, with every progress event fanned out to whoever is
  * listening on /api/sweep/stream.
  *
@@ -634,6 +690,7 @@ class SweepSupervisor {
   #listeners = new Set();
   #current = null;
   #scheduler = null;
+  #outbox = null;
 
   constructor({ db, getConfig, runSweep = null, scheduler = null, logger = log }) {
     this.#db = db;
@@ -659,6 +716,47 @@ class SweepSupervisor {
   subscribe(listener) {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  /**
+   * Every frame on its way to the page, in the order it was sent.
+   *
+   * The stream relayed an engine error's `err.message` exactly as thrown, so a
+   * secret in it reached the page (QA, 2026-10-10, TT-3527). Every string in
+   * every frame now has anything shaped like a key masked, and a completion
+   * with error text in it — the run's or any source's — also has the held
+   * credentials struck out, which means reading them first. That read is the
+   * only thing that makes a frame wait, and a frame that waits holds every
+   * frame behind it in `#outbox`, so a `started` can never overtake the
+   * `failed` before it. With nothing waiting, a frame goes out synchronously:
+   * a listener such as the desktop badge reads the board the moment a run is
+   * relayed.
+   *
+   * Resolves to the frame as it was sent.
+   */
+  #send(event, payload) {
+    const terminal = event === 'done' || event === 'failed';
+    const shapesOnly = () => mapStrings(payload, (text) => withoutSecrets(text));
+    if (!this.#outbox && !(terminal && hasErrorText(payload))) {
+      const safe = shapesOnly();
+      this.#emit(event, safe);
+      return Promise.resolve(safe);
+    }
+    const screening = terminal && hasErrorText(payload)
+      ? heldSecrets(this.#getConfig()).then((values) => mapStrings(payload, (text) => withoutSecrets(text, values)))
+      : Promise.resolve().then(shapesOnly);
+    const sent = (this.#outbox ?? Promise.resolve()).then(() => screening).then((safe) => safe, (err) => {
+      this.#logger.warn('server: a sweep frame could not be screened, so a plain one was sent instead', { error: err?.message });
+      return terminal
+        ? { runId: payload?.runId ?? null, mode: payload?.mode ?? null, ok: false, error: 'The sweep finished, but its report could not be checked for saved passwords and keys, so it is not shown.' }
+        : {};
+    }).then((safe) => {
+      this.#emit(event, safe);
+      return safe;
+    });
+    this.#outbox = sent;
+    sent.then(() => { if (this.#outbox === sent) this.#outbox = null; });
+    return sent;
   }
 
   #emit(event, data) {
@@ -694,7 +792,7 @@ class SweepSupervisor {
       this.#current.relayed = payload;
       return;
     }
-    this.#emit(event, payload);
+    this.#send(event, payload);
   }
 
   status() {
@@ -735,30 +833,35 @@ class SweepSupervisor {
       });
     }
 
-    this.#emit('started', { mode, startedAt: state.startedAt });
+    this.#send('started', { mode, startedAt: state.startedAt });
     state.promise = (async () => {
+      let result;
       try {
-        const result = await run();
-        if (result && typeof result.runId === 'string') state.runId = result.runId;
-        const ok = !result || result.ok !== false;
-        // The relayed payload first, so the engine's richer fields survive;
-        // ours after, so `mode` and the settled `ok` are what the frame says.
-        this.#emit(ok ? 'done' : 'failed', {
-          ...(state.relayed ?? {}),
-          runId: state.runId,
-          mode,
-          ok,
-          stats: result?.stats ?? null,
-          error: result?.error ?? null,
-        });
-        return result;
+        result = await run();
       } catch (err) {
-        this.#logger.error('server: sweep failed', { error: err.message });
-        this.#emit('failed', { runId: state.runId, mode, ok: false, error: err.message });
-        return { runId: state.runId, ok: false, error: err.message };
-      } finally {
+        /* Released before the frame is screened, which can wait on the secret
+           store: from here a Scheduler completion is its own, not ours to park,
+           and a new sweep may start — its `started` queues behind this. */
         this.#current = null;
+        const safe = await this.#send('failed', { runId: state.runId, mode, ok: false, error: err?.message || String(err) });
+        this.#logger.error('server: sweep failed', { error: safe.error });
+        return { runId: state.runId, ok: false, error: safe.error };
       }
+      if (result && typeof result.runId === 'string') state.runId = result.runId;
+      const ok = !result || result.ok !== false;
+      // The relayed payload first, so the engine's richer fields survive;
+      // ours after, so `mode` and the settled `ok` are what the frame says.
+      const payload = {
+        ...(state.relayed ?? {}),
+        runId: state.runId,
+        mode,
+        ok,
+        stats: result?.stats ?? null,
+        error: result?.error ?? null,
+      };
+      this.#current = null;
+      this.#send(ok ? 'done' : 'failed', payload);
+      return result;
     })();
 
     return { started: true, runId: state.runId, mode };
@@ -971,7 +1074,7 @@ async function handleHealth(ctx) {
       local: isLocalAddress(cfg.model.baseUrl),
     },
     sweep: ctx.sweeps.status(),
-    scheduler: ctx.scheduler?.status ? ctx.scheduler.status() : null,
+    scheduler: ctx.scheduler?.status ? await screenedSchedulerStatus(ctx.scheduler.status(), cfg) : null,
   });
 }
 
@@ -3172,6 +3275,13 @@ const ROUTES = [
   ['DELETE', new RegExp(`^/api/ai/tokens/${ID}$`), handleAiTokenDelete],
   ['POST', /^\/api\/ai\/test$/, handleAiTest],
 ];
+
+/**
+ * The table above as data — method and pattern source, no handlers — for
+ * test/credential-hunt.test.mjs, which has to prove it asked every route. Nothing
+ * here routes through it; matchRoute reads ROUTES.
+ */
+export const ROUTE_LIST = Object.freeze(ROUTES.map(([method, pattern]) => Object.freeze([method, pattern.source])));
 
 /**
  * Exact method match only. HEAD is deliberately not folded into GET: Node

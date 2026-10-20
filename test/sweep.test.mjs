@@ -1548,6 +1548,52 @@ test('a source\'s error is screened before it is stored (TT-3453)', async () => 
   assert.doesNotMatch(stored.error, /<script/i);
 });
 
+test('a source\'s error that quotes its own credential is stored without it', async () => {
+  /* QA, 2026-10-10, TT-3527. The readers strip what they send, and the run
+     record trusted them to: a reader that quoted the password back put it in
+     runs.stats_json and /api/state. The sweep strikes the source's credential
+     again, in each spelling, before the row is stored. */
+  const db = fresh();
+  const pass = 'q7Vt2-mail/pass+Kp8=';
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64').replace(/=+$/, '');
+  const result = await runSweep({
+    db,
+    config: baseConfig({ mail: [mailAccount()] }),
+    mode: 'light',
+    deps: {
+      getSecret: async () => pass,
+      fetchMail: async () => {
+        throw new Error(`NO login "${pass}" refused; PLAIN ${b64(`\0u\0${pass}`)}, echoed ${b64(`nemo@example.com:${pass}`)}, also ${encodeURIComponent(pass)}`);
+      },
+    },
+  });
+  const source = result.stats.sources.find((s) => s.kind === 'mail' && s.ok === false);
+  assert.ok(source, 'the failed mailbox should still be reported');
+  assert.match(source.error, /NO login .* refused/, 'the server\'s own words around the password should survive');
+  const stored = JSON.stringify(getRun(db, result.runId));
+  for (const form of [pass, encodeURIComponent(pass), b64(pass), b64(`\0u\0${pass}`), b64(`nemo@example.com:${pass}`)]) {
+    assert.ok(!source.error.includes(form), `the stored error kept the password as "${form}": ${source.error}`);
+    assert.ok(!stored.includes(form), `the run record kept the password as "${form}"`);
+  }
+
+  // A sign-in refreshed during the run is struck too: the grant is read again,
+  // and the token inside it, however deep, is what the error quotes.
+  const refreshed = 'at-2b9c8d7e6f5a4';
+  let reads = 0;
+  const second = await runSweep({
+    db: fresh(),
+    config: baseConfig({ mail: [mailAccount()] }),
+    mode: 'light',
+    deps: {
+      getSecret: async () => (reads++ === 0 ? pass : JSON.stringify({ kind: 'xoauth2', grant: { access_token: refreshed }, tokenType: 'Bearer' })),
+      fetchMail: async () => { throw new Error(`NO token ${refreshed} expired`); },
+    },
+  });
+  const after = second.stats.sources.find((s) => s.kind === 'mail' && s.ok === false);
+  assert.ok(!after.error.includes(refreshed), `a token refreshed mid-run was stored: ${after.error}`);
+  assert.match(after.error, /NO token .* expired/);
+});
+
 test('a run that fails on a huge error stores a bounded reason', async () => {
   const db = fresh();
   const huge = 'B'.repeat(1_000_000);
