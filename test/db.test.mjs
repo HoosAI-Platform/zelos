@@ -13,7 +13,7 @@ const {
   SCHEMA_VERSION, BUCKETS, ITEM_STATES,
   open, close, migrate, withTransaction,
   messageRowId, eventRowId, itemRowId,
-  upsertMessage, upsertMessages, getMessage, listMessages, messagesInThread, countMessagesFetchedSince,
+  upsertMessage, upsertMessages, getMessage, listMessages, messagesInThread, countMessagesFetchedSince, reconcileTaskActivity,
   upsertEvent, upsertEvents, getEvent, listEvents, countEventsFetchedSince,
   upsertItem, getItem, getItemByKey, setItemState, listBoard, bucketCounts, listFinished,
   upsertDraft, getDraft, listDrafts, updateDraft,
@@ -472,6 +472,32 @@ test('listFinished() is the done and dismissed rows, newest decision first, capp
   assert.equal(listFinished(db, { limit: 2 }).length, 2);
   for (let i = 0; i < 22; i += 1) mk(`fin-${i}`, 'done', `2026-08-07T10:${String(i).padStart(2, '0')}:00Z`);
   assert.equal(listFinished(db).length, 20, 'the default cap holds however much has been finished');
+});
+
+test('listFinished() lists an open item whose tasks all left the selection, and the board still does not (TT-3519)', () => {
+  const db = fresh();
+  const task = (n) => upsertMessage(db, { sourceId: 'todoist', uid: n, messageId: `todoist:${n}`, subject: `Task ${n}`, sentAt: '2026-08-01T10:00:00Z' }).id;
+  const [one, two, kept] = [task(1), task(2), task(3)];
+  const mk = (key, refs) => upsertItem(db, { ...ITEM, key, headline: key, bucket: 'now', sourceRefs: refs }, { now: '2026-08-01T10:00:00Z' }).id;
+  mk('ticked-early', [`msg:${one}`]);
+  mk('ticked-late', [`msg:${two}`]);
+  mk('still-selected', [`msg:${kept}`]);
+  setItemState(db, mk('done-before', ['msg:elsewhere']), 'done', { now: '2026-08-02T10:00:00Z' });
+  // Task 1 leaves first, then task 2: each complete read lacks it.
+  const read = (ids, now) => reconcileTaskActivity(db, {
+    sourceId: 'todoist', prefix: 'todoist:', selection: 's', complete: true, now,
+    rows: ids.map((n) => ({ sourceId: 'todoist', uid: n, messageId: `todoist:${n}` })),
+  });
+  read([2, 3], '2026-08-03T10:00:00Z');
+  read([3], '2026-08-04T10:00:00Z');
+
+  const finished = listFinished(db);
+  assert.deepEqual(finished.map((i) => i.headline), ['ticked-late', 'ticked-early', 'done-before'],
+    'the ones that left the selection, newest to leave first, then what was decided');
+  assert.deepEqual(finished.slice(0, 2).map((i) => [i.state, i.sourceInactive]), [['open', true], ['open', true]]);
+  // Still off the board, its counts and so the badge.
+  assert.deepEqual(listBoard(db).map((i) => i.headline), ['still-selected']);
+  assert.equal(bucketCounts(db).now, 1);
 });
 
 /* ------------------------------------------------------------------ snooze */

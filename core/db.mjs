@@ -1086,19 +1086,33 @@ export function bucketCounts(db, { states = ['open'], includeInactive = false } 
 
 /**
  * What was finished recently — the done and dismissed rows, newest decision
- * first. The query is core/sweep.mjs's RECENTLY_RESOLVED_SQL without the
+ * first, after any open item whose tasks all left the selection (below); up to
+ * `limit` of each. The query is core/sweep.mjs's RECENTLY_RESOLVED_SQL without the
  * window: `state_at` is when the user decided, and both the guard and the
  * ORDER BY go through datetime() for the reason given there — the stored
  * timestamps carry the user's offset, and character order would misplace two
  * decisions made either side of a timezone change.
  */
 export function listFinished(db, { limit = 20 } = {}) {
+  const cap = Math.max(1, Number(limit) || 20);
+  /* First, the open items every task behind which has left the task selection
+     — ticked off in Todoist, most often. They stay off the board, its counts
+     and the badge, because absence is not proof the work was done; but with
+     nowhere else to appear they simply vanished, so they are listed here, for
+     the person to mark done or dismiss (QA, 2026-10-10, TT-3519). Newest to
+     leave first: observed_at is when the selection was read without them. */
+  const left = prep(db, `
+    SELECT items.*, 1 AS source_inactive FROM items
+    WHERE state = 'open' AND ${INACTIVE_ITEM_SQL}
+    ORDER BY (SELECT MAX(datetime(task.observed_at)) FROM json_each(${ITEM_REFS_SQL}) AS refs
+      JOIN task_activity AS task ON task.message_id = substr(refs.value, 5)) DESC, datetime(first_seen) DESC
+    LIMIT ?`).all(cap).map(hydrateItem);
   const sql = `
     SELECT items.*, ${INACTIVE_ITEM_SQL} AS source_inactive FROM items
     WHERE state IN ('done', 'dismissed') AND state_at IS NOT NULL
     ORDER BY datetime(state_at) DESC
     LIMIT ?`;
-  return prep(db, sql).all(Math.max(1, Number(limit) || 20)).map(hydrateItem);
+  return [...left, ...prep(db, sql).all(cap).map(hydrateItem)];
 }
 
 /* ---------------------------------------------------------------- drafts */

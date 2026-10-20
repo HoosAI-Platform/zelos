@@ -7215,6 +7215,74 @@ test('Now folds "Finished recently" at the very bottom, and the tick on a done r
   assert.doesNotMatch(aside[1], /opacity/, 'fade with a quieter ink, not opacity');
 });
 
+test('Finished lists a task that left the selection under its own label, and it can be marked done or dismissed (TT-3519)', async (t) => {
+  withPlainDom(t);
+  const calls = [];
+  globalThis.fetch = async (reqPath, init = {}) => {
+    calls.push({ method: init.method || 'GET', path: reqPath, body: init.body ? JSON.parse(init.body) : null });
+    if (reqPath.startsWith('/api/items/')) return { ok: true, status: 200, text: async () => '{}' };
+    if (reqPath === '/api/state') return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], events: [], notes: [], counts: {}, runs: {}, finished: [left] }) };
+    return { ok: false, status: 404, text: async () => '{"error":"not found"}' };
+  };
+  t.after(() => { delete globalThis.fetch; });
+  const left = { id: 'left', bucket: 'now', state: 'open', headline: 'Renew the domain', sourceInactive: true };
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const now = await import(fileUrl(UI, 'views/now.js'));
+
+  store.state.config = { identity: {}, model: { label: 'Claude' }, mail: [{ id: 'm1' }], calendars: [], sources: [] };
+  store.state.health = { model: { configured: true, label: 'Claude' } };
+  store.state.sweep = { running: false, phase: '', message: '', done: 0, total: 0, error: null, lastResult: null };
+  store.state.board = {
+    ...store.state.board,
+    items: [],
+    counts: { now: 0, today: 0, soon: 0, waiting: 0, promised: 0, note: 0, money: 0 },
+    events: [], drafts: [], notes: [], runs: {}, first: null,
+    now: '2026-08-28T10:00:00-04:00',
+    finished: [
+      left,
+      { id: 'f1', bucket: 'now', state: 'done', headline: 'Sent the survey', state_at: '2026-08-28T09:30:00-04:00' },
+    ],
+  };
+  store.state.boardAt = Date.now();
+
+  const view = now.renderNow({ tz: 'America/New_York', navigate() {} });
+  const fold = plainWalk(view).find((n) => n.tag === 'section' && (n.attributes.class || '').includes('is-finished'));
+  assert.ok(fold, 'a task that left the selection is still something to show');
+  const text = anywhere(fold);
+  const toggle = plainWalk(fold).find((n) => n.tag === 'button' && textOf(n).includes('Finished recently'));
+  assert.match(textOf(toggle), /Finished recently\s*1\s*· 1 no longer in task selection/, 'the open ones are counted apart from the finished');
+  // Open the fold (it may be open already: it is remembered across redraws).
+  if (toggle.attributes['aria-expanded'] !== 'true') toggle.fire('click');
+  const label = plainWalk(fold).find((n) => n.tag === 'p' && textOf(n) === 'No longer in task selection');
+  assert.ok(label, 'the group has its label');
+  assert.ok(text.indexOf('Renew the domain') < text.indexOf('Sent the survey'), 'the undecided come before the decided');
+
+  const row = plainWalk(fold).find((n) => n.tag === 'article' && anywhere(n).includes('Renew the domain'));
+  const tick = plainWalk(row).find((n) => n.attributes.role === 'checkbox');
+  assert.ok(!('disabled' in tick.attributes), 'an open item that left the selection can be marked done');
+  assert.equal(findButton(row, 'Reopen'), undefined, 'it is already open');
+  tick.fire('click');
+  await settle();
+  // Settled from Finished, it can still be taken back.
+  assert.equal(store.state.toast?.message, 'Marked done: Renew the domain', 'no Undo for a row that is not on the board');
+  store.state.toast.action.run();
+  await settle();
+  findButton(row, 'Not a thing').fire('click');
+  await settle();
+  // Each of those rebuilt Now; the fold stays open for the next row.
+  const redrawn = plainWalk(now.renderNow({ tz: 'America/New_York', navigate() {} }))
+    .find((n) => n.tag === 'section' && (n.attributes.class || '').includes('is-finished'));
+  const again = plainWalk(redrawn).find((n) => n.tag === 'button' && textOf(n).includes('Finished recently'));
+  assert.equal(again.attributes['aria-expanded'], 'true', 'the fold snapped shut on redraw');
+  assert.equal(plainWalk(redrawn).find((n) => (n.attributes.class || '').includes('worth-body')).hidden, false);
+  again.fire('click'); // leave it folded for whoever renders Now next
+  assert.deepEqual(calls.filter((c) => c.method === 'POST').map((c) => [c.path, c.body]), [
+    ['/api/items/left/state', { state: 'done' }],
+    ['/api/items/left/state', { state: 'open' }],
+    ['/api/items/left/state', { state: 'dismissed' }],
+  ]);
+});
+
 test('a board without the finished field folds nothing and breaks nothing', async (t) => {
   stubBrowserGlobals();
   const store = await import(fileUrl(UI, 'lib/store.js'));

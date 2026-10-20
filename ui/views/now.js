@@ -159,6 +159,11 @@ function failureBanner(trouble, navigate) {
   ]);
 }
 
+/* Whether the Finished fold is open, across redraws. Every tick, Undo or
+   dismissal in it bumps the board and rebuilds this view, and the fold used to
+   snap shut under the person working through it (QA, 2026-10-10, TT-3519). */
+let finishedOpen = false;
+
 export function renderNow(ctx) {
   const { tz, navigate } = ctx;
   const nowItems = itemsInBucket('now').sort(byUrgency);
@@ -293,22 +298,39 @@ export function renderNow(ctx) {
   // newest first as the server sends them — off the board but never off the
   // record. The tick on a done row is already the way back: clicking it
   // reopens the item, so a slipped click yesterday is one click to reverse.
+  //
+  // Above them, the open items whose tasks all left the task selection — a
+  // task ticked off in Todoist, most often. They are off the board because
+  // absence is not proof of done, and they used to be nowhere at all; here
+  // each one is a tick (done) away from settled, or "Not a thing" if it never
+  // was work (QA, 2026-10-10, TT-3519). Settled, such a row's tick stays
+  // locked — reopened, it would only leave the board again — so the way back
+  // is the Undo in the toast, or the task returning to the selection.
+  // The fold counts the two groups apart: the open ones are not finished.
   const finished = finishedItems();
   if (finished.length) {
-    const panel = el('div', { class: 'worth-body', hidden: true },
-      el('div', { class: 'stack' }, finished.map((item) => itemRow(item, { tz, showBucket: false }))));
+    const left = finished.filter((item) => item.sourceInactive === true && item.state === 'open');
+    const decided = finished.filter((item) => !left.includes(item));
+    const rows = (list) => el('div', { class: 'stack' }, list.map((item) => itemRow(item, { tz, showBucket: false })));
+    const panel = el('div', { class: 'worth-body', hidden: !finishedOpen }, [
+      left.length ? el('p', { class: 'quiet-note', text: 'No longer in task selection' }) : null,
+      left.length ? rows(left) : null,
+      decided.length ? rows(decided) : null,
+    ]);
     const toggle = el('button', {
       type: 'button',
       class: 'worth-toggle',
-      'aria-expanded': 'false',
+      'aria-expanded': finishedOpen ? 'true' : 'false',
       onclick() {
         const open = this.getAttribute('aria-expanded') === 'true';
         this.setAttribute('aria-expanded', open ? 'false' : 'true');
         panel.hidden = open;
+        finishedOpen = !open;
       },
     }, [
       el('span', { text: 'Finished recently' }),
-      el('span', { class: 'mono worth-count', text: String(finished.length) }),
+      el('span', { class: 'mono worth-count', text: String(decided.length) }),
+      left.length ? el('span', { class: 'mono worth-count', text: `· ${left.length} no longer in task selection` }) : null,
     ]);
     body.appendChild(el('section', { class: 'section worth is-finished' }, [toggle, meander(), panel]));
   }
