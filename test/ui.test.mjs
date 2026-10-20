@@ -6855,6 +6855,31 @@ test('a code block that can scroll sideways is a tab stop (TT-3473)', async (t) 
   }
 });
 
+test('the "Still incomplete" banner names the tab in plain words; the config paths are under For experts (TT-3462)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [] };
+  store.state.health = { model: { configured: false } };
+  store.state.configErrors = [{ path: 'sweep.intervalMinutes', message: 'must be an integer between 5 and 1440' }];
+  t.after(() => { store.state.configErrors = []; });
+
+  const view = settings.renderSettings({ sub: 'mail', navigate() {}, rerender() {} });
+  const seen = onScreen(view);
+  assert.match(seen, /Still incomplete/);
+  assert.match(seen, /Something under Schedule needs another look\./);
+  assert.doesNotMatch(seen, /intervalMinutes|must be an integer/, 'the engine\'s path is in the open');
+  assert.match(anywhere(view), /sweep\.intervalMinutes: must be an integer between 5 and 1440/, 'the detail is gone rather than folded');
+
+  assert.equal(settings.incompleteLead([{ path: 'mail[0].port', message: 'x' }, { path: 'identity.email', message: 'y' }, { path: 'mail[1].host', message: 'z' }]),
+    'Something under Email and You needs another look.');
+  assert.equal(settings.incompleteLead([{ path: 'oauth', message: 'x' }]), 'Something in your settings needs another look.');
+  assert.equal(settings.incompleteLead([{ path: 'sources[0].type', message: 'x' }, { path: 'ai.maxRows', message: 'y' }, { path: 'ui.accent', message: 'z' }]),
+    'Something under Other things it can read, Share with another AI and Colour needs another look.');
+});
+
 test('no user-facing failure names an address the person did not type, and the board speaks of checks and AIs', () => {
   // core/llm.mjs's empty-model error and core/sweep.mjs's stand-down reasons
   // reach the board's banner verbatim. Neither may interpolate the base URL.

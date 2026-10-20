@@ -56,6 +56,29 @@ const PANELS = [
   { id: 'appearance', label: 'Colour' },
 ];
 
+/**
+ * The "Still incomplete" banner's open line, in the tabs' own names. The
+ * engine reports each problem as a config path ("sweep.intervalMinutes: must
+ * be an integer between 5 and 1440"), and the banner printed exactly that, in
+ * the open (QA, 2026-10-10, TT-3462). A path's first part is a tab's id for
+ * every section a tab edits, so it says which tab to open; the paths themselves
+ * go one drawer down.
+ */
+export function incompleteLead(errors = []) {
+  const ids = { identity: 'you', ui: 'appearance' };
+  const tabs = [];
+  for (const e of errors) {
+    const top = String(e?.path || '').split(/[.[]/)[0];
+    const tab = PANELS.find((p) => p.id === (ids[top] || top));
+    // "(optional)" and "(advanced)" are for the tab strip, not for a sentence.
+    const name = tab?.label.replace(/\s*\([^)]*\)$/, '');
+    if (name && !tabs.includes(name)) tabs.push(name);
+  }
+  if (!tabs.length) return 'Something in your settings needs another look.';
+  const named = tabs.length === 1 ? tabs[0] : `${tabs.slice(0, -1).join(', ')} and ${tabs.at(-1)}`;
+  return `Something under ${named} needs another look.`;
+}
+
 /** Where Settings opens with no sub-route: the thing people come here to change. */
 export const DEFAULT_PANEL = 'mail';
 
@@ -4102,7 +4125,10 @@ export function renderSettings(ctx) {
     errors.length
       ? el('div', { class: 'banner banner-warn', role: 'status' }, [
         el('h2', { class: 'banner-title', text: 'Still incomplete' }),
-        el('ul', { class: 'banner-list' }, errors.map((e) => el('li', { text: `${e.path}: ${e.message}` }))),
+        el('p', { text: incompleteLead(errors) }),
+        fold('For experts', [
+          el('ul', { class: 'banner-list' }, errors.map((e) => el('li', { text: `${e.path}: ${e.message}` }))),
+        ]),
       ])
       : null,
     body,
