@@ -642,6 +642,23 @@ test('the RSS connector is a pure function of its ctx — no db, no server, no s
   assert.deepEqual(emitted, [['Vance: 1 entries', 1, 1]]);
 });
 
+test('SOURCES.md names every source that zelos doctor has no check for', () => {
+  /* QA, 2026-10-10 (TT-3468): SOURCES.md said "each source below has its own
+     check", but the RSS connector declares none, so `zelos doctor` passes a
+     feed with "Nothing was contacted: this source offers no test of its own".
+     Whichever sources lack a check, the paragraph has to say so by name. */
+  const doc = fs.readFileSync(path.join(ROOT, 'docs', 'SOURCES.md'), 'utf8');
+  const at = doc.indexOf('**`zelos doctor` is the command to run when a source is quiet.**');
+  assert.ok(at >= 0, 'the doctor paragraph in SOURCES.md is gone');
+  const paragraph = doc.slice(at, doc.indexOf('\n\n', at)).replace(/\s+/g, ' ');
+  const unchecked = registry.all().filter((c) => c.configKey === 'sources' && typeof c.check !== 'function');
+  for (const c of unchecked) {
+    assert.ok(paragraph.toLowerCase().includes(`except a ${c.label.toLowerCase()}`),
+      `zelos doctor has no check for ${c.type}, and SOURCES.md does not say so: ${paragraph}`);
+  }
+  if (!unchecked.length) assert.doesNotMatch(paragraph, /\bexcept\b/, 'every source has a check now; SOURCES.md can drop its exception');
+});
+
 test('parseFeed reads what a feed means, not what its markup says', () => {
   const rss = parseFeed(RSS_TWO);
   assert.equal(rss.title, 'Alder & Vance Notices', 'entities are decoded');

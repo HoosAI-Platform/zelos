@@ -55,9 +55,11 @@ rested: a 401 or 403 there is reported as the address refusing to serve, and
 the next check asks again.
 
 **`zelos doctor` is the command to run when a source is quiet.** Each source
-below has its own check, and each answers the question a person actually has —
-*whose* token is this, *which* workspace, *how old* is that file — rather than
-"the request succeeded".
+below except a feed has its own check, and each answers the question a person
+actually has — *whose* token is this, *which* workspace, *how old* is that file —
+rather than "the request succeeded". A feed has none: doctor says it is
+configured and that nothing was contacted, and the next sweep's read of it is
+the test.
 
 ---
 
