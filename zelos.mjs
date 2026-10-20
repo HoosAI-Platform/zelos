@@ -36,8 +36,9 @@ Zelos — a local-first second brain.
                             what changed, and stop.
   zelos doctor [options]    Check every part of the setup and say, in plain
                             words, what to do about whatever is wrong.
-  zelos mcp [options]       Serve the read-only MCP tools on stdin/stdout so
-                            another AI client can read your board.
+  zelos mcp [options]       Serve the MCP tools on stdin/stdout so another
+                            AI client can read your board. None of them
+                            sends, deletes or changes a setting.
 
 Options:
   --port <n>      Port to listen on (default 7777, or $ZELOS_PORT).
@@ -56,10 +57,11 @@ Zelos listens on 127.0.0.1 only, and every request to its API needs the
 session token printed in the launch URL. That token is new on every launch,
 so the previous URL stops working when you restart.
 
-The one exception is /api/mcp, the read-only channel an AI client uses. It
-is off until you switch it on in Settings, and it carries the separate AI
-token you mint there rather than the session token — that one is meant to
-outlive a restart, and it lasts until you turn AI access off or revoke it.
+The one exception is /api/mcp, the channel an AI client uses to read your
+board. It is off until you switch it on in Settings, and it carries the
+separate AI token you mint there rather than the session token — that one is
+meant to outlive a restart, and it lasts until you turn AI access off or
+revoke it.
 `.trimStart();
 
 /* ------------------------------------------------------------------ *

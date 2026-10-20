@@ -67,9 +67,10 @@ node zelos.mjs sweep          Read your sources once, think about them, print wh
                      so it is safe to put in a cron job.
 node zelos.mjs doctor         Check every part of the setup and say, in plain words,
                      what to do about anything that is wrong.
-node zelos.mjs mcp            Serve Zelos's read-only tools over MCP on stdin/stdout,
-                     for an AI client that spawns it. Off unless you have
-                     switched AI access on in Settings.
+node zelos.mjs mcp            Serve Zelos's tools over MCP on stdin/stdout, for an
+                     AI client that spawns it. None of them sends, deletes
+                     or changes a setting. Off unless you have switched AI
+                     access on in Settings.
 ```
 
 Every one of them takes `--home <dir>`. `zelos sweep` and `zelos doctor` also
