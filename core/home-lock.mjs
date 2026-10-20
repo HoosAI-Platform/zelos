@@ -67,6 +67,12 @@ const BOOT_SLACK_MS = 5 * 60_000;
 /** How long a lock held by another user, that this user cannot probe, stands. */
 const FOREIGN_LOCK_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
 
+/** setPort's replace: the codes Windows answers while another handle has the
+ *  lock open, and a bounded wait (about 2.75 s in all) for it to let go. */
+const PORT_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const PORT_RETRIES = 10;
+const PORT_RETRY_MS = 50;
+
 const currentUid = () => (typeof process.getuid === 'function' ? process.getuid() : null);
 
 /** 'alive' | 'gone' | 'denied' — denied being `EPERM`, which decides nothing. */
@@ -311,14 +317,35 @@ export function acquireHomeLock({ home, kind = 'desktop', port = null } = {}) {
       record.port = bound;
       // We own the file, so a plain atomic replace is enough here.
       const tmp = `${file}.${process.pid}.port`;
-      try {
-        fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-        fs.renameSync(tmp, file);
-      } catch {
-        // The port in the lock is a courtesy to the next process, not state
-        // anything depends on. Failing to write it is not worth a shutdown.
-        try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
-      }
+      const write = (attempt) => {
+        if (!held) return;
+        // A retry runs later, when the file may no longer be ours: deleted by
+        // someone following the warning's advice, or reclaimed by another
+        // instance. Rewriting it then would resurrect or steal a lock.
+        if (attempt > 0) {
+          const current = readHomeLock(home);
+          if (!current || current.pid !== process.pid || current.startedAt !== record.startedAt) return;
+        }
+        try {
+          fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+          fs.renameSync(tmp, file);
+        } catch (err) {
+          // The port in the lock is a courtesy to the next process, not state
+          // anything depends on. Failing to write it is not worth a shutdown.
+          try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+          /* But one failed replace is not a reason to give up on it. Windows
+             refuses to replace a file another process has open — a scanner
+             reading the lock this process created a moment ago is the usual
+             one — and gave up for good: about 7 shell launches in 136 left
+             `port: null`, so the next warning could not name the board
+             (QA, 2026-10-10, TT-3511). That refusal clears, so try again off
+             the caller's path, as graceful-fs does for the same rename. */
+          if (PORT_RETRY_CODES.has(err?.code) && attempt < PORT_RETRIES) {
+            setTimeout(() => write(attempt + 1), PORT_RETRY_MS * (attempt + 1)).unref();
+          }
+        }
+      };
+      write(0);
     },
     release() {
       if (!held) return;
