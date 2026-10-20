@@ -121,6 +121,10 @@ body {
 
 h1, h2, h3, h4 { margin: 0; font-weight: 600; line-height: 1.2; }
 
+/* Headings that were h3 straight under a view's h1 are h2 now (TT-3512); these
+   keep the size they had as h3 where their class did not set one. */
+.panel-heading, .account-label, .hit-title { font-size: 1.17em; }
+
 /* Read by a screen reader, not shown: a view's h1 (TT-3530). */
 .visually-hidden {
   position: absolute !important;

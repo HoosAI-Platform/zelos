@@ -138,7 +138,7 @@ export function readingStatus(navigate) {
   const failed = reports.filter(row => row.enabled && row.ok === false).length;
   const panel = el('div', { class: 'worth-body', hidden: !failed }, el('div', { class: 'stack' }, reports.map(report =>
     el('article', { class: 'account' }, [
-      el('h3', { class: 'account-label', text: report.label }),
+      el('h2', { class: 'account-label', text: report.label }),
       reportNode(report),
       button(report.enabled && report.ok === false ? 'Review connection' : 'Connection settings', {
         class: 'btn quiet',

@@ -194,7 +194,7 @@ function hitRow(result, board) {
   return el('article', { class: 'hit' }, [
     el('div', { class: 'hit-head' }, [
       el('span', { class: 'hit-kind mono', text: kindLabel(result.kind) }),
-      el('h3', { class: 'hit-title', text: title || '(no title)' }),
+      el('h2', { class: 'hit-title', text: title || '(no title)' }),
     ]),
     result.excerpt ? el('p', { class: 'hit-excerpt', text: String(result.excerpt) }) : null,
     result.sourceInactive ? el('p', { class: 'hit-meta mono', text: 'No longer in task selection' }) : null,

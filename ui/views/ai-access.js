@@ -818,7 +818,7 @@ export function aiAccessPanel() {
     if (!isObject(probe)) return null;
     if (probe.ok !== true) {
       return el('div', { class: 'banner banner-warn', role: 'status' }, [
-        el('h3', { class: 'banner-title', text: probe.stage === 'switch' ? 'It would be refused at the switch' : 'It would be refused at the door' }),
+        el('h2', { class: 'banner-title', text: probe.stage === 'switch' ? 'It would be refused at the switch' : 'It would be refused at the door' }),
         el('p', { class: 'banner-detail', text: String(probe.detail || 'The server gave no reason.') }),
       ]);
     }
@@ -900,7 +900,7 @@ export function aiAccessPanel() {
     return [
       el('p', { class: 'panel-lede', text: LEDE }),
       el('div', { class: 'banner banner-warn', role: 'status' }, [
-        el('h3', { class: 'banner-title', text: 'Not available in this build' }),
+        el('h2', { class: 'banner-title', text: 'Not available in this build' }),
         el('p', { class: 'banner-detail', text: 'This copy of Zelos does not have this feature, so there is nothing here to switch on and nothing is shared. What follows is what it would offer and what each choice would hand over, so the decision is already made when a copy that has it arrives. (For experts: /api/ai answered 404.)' }),
       ]),
       section('What each box would hand over', {}, scopeBlock(v, { readOnly: true })),
@@ -920,7 +920,7 @@ export function aiAccessPanel() {
       return [
         el('p', { class: 'panel-lede', text: LEDE }),
         el('div', { class: 'banner banner-warn', role: 'status' }, [
-          el('h3', { class: 'banner-title', text: 'This panel could not read its own settings' }),
+          el('h2', { class: 'banner-title', text: 'This panel could not read its own settings' }),
           el('p', { class: 'banner-detail', text: `${loadError} — until that is answered, treat sharing as unknown rather than off.` }),
           el('div', { class: 'banner-actions' }, button('Try again', { class: 'btn quiet', onClick: load })),
         ]),
