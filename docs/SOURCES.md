@@ -50,7 +50,9 @@ ever exceeding it as far as it knew.
 **A refused credential rests for six hours.** When a host says the token is
 dead, Zelos stops asking — until the six hours are up or until you change the
 stored secret, whichever comes first. Pasting a new key lifts the rest
-immediately.
+immediately. A source that sends no credential, like a feed, is never
+rested: a 401 or 403 there is reported as the address refusing to serve, and
+the next check asks again.
 
 **`zelos doctor` is the command to run when a source is quiet.** Each source
 below has its own check, and each answers the question a person actually has —
