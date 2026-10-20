@@ -1988,6 +1988,49 @@ test('a run of failed heartbeats says so, and one blip does not', async (t) => {
   assert.equal(store.state.phase, 'ready');
 });
 
+/**
+ * The sweep stream retried every failure with a backoff, a 401 included, so a
+ * tab without its key asked /api/sweep/stream every 30 seconds for as long as
+ * it stayed open. The key is read once, at load: no retry can fix it (TT-3495).
+ */
+test('the sweep stream stops at a 401 and says the tab has lost its key', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const asked = [];
+  globalThis.fetch = async (reqPath) => {
+    asked.push(reqPath);
+    return { ok: false, status: 401, text: async () => '{"error":"missing or invalid session token"}' };
+  };
+  t.after(() => {
+    delete globalThis.fetch;
+    store.state.fatal = null;
+    store.state.phase = 'ready';
+  });
+
+  store.state.phase = 'ready';
+  store.state.fatal = null;
+  const stop = store.watchSweeps();
+  t.after(stop);
+  await settle();
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(30_000);
+    await settle();
+  }
+  assert.deepEqual(asked, ['/api/sweep/stream'], 'a refused key was offered again');
+  assert.equal(store.state.fatal?.title, 'This tab has lost its key');
+  assert.equal(store.state.phase, 'down');
+
+  // A server that was down long enough for the heartbeat to say so, and came
+  // back with a new key: "not answering" is now wrong, and nothing else would
+  // take it down once the stream has stopped.
+  store.state.fatal = { title: 'Zelos is not answering', detail: 'Zelos is not answering on localhost. Is it still running?' };
+  const again = store.watchSweeps();
+  t.after(again);
+  await settle();
+  assert.equal(store.state.fatal?.title, 'This tab has lost its key', 'a stale "not answering" outlived the server coming back');
+});
+
 test('the heartbeat states its failure in the same words the boot path uses', () => {
   const store = fs.readFileSync(path.join(UI, 'lib/store.js'), 'utf8');
   const watch = /export function watchBoard\([\s\S]*?\n\}/m.exec(store);
