@@ -394,6 +394,24 @@ describe('the mail check and the sent folder', () => {
     });
     assert.match(byId(report, 'mail.m_1').detail, /^Signed in to imap\.gmail\.com with Google ·/);
   });
+
+  test('the TLS-port advice names the account’s server, not one guessed from the address (TT-3517)', async () => {
+    freshHome({ config: { mail: [account({ host: '127.0.0.1', port: 1143, secure: false, user: 'nemo@example.test', requireTls: true })] } });
+    const report = await diagnose({
+      deps: {
+        ...SILENT_DEPS,
+        getSecret: async () => 'app-password',
+        testImap: async () => ({
+          ok: false, capabilities: [], mailboxes: [],
+          error: 'IMAP 127.0.0.1:1143 — this connection is still in the clear and the server never offered STARTTLS, so your password was not sent.',
+        }),
+      },
+    });
+    const check = byId(report, 'mail.m_1');
+    assert.equal(check.status, 'fail', check.detail);
+    assert.match(check.action, /TLS port for 127\.0\.0\.1/);
+    assert.doesNotMatch(check.action, /imap\.example\.test/);
+  });
 });
 
 /* ================================================================== *

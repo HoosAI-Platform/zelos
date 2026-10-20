@@ -826,12 +826,14 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
     // the sign-in advice below, because its wording mentions the password and
     // would otherwise be read as a rejected credential. Nothing was rejected:
     // nothing was sent, on purpose, and the fix is a port rather than a
-    // different password.
+    // different password. The port is named on the account's own server: the
+    // host guessed from the address sent a nemo@example.test account on
+    // 127.0.0.1 to imap.example.test (QA, 2026-10-10, TT-3517).
     if (/still in the clear/i.test(reason)) {
       return check(
         id, label, 'fail',
         `${account.host}: ${reason}`,
-        `Zelos stopped before your password left this machine. Use the TLS port in Settings → Email — ${guess.host ? `${guess.host}:${guess.port}` : 'usually 993'} — and if this host really is a local bridge that cannot do TLS, turn requireTls off for this account.`,
+        `Zelos stopped before your password left this machine. Use the TLS port for ${account.host} in Settings → Email — usually 993 — and if this host really is a local bridge that cannot do TLS, turn requireTls off for this account.`,
       );
     }
     // A certificate nobody vouches for. Not the network and not the password:
