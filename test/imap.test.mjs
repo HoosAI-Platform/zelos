@@ -1392,12 +1392,25 @@ test('REGRESSION: redaction is linear in the reply, however many times the passw
     return ms;
   };
 
+  // Each size is timed five times, interleaved, and its fastest run is kept.
+  // One reading per size was flaky on CI: a single GC pause or scheduler stall
+  // that landed on the larger run read as superlinear ("4,000 repeats took 3ms
+  // and 16,000 took 28ms"). A stall can lengthen a run but never shorten one,
+  // so the minimum is the cost, and interleaving puts a slow stretch of the
+  // machine on both sizes rather than one. The quadratic scan still fails
+  // plainly: measured at about 13 ms against 190 ms, every run.
+  let small = Infinity;
+  let large = Infinity;
+  for (let trial = 0; trial < 5; trial++) {
+    small = Math.min(small, await timeFor(4_000));
+    large = Math.min(large, await timeFor(16_000));
+  }
   // A floor keeps the ratio meaningful when both numbers round to nothing.
-  const small = Math.max(await timeFor(4_000), 1);
-  const large = Math.max(await timeFor(16_000), 1);
+  small = Math.max(small, 1);
+  large = Math.max(large, 1);
   assert.ok(
     large < small * 8,
-    `redaction is superlinear: 4,000 repeats took ${small.toFixed(0)}ms and 16,000 took ${large.toFixed(0)}ms `
+    `redaction is superlinear: 4,000 repeats took ${small.toFixed(0)}ms and 16,000 took ${large.toFixed(0)}ms, fastest of five each `
     + '(4x the input should cost about 4x, not 16x)',
   );
 });
