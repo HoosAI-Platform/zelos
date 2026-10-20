@@ -448,7 +448,7 @@ solely administer, read it before you connect a mail account.
 |---|---|---|
 | Your data (database, config, logs) | `~/.zelos` | `C:\Users\<you>\.zelos` |
 | Window size and position | `~/.zelos/window.json` | same |
-| Logs | `~/.zelos/logs/desktop.log` — **desktop app only** | same |
+| Logs | `~/.zelos/logs/desktop.log` — **desktop app only**; set aside at launch when it is over 5 MB (desktop.log.1 keeps the previous one) | same |
 | Secrets | your login Keychain, service `com.zelos.app` (or `secrets.enc` + `.seed` in `~/.zelos` if there is no keychain) | `%LOCALAPPDATA%\Zelos\secrets`, DPAPI-encrypted |
 | The shell's browser profile (your theme choice, nothing else) | `~/Library/Application Support/Zelos` | `%APPDATA%\Zelos` |
 
