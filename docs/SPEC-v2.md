@@ -82,8 +82,11 @@ from the one on the user's screen, which is worse than the write. So the require
 - Six tools carry `readOnlyHint: true`. `zelos_board` carries `readOnlyHint: false`, because that
   is the field an MCP host reads to decide it may run a tool without asking the owner.
 - The write is confined to `items`, to the columns those two rules own — `state`,
-  `snoozed_until`, `bucket`, plus the `state_at`/`updated_at` stamps — and to nothing else. No
-  other table moves, the search index does not move, and nothing is created, deleted or finished.
+  `snoozed_until`, `bucket`, plus the `state_at`/`updated_at` stamps — and to the `item_history`
+  row that records each such change as `automatic`, exactly as the app's own repair does. Apart
+  from those and `ai_access_log` — every tool call adds a row, and the log trims itself to the
+  newest 5,000 — no other table moves, the search index does not move, and no item is created,
+  deleted or finished.
 - The split is **measured**, not asserted: run every tool against a real database and the set that
   changed a row must equal the set that does not claim `readOnlyHint`.
 
