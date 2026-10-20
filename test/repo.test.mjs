@@ -1496,6 +1496,27 @@ test('docs/INSTALL.md sends a desktop user to diagnosis the desktop app actually
   assert.ok(settings.includes("el('dt', { text: 'Folder' })"), 'INSTALL.md points at a Folder line in About that is gone');
 });
 
+test('docs/INSTALL.md lists the files the desktop updater keeps', () => {
+  /* QA, 2026-10-10 (TT-3434): "Where your things live" said the shell's browser
+     profile held "your theme choice, nothing else" and never named
+     ~/.zelos/updates.json. Since 1.9.0 the updater keeps its choices in that
+     file and a downloaded update in the profile's pending-update folder, so
+     someone clearing out Zelos by the table would miss both. */
+  const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const updater = fs.readFileSync(path.join(ROOT, 'desktop', 'updater.js'), 'utf8');
+  const main = fs.readFileSync(path.join(ROOT, 'desktop', 'main.js'), 'utf8');
+  const start = install.indexOf('## Where your things live');
+  assert.ok(start >= 0, 'the "Where your things live" section is gone');
+  const table = install.slice(start, install.indexOf('\n\n**', start));
+  const pending = updater.match(/export const PENDING_DIR = '([^']+)'/)?.[1];
+  assert.ok(pending, 'desktop/updater.js no longer names its download folder');
+  assert.match(main, /downloadDir: path\.join\(app\.getPath\('userData'\), PENDING_DIR\)/, 'the download folder moved out of the shell profile');
+  assert.match(main, /settingsFile: path\.join\(zelos\.paths\.home, 'updates\.json'\)/, 'the update settings moved out of the data folder');
+  assert.ok(table.includes(`${pending}/`), `the table does not name the ${pending}/ folder in the shell profile`);
+  assert.ok(table.includes('~/.zelos/updates.json'), 'the table does not name ~/.zelos/updates.json');
+  assert.ok(!/nothing else/.test(table), 'the table still says the shell profile holds nothing else');
+});
+
 test('docs/INSTALL.md leads each first-open warning with what to click, in plain words', () => {
   const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
 

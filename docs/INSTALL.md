@@ -447,7 +447,8 @@ solely administer, read it before you connect a mail account.
 | Window size and position | `~/.zelos/window.json` | same |
 | Logs | `~/.zelos/logs/desktop.log` — **desktop app only** | same |
 | Secrets | your login Keychain, service `com.zelos.app` (or `secrets.enc` + `.seed` in `~/.zelos` if there is no keychain) | `%LOCALAPPDATA%\Zelos\secrets`, DPAPI-encrypted |
-| The shell's browser profile (your theme choice, nothing else) | `~/Library/Application Support/Zelos` | `%APPDATA%\Zelos` |
+| Automatic-update choices (on or off, and a skipped version) | `~/.zelos/updates.json` — **desktop app only** | same |
+| The shell's browser profile (your theme choice, and a downloaded update waiting in `pending-update/` until you restart) | `~/Library/Application Support/Zelos` | `%APPDATA%\Zelos` |
 
 **There is no `zelos.log`.** The `logs/` directory is created on every launch,
 but only the desktop shell ever writes to it, and the file it writes is
