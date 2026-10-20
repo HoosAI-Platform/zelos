@@ -1214,8 +1214,12 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   padding: 0 0.35rem;
 }
 /* min-width: 0 on the row, or the flag's min-content width blows the cell
-   open on a phone and "clash" lands on top of the neighbouring date. */
-.month-num-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.3rem; min-width: 0; }
+   open on a phone and "clash" lands on top of the neighbouring date. And it
+   wraps: a phone's cell gave the flag 19 px for 29 px of text, cut it to
+   "CL…", and the title that names it never shows on a touch screen, so the
+   flag takes a line of its own under the date instead (QA, 2026-10-10,
+   TT-3528). The ellipsis stays for a cell too narrow even for that. */
+.month-num-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 0.3rem; min-width: 0; }
 .month-num { font-size: 0.8125rem; flex: none; }
 .month-flag {
   font-family: var(--mono);

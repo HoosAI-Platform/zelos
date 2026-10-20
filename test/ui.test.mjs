@@ -1279,6 +1279,20 @@ test('the clash flag cannot escape its month cell', () => {
   assert.match(row[1], /min-width:\s*0/);
 });
 
+test('at phone width the clash flag wraps under the date instead of being cut to "CL…" (TT-3528)', () => {
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
+  // A phone's month cell gave the flag 19 px for 29 px of "clash", and its
+  // title never shows on a touch screen. Wrapping gives it the cell's width.
+  const row = /^\.month-num-row \{([^}]*)\}/m.exec(css);
+  assert.ok(row, '.month-num-row rule is missing');
+  assert.match(row[1], /flex-wrap:\s*wrap/, 'the flag shares a line with the date, where a phone cuts it short');
+  for (const narrow of css.matchAll(/@media \(max-width:[^)]*\) \{([\s\S]*?)\n\}/g)) {
+    assert.ok(!/\.month-num-row[^{}]*\{[^{}]*flex-wrap:\s*nowrap/.test(narrow[1]), 'a narrow rule takes the wrap back');
+  }
+  const cal = fs.readFileSync(path.join(UI, 'views/calendar.js'), 'utf8');
+  assert.match(cal, /el\('span', \{ class: 'month-flag', title: 'Overlapping events', text: 'clash' \}\)/, 'the flag no longer says "clash"');
+});
+
 test('a sweep that lost one source says so, and does not call the run failed', () => {
   const src = fs.readFileSync(path.join(UI, 'views/now.js'), 'utf8');
   // A run that lost ONE source comes back ok:true. The banner returned null
