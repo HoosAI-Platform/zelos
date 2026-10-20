@@ -16,6 +16,7 @@
 
 import { calendarConnector, eventsFrom } from './calendar.mjs';
 import { readCapped } from './http.mjs';
+import { fetchFailureReason } from '../fetch-error.mjs';
 
 const ICS_TIMEOUT_MS = 20_000;
 const ICS_MAX_BYTES = 8 * 1024 * 1024;
@@ -48,11 +49,17 @@ export async function fetchIcsText(rawUrl, { user, pass, signal, timeoutMs = ICS
 
   const request = async (target, withAuth) => {
     const sendHeaders = withAuth ? headers : { accept: headers.accept };
-    return fetch(target, {
-      headers: sendHeaders,
-      redirect: 'manual',
-      signal: deadline,
-    });
+    try {
+      return await fetch(target, {
+        headers: sendHeaders,
+        redirect: 'manual',
+        signal: deadline,
+      });
+    } catch (err) {
+      // The reason, not "fetch failed": see core/fetch-error.mjs (TT-3514).
+      if (deadline.aborted) throw err;
+      throw new Error(`calendar at ${target.host} could not be reached: ${fetchFailureReason(err)}`, { cause: err });
+    }
   };
 
   let res = await request(url, true);
