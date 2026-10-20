@@ -695,6 +695,27 @@ describe('the calendar probes that belong to a connector', () => {
     assert.match(refused.action, /app-specific password/);
   });
 
+  test('a CalDAV 403 sends the reader to the address, not the password', async () => {
+    // QA, 2026-10-10, TT-3455: a 403 is the server refusing this address. The
+    // app-specific-password advice above is for a 401, and it is the wrong fix.
+    const forbidden = { ok: false, refused: true, calendars: [], error: 'dav.example.com refused access to /alice/cal/ (HTTP 403).' };
+    freshHome({ config: { calendars: [calendar({ kind: 'caldav', url: 'https://dav.example.com/alice/cal/', user: 'me', keyRef: 'calendar.c_1' })] } });
+    const withUser = byId(await diagnose({
+      deps: { ...SILENT_DEPS, getSecret: async () => 'hunter2', testCalDav: async () => forbidden },
+    }), 'calendar.c_1');
+    assert.equal(withUser.status, 'fail', withUser.detail);
+    assert.match(withUser.detail, /refused access to \/alice\/cal\//);
+    assert.match(withUser.action, /calendar URL/);
+    assert.doesNotMatch(withUser.action, /app-specific|password/);
+
+    freshHome({ config: { calendars: [calendar({ kind: 'caldav', url: 'https://dav.example.com/alice/cal/' })] } });
+    const noUser = byId(await diagnose({
+      deps: { ...SILENT_DEPS, testCalDav: async () => forbidden },
+    }), 'calendar.c_1');
+    assert.equal(noUser.status, 'fail', noUser.detail);
+    assert.match(noUser.action, /username and password/);
+  });
+
   test('a secret store that will not answer is not reported twice', async () => {
     /* The secret-store line above is already a `fail` when this happens, and
        sending the reader to re-check their calendar address instead is how a

@@ -11,9 +11,15 @@
  * Servers disagree about almost everything else — namespace prefixes, whether
  * hrefs are absolute or path-only, whether the URL a user pastes is the server
  * root, the principal, the home set or one calendar. So: every URL a server
- * hands back is resolved against the URL it came from, all XML matching is on
- * *local* names with the prefix ignored, and discovery falls back through
- * `/.well-known/caldav` and the origin root before giving up.
+ * hands back is resolved against the URL it came from, and all XML matching is
+ * on *local* names with the prefix ignored.
+ *
+ * Discovery reads what the typed URL names, and never wider (QA, 2026-10-10,
+ * TT-3513). Only the account address — the origin root or `/.well-known/caldav`
+ * — walks the account and falls back through `/.well-known/caldav` and the
+ * origin root before giving up. A deeper URL is asked what it is, once, and an
+ * address that turns out to be one calendar is that calendar and nothing else
+ * — see `discover`.
  *
  * The XML parser here is deliberately tiny and deliberately incurious: it skips
  * `<!DOCTYPE …>` wholesale, so no entity declaration is ever read, let alone
@@ -227,7 +233,7 @@ function textOf(node) {
  * ------------------------------------------------------------------ */
 
 class CalDavError extends Error {
-  constructor(message, { status = 0, host = '', anonymous = false } = {}) {
+  constructor(message, { status = 0, host = '', anonymous = false, transport = false, refused = false } = {}) {
     super(message);
     this.name = 'CalDavError';
     this.status = status;
@@ -239,11 +245,26 @@ class CalDavError extends Error {
      * see `isCredentialVerdict`.
      */
     this.anonymous = anonymous;
+    /**
+     * Set where the request never got an answer to judge: the host could not be
+     * reached, the deadline passed, the caller cancelled, or the body stopped
+     * arriving. A status-less error is not enough to say so — a 200 HTML page
+     * is status-less too once it fails to parse — so it is tagged at the throw
+     * (QA, 2026-10-10, TT-3513).
+     */
+    this.transport = transport;
+    /**
+     * Set on a 403 that the pin did not cause: the server knew who was asking
+     * — or that nobody had said — and would not show this address. That is an
+     * answer about the address, not the password, and the remedy is a different
+     * calendar URL (QA, 2026-10-10, TT-3455).
+     */
+    this.refused = refused;
   }
 }
 
 /**
- * Is this 401/403 an answer *about the credential*?
+ * Is this 401 an answer *about the credential*?
  *
  * It is when the request carried the credential and the server refused it, and
  * it is when there was no credential to carry — both mean the walk cannot get
@@ -256,9 +277,20 @@ class CalDavError extends Error {
  * yet. Servers that partition an account across hosts (iCloud answers an
  * unauthenticated PROPFIND with `x-apple-user-partition`) hand back exactly this
  * shape as their ordinary layout, not as an attack.
+ *
+ * And a 403 is never one (QA, 2026-10-10, TT-3455). 401 means "who are you?";
+ * 403 means "I know, and not this" — Radicale answers it for another user's
+ * calendar with a perfectly good password. Read as a verdict it told people to
+ * mint an app-specific password for an address they had simply mistyped, and
+ * it ended the walk before the fallbacks that would have found their own
+ * calendars. A 403 is a refusal: kept like a declined hop, and thrown only if
+ * nothing else was found — see `walkState`.
  */
 const isCredentialVerdict = (err) =>
-  err instanceof CalDavError && (err.status === 401 || err.status === 403) && !err.anonymous;
+  err instanceof CalDavError && err.status === 401 && !err.anonymous;
+
+/** A 403 about the address, not the password. */
+const wasRefused = (err) => err instanceof CalDavError && err.refused;
 
 /** The other half of that split: a hop refused because we withheld the password. */
 const wasDeclinedAnonymously = (err) => err instanceof CalDavError && err.anonymous;
@@ -314,7 +346,7 @@ async function request(method, url, { user, pass, body = null, depth = null, tim
   const controller = new AbortController();
   const onAbort = () => controller.abort(signal?.reason);
   if (signal) {
-    if (signal.aborted) throw new CalDavError('request aborted', { host: hostOf(url) });
+    if (signal.aborted) throw new CalDavError('request aborted', { host: hostOf(url), transport: true });
     signal.addEventListener('abort', onAbort, { once: true });
   }
   let timedOut = false;
@@ -340,7 +372,7 @@ async function request(method, url, { user, pass, body = null, depth = null, tim
         : signal?.aborted
           ? 'cancelled'
           : err?.message || String(err);
-      throw new CalDavError(`CalDAV ${method} could not reach ${hostOf(url)}: ${reason}`, { host: hostOf(url) });
+      throw new CalDavError(`CalDAV ${method} could not reach ${hostOf(url)}: ${reason}`, { host: hostOf(url), transport: true });
     }
 
     if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -383,6 +415,30 @@ async function request(method, url, { user, pass, body = null, depth = null, tim
           { status: response.status, host: hostOf(url), anonymous: true },
         );
       }
+      if (response.status === 403) {
+        // Not "rejected the credentials": the server answered, and the address
+        // is the problem (QA, 2026-10-10, TT-3455). With no username configured
+        // at all, the likelier fix is to give it one.
+        const where = `${hostOf(url)} refused access to ${new URL(url).pathname} (HTTP 403).`;
+        // A REPORT comes after the collection was listed, so the address is
+        // right and the share is what stops it: a free/busy-only calendar shows
+        // up in a listing and will not hand over its events.
+        if (method === 'REPORT' && user) {
+          throw new CalDavError(
+            `${hostOf(url)} refused to show the events in ${new URL(url).pathname} (HTTP 403). ` +
+              'This account can see that calendar but not read its events — a free/busy-only share does this. ' +
+              'This is usually not a wrong password.',
+            { status: 403, host: hostOf(url), refused: true },
+          );
+        }
+        throw new CalDavError(
+          user
+            ? `${where} The server answered, but this address is not one this account may read — ` +
+                'check the calendar URL. This is usually not a wrong password.'
+            : `${where} This calendar needs a username and password — add them in Settings → Calendars.`,
+          { status: 403, host: hostOf(url), refused: true },
+        );
+      }
       throw new CalDavError(
         `CalDAV rejected the credentials for ${hostOf(url)} (HTTP ${response.status}). ` +
           'iCloud and Fastmail need an app-specific password, not the account password.',
@@ -413,6 +469,7 @@ async function request(method, url, { user, pass, body = null, depth = null, tim
       throw new CalDavError(`CalDAV ${method} response from ${hostOf(url)} could not be read: ${reason}`, {
         status: response.status,
         host: hostOf(url),
+        transport: true,
       });
     }
   } finally {
@@ -464,8 +521,20 @@ async function readBodyCapped(response, url) {
 
 const NS = 'xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:ic="http://apple.com/ns/ical/"';
 
+/**
+ * The first question asked of a typed URL, and it asks enough to settle what
+ * that URL *is* in the same round trip: who the account is, and — should the
+ * answer be "one calendar" — everything a sweep needs to read that calendar
+ * without asking again. Radicale, Sabre and every RFC 5397 server answer
+ * current-user-principal on any resource at all, so that property on its own
+ * says nothing about whether the address names the account; the resource type
+ * does (QA, 2026-10-10, TT-3513).
+ */
 const BODY_PRINCIPAL = `<?xml version="1.0" encoding="utf-8"?>
-<d:propfind ${NS}><d:prop><d:current-user-principal/><d:principal-URL/><d:resourcetype/></d:prop></d:propfind>`;
+<d:propfind ${NS}><d:prop>
+  <d:current-user-principal/><d:principal-URL/><d:resourcetype/><d:displayname/>
+  <c:supported-calendar-component-set/><cs:getctag/><ic:calendar-color/>
+</d:prop></d:propfind>`;
 
 const BODY_HOME_SET = `<?xml version="1.0" encoding="utf-8"?>
 <d:propfind ${NS}><d:prop><c:calendar-home-set/></d:prop></d:propfind>`;
@@ -620,6 +689,119 @@ function calendarsFrom(doc, base) {
   return out;
 }
 
+/**
+ * Origin plus path with any trailing slash dropped, so `/a` and `/a/` compare
+ * equal — and with each segment percent-decoded, so `/user/x@fastmail.com/` as
+ * typed and `/user/x%40fastmail.com/` as a server spells it in an href compare
+ * equal too. `new URL()` leaves both spellings alone, and Cyrus/Fastmail
+ * principals are exactly that shape: read as different resources, a typed
+ * principal stopped counting as the account and the source swept empty (QA,
+ * 2026-10-10, TT-3513). An encoded `/` stays encoded, so decoding can never
+ * merge two segments; a malformed escape is compared as it was written.
+ */
+function resourceKey(url) {
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.replace(/\/+$/, '').split('/').map((segment) => {
+      try {
+        return decodeURIComponent(segment).replace(/\//g, '%2F');
+      } catch {
+        return segment;
+      }
+    });
+    return `${parsed.origin}${segments.join('/')}`;
+  } catch {
+    return null;
+  }
+}
+
+const sameResource = (a, b) => resourceKey(a) !== null && resourceKey(a) === resourceKey(b);
+
+/**
+ * What the resource a Depth:0 PROPFIND was sent to says it is.
+ * -> {kind, principal, calendar?}, where `kind` is
+ *   'calendar'  one calendar of events — `calendar` is the entry to read
+ *   'tasks'     a calendar collection that holds no VEVENTs (a task list)
+ *   'other'     a resource with a type that is not a calendar: a principal, a
+ *               home set, a plain collection, an addressbook, a single .ics
+ *   'unknown'   it answered without a resource type, so nothing can be said
+ *
+ * With Depth:0 the server answers for the one resource asked, so a lone
+ * response is self whatever its href says; when a server sends several anyway,
+ * only the one whose href is the URL asked counts (QA, 2026-10-10, TT-3513).
+ * `principal` comes back for every kind, and it is a fact about who is asking,
+ * not about what this URL is: RFC 5397 servers send it on any resource.
+ */
+function classifySelf(doc, resUrl) {
+  const principal = hrefUnder(doc, resUrl, 'current-user-principal') || hrefUnder(doc, resUrl, 'principal-url');
+  const responses = findAll(doc, 'response');
+  const self = responses.length === 1
+    ? responses[0]
+    : responses.find((r) => sameResource(resolveHref(resUrl, textOf(findOne(r, 'href'))), resUrl));
+  if (!self) return { kind: 'unknown', principal };
+
+  let types = null;
+  let components = null;
+  for (const prop of okProps(self)) {
+    for (const child of prop.children) {
+      if (child.local === 'resourcetype') types = child.children.map((t) => t.local);
+      if (child.local === 'supported-calendar-component-set') {
+        components = child.children.filter((c) => c.local === 'comp' && c.attrs.name).map((c) => String(c.attrs.name).toUpperCase());
+      }
+    }
+  }
+  if (!types) return { kind: 'unknown', principal };
+  if (!types.includes('calendar') || types.includes('schedule-inbox') || types.includes('schedule-outbox')) {
+    return { kind: 'other', principal };
+  }
+  if (components && components.length && !components.includes('VEVENT')) return { kind: 'tasks', principal };
+  // calendarsFrom applies exactly the rules a listing would, to this one entry.
+  const [calendar] = calendarsFrom({ children: [self] }, resUrl);
+  return calendar ? { kind: 'calendar', principal, calendar } : { kind: 'unknown', principal };
+}
+
+/**
+ * Is this the address of an account rather than of something in it? Only the
+ * origin root and `/.well-known/caldav` are — they are where RFC 6764 says a
+ * client starts when all it has is a host — and only they may be widened to
+ * whatever the walk from them finds (QA, 2026-10-10, TT-3513).
+ */
+function isAccountAddress(url) {
+  try {
+    return /^\/(?:\.well-known\/caldav\/?)?$/.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does a deeper typed URL name the whole account all the same? It does when it
+ * *is* the principal or the home set, or sits above the home set on the same
+ * origin (`/remote.php/dav/`, `/dav/`): a person who typed any of those asked
+ * for every calendar under it. Anything else — one calendar, an addressbook, a
+ * single event — is read for what it holds and no more.
+ */
+function namesAccount(url, principal, homeSet) {
+  if (sameResource(url, principal) || sameResource(url, homeSet)) return true;
+  const typed = resourceKey(url);
+  const home = resourceKey(homeSet);
+  return Boolean(typed && home && home.startsWith(`${typed}/`));
+}
+
+/**
+ * One calendar is not a calendar of events because it only holds tasks — and
+ * an empty list would be read downstream as "this calendar is empty now", which
+ * removes whatever was stored for it. So it is an error, with its own words
+ * (QA, 2026-10-10, TT-3513).
+ */
+function taskListError(base) {
+  return new CalDavError(
+    `Connected to ${hostOf(base)}, but that address is a task list, not a calendar of events. ` +
+      `Put the address of a calendar in the calendar URL, or ${originOf(base)}/ to read all of them.`,
+    { host: hostOf(base) },
+  );
+}
+
 /** Candidate roots to probe, in order, for a URL a person typed or pasted. */
 function candidateRoots(url) {
   const roots = [url];
@@ -694,9 +876,27 @@ function normalizeUrl(url) {
  *
  * Every read and write here is best effort. A cache that cannot be opened,
  * parsed or written falls back to the full walk rather than failing a sweep.
+ *
+ * Every record says how far it reaches, in `scope` (QA, 2026-10-10, TT-3513):
+ *   'account'     `listRoot` is listed at Depth:1 and, if it stops answering,
+ *                 the remembered home set and principal are the rungs above it.
+ *                 A listing of a typed URL that did not name the account is
+ *                 kept this way too, with no rungs: there is nothing above it
+ *                 the person asked for.
+ *   'collection'  `listRoot` is one calendar. A sweep reads it at Depth:0 and
+ *                 never walks up from it — a calendar that has gone sends the
+ *                 sweep back to the URL typed, which re-scopes or fails, and
+ *                 never to the account around it.
+ * Schema 1 records were written before there was a scope, and for a typed
+ * calendar URL they hold the whole account's home set as the listing root —
+ * the very widening this fixes. The schema is part of the key, so they are
+ * simply never found again; the files stay in the cache directory as harmless
+ * orphans until `invalidate()` clears it. A record whose scope is missing or
+ * unknown is not trusted either.
  */
 
-const CACHE_SCHEMA = 1;
+const CACHE_SCHEMA = 2;
+const SCOPES = new Set(['account', 'collection']);
 /**
  * How long a remembered layout stands before the full walk runs again. It can
  * be generous: the listing is re-read every sweep anyway, and a listing that
@@ -733,8 +933,10 @@ function readLayout(key) {
     return null;
   }
   if (!parsed || parsed.schema !== CACHE_SCHEMA || typeof parsed.listRoot !== 'string') return null;
+  if (!SCOPES.has(parsed.scope)) return null;
 
   const record = {
+    scope: parsed.scope,
     listRoot: parsed.listRoot,
     principal: typeof parsed.principal === 'string' ? parsed.principal : null,
     homeSet: typeof parsed.homeSet === 'string' ? parsed.homeSet : null,
@@ -852,38 +1054,65 @@ export function invalidate({ url = null, user = null } = {}) {
  * ------------------------------------------------------------------ */
 
 /**
- * Walk current-user-principal -> calendar-home-set -> calendar collections.
- * -> {principal, homeSet, listRoot, calendars:[{href, name, color, ctag, components}]}
+ * Discover the calendars the URL a person typed names — and only those.
+ * -> {principal, homeSet, listRoot, scope, calendars:[{href, name, color, ctag, components}]}
  * Throws CalDavError (with .status and .host) when the server cannot be
  * reached, when it rejects the credentials, and when the only thing standing
  * between the walk and a calendar is a host the origin pin would not spend the
  * password on — that last one is a real failure with a real remedy in its
  * message, and it must never come back as an empty, unexplained calendar list.
  *
- * `listRoot` is the URL whose Depth:1 listing produced the calendars — the one
- * hop worth repeating on its own later, and null when nothing produced any.
+ * The URL typed decides how far this reads (QA, 2026-10-10, TT-3513). It used
+ * to decide nothing: discovery asked any URL for current-user-principal and
+ * walked from the answer to the home set — and Radicale, like every RFC 5397
+ * server, answers that on any resource at all. So the address of one calendar
+ * listed and then read every calendar in the account, and the model was handed
+ * appointments from calendars nobody had pointed Zelos at. Now:
+ *
+ *   the account address (`/` or `/.well-known/caldav`) — the walk as it always
+ *     was: current-user-principal -> calendar-home-set -> Depth:1 listing, with
+ *     `/.well-known/caldav` and the origin root as fallbacks.
+ *   anything deeper — one Depth:0 PROPFIND at that URL, which asks what it is
+ *     and, for a calendar, everything needed to read it. See `discoverNamed`.
+ *
+ * `listRoot` is the URL a sweep re-reads later — the Depth:1 listing that
+ * produced the calendars, or under `scope: 'collection'` the one calendar
+ * itself, read at Depth:0 — and null when nothing produced any. `principal`
+ * and `homeSet` are the rungs a sweep may walk back up when `listRoot` stops
+ * answering, so they are returned only when the URL typed named the account.
+ *
+ * A typed URL that is a task list comes back with no calendars and
+ * `calendars.notEvents` set; `fetchRange` and `testConnection` turn that into
+ * an error of its own rather than an empty calendar.
+ *
+ * `explain` is for Test only: when a deeper URL fails, the account address is
+ * walked as well, purely to name in the error what this account *can* read.
+ * See `explainFailure`.
  */
-export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS, signal, explain = false } = {}) {
   const base = normalizeUrl(url);
   // Every URL followed from here on is one the server chose. Pinning the
   // credential scope to the address the user typed is what keeps a hostile
   // `href` from turning discovery into password delivery.
   const opts = { user, pass, timeoutMs, signal, authOrigin: originOf(base) };
 
+  // Fallbacks exist to find an account from a bare host. Run for a deeper URL
+  // they find the *whole* account behind an address that named part of it, so
+  // they never run for one (QA, 2026-10-10, TT-3513).
+  if (!isAccountAddress(base)) return discoverNamed(base, opts, { explain });
+
   let principal = null;
   let reached = null;
   // The failure worth reporting is the one on the URL the user actually typed,
   // not whatever /.well-known said afterwards — so this is only ever set once.
   let probeError = null;
-  // The first hop the pin refused to authenticate, kept rather than thrown. It
-  // must not end the walk — a partitioned account puts its calendars behind a
-  // second host and its *listing* behind the first — but if the walk then turns
-  // up nothing at all, this is the error to report, because its message is the
-  // only one that names the host to paste into the calendar URL.
-  let declined = null;
-  const note = (err) => {
-    if (!declined && wasDeclinedAnonymously(err)) declined = err;
-  };
+  const walk = walkState();
+  // Roots whose own probe was refused. They are not listed afterwards — a root
+  // that would not say who is asking will not say what it holds — and their
+  // refusal is not the walk's answer once another root has led somewhere: a
+  // 403 at `/` that /.well-known got past is not news about the account (QA,
+  // 2026-10-10, TT-3455).
+  const refusedRoots = new Set();
 
   for (const root of candidateRoots(base)) {
     try {
@@ -895,30 +1124,188 @@ export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS
     } catch (err) {
       if (!probeError) probeError = err;
       if (isCredentialVerdict(err)) throw err;
-      note(err);
+      if (wasRefused(err)) refusedRoots.add(root);
+      else walk.note(err);
     }
   }
 
   if (!reached && probeError) throw probeError;
 
-  let homeSet = null;
-  if (principal) {
-    try {
-      const res = await request('PROPFIND', principal, { ...opts, body: BODY_HOME_SET, depth: 0 });
-      homeSet = hrefUnder(discoveryDocument(res), res.url, 'calendar-home-set');
-    } catch (err) {
-      note(err);
-      dav.debug(`calendar-home-set lookup failed: ${err.message}`);
-    }
+  const homeSet = principal ? await homeSetOf(principal, opts, walk) : null;
+
+  // Depth:1 on a collection includes the collection itself, so a root that
+  // happens to be one calendar is listed by exactly the same call.
+  const searchRoots = distinct([homeSet, base, reached]).filter((root) => !refusedRoots.has(root));
+  return listFrom(searchRoots, { base, principal, homeSet, probeError, walk, opts });
+}
+
+/**
+ * Discovery for a URL deeper than the account address (QA, 2026-10-10,
+ * TT-3513). One Depth:0 PROPFIND asks the URL what it is, and the answer
+ * decides everything after it:
+ *
+ *   one calendar of events — that calendar, from this one request; nothing else
+ *     is asked, and the sweep's record is `scope: 'collection'`.
+ *   a task list — no calendars, flagged `notEvents`.
+ *   anything else — the principal and home set are found as the walk would find
+ *     them, but only to see where the URL sits. If it *is* the principal or the
+ *     home set, or above the home set, the person named the account and it is
+ *     read as the account. Otherwise only what the URL itself holds is listed,
+ *     at Depth:1: an addressbook, a single event, an unclassifiable answer —
+ *     never the home set beside it.
+ *
+ * A failure at the URL typed is thrown as it is. Nothing else is read: every
+ * other root there is to try is wider than the address the person gave. Only
+ * Test, with `explain`, looks wider — to say what to type, never to read it —
+ * and only when this first request fails. A Depth:1 listing that fails later
+ * came after the URL had already answered as DAV, so the address was not the
+ * mistake and naming other calendars would not help.
+ */
+async function discoverNamed(base, opts, { explain = false } = {}) {
+  let res;
+  let self;
+  try {
+    res = await request('PROPFIND', base, { ...opts, body: BODY_PRINCIPAL, depth: 0 });
+    self = classifySelf(discoveryDocument(res), res.url);
+  } catch (err) {
+    if (explain && worthExplaining(err, opts)) await explainFailure(err, base, opts);
+    throw err;
   }
 
-  // Depth:1 on a collection includes the collection itself, so a URL that
-  // already points at one calendar is discovered by exactly the same call.
-  const searchRoots = [];
-  for (const candidate of [homeSet, base, reached]) {
-    if (candidate && !searchRoots.includes(candidate)) searchRoots.push(candidate);
+  if (self.kind === 'calendar') {
+    return { principal: null, homeSet: null, listRoot: self.calendar.href, scope: 'collection', calendars: [self.calendar] };
+  }
+  if (self.kind === 'tasks') {
+    const calendars = [];
+    Object.defineProperty(calendars, 'notEvents', { value: true });
+    return { principal: null, homeSet: null, listRoot: null, scope: 'collection', calendars };
   }
 
+  // The principal is asked for its home set even when the URL turns out not to
+  // be the account, because "is this URL above the home set?" cannot be
+  // answered without knowing where the home set is.
+  const walk = walkState();
+  const homeSet = self.principal ? await homeSetOf(self.principal, opts, walk) : null;
+  if (self.principal && [base, res.url].every((u) => namesAccount(u, self.principal, homeSet))) {
+    return listFrom(distinct([homeSet, base, res.url]), { base, principal: self.principal, homeSet, walk, opts });
+  }
+
+  // What the URL itself holds, and nothing above it. A fresh walk state: a home
+  // set this listing never needed must not be the error it reports.
+  const found = await listFrom([res.url], { base, principal: null, homeSet: null, walk: walkState(), opts });
+  const [only] = found.calendars;
+  if (found.calendars.length === 1 && sameResource(only.href, res.url)) {
+    // The listing found the URL itself to be the one calendar — an answer the
+    // Depth:0 probe could not give. It is not remembered: a calendar record is
+    // re-read at Depth:0, and this server has just shown it will not say what
+    // the resource is that way, so the record would fail every sweep until it
+    // expired. Rediscovering costs one request more and keeps working.
+    return { ...found, listRoot: null };
+  }
+  if (!found.calendars.length && self.principal) {
+    // Signed in, and the URL holds nothing this reads. That is not proof the
+    // source has no appointments — the address may only have failed to name
+    // the account — so it must not be a snapshot that empties the source.
+    Object.defineProperty(found.calendars, 'incomplete', { value: true, configurable: true });
+  }
+  return found;
+}
+
+/**
+ * Is this failure one a list of the account's calendars would help with? Yes
+ * for an address the server answered and refused to treat as a calendar — a
+ * 404/405/410 or another 4xx, or a page that is not a multistatus at all (a web
+ * UI's HTML, status-less once it fails to parse). No when there was no answer
+ * to judge (`transport`), when the caller cancelled, or when the server is
+ * struggling (5xx, 429): another walk would only wait on it again. And never
+ * for a credential answer or a declined anonymous hop, which carry their own
+ * remedy (QA, 2026-10-10, TT-3513).
+ */
+function worthExplaining(err, opts) {
+  if (!(err instanceof CalDavError) || err.transport || opts.signal?.aborted) return false;
+  if (isCredentialVerdict(err) || wasDeclinedAnonymously(err)) return false;
+  return !(err.status >= 500 || err.status === 429);
+}
+
+/**
+ * Test only (QA, 2026-10-10, TT-3513): a deeper URL failed, so walk the
+ * account address — `/` and `/.well-known/caldav`, the fallbacks the sweep
+ * never runs for such a URL — to name in the error what this account can read.
+ * Nothing found here is returned, queried or remembered: it goes into the
+ * message and `err.suggestions`, and the person chooses. A 401 from that walk
+ * is the password verdict and replaces the original error, because it is the
+ * truer one; any other failure leaves the original error as it was.
+ *
+ * The whole walk shares one deadline — the same `timeoutMs` a single request
+ * gets — so a fallback that hangs costs Test one timeout, not one per hop. When
+ * it fires, the original error goes back without suggestions.
+ *
+ * `zelos doctor` runs Test too, so it pays this walk once per failing calendar
+ * — a one-off at a person's request, where the sweep pays one request.
+ */
+async function explainFailure(err, base, opts) {
+  const account = `${originOf(base)}/`;
+  const deadline = AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
+  let found;
+  try {
+    found = await discover({ ...opts, signal, url: account });
+  } catch (walkErr) {
+    if (isCredentialVerdict(walkErr)) throw walkErr;
+    dav.debug(`nothing to suggest from ${hostOf(account)}: ${walkErr.message}`);
+    return;
+  }
+  if (deadline.aborted || !found.calendars.length) return;
+  err.message += ` Signed in, this account can read: ${found.calendars.map((c) => c.name).join(', ')}. ` +
+    `Put one of their addresses in the calendar URL, or ${account} to read all of them.`;
+  err.suggestions = found.calendars.map((c) => ({ href: c.href, name: c.name }));
+}
+
+/**
+ * Bookkeeping shared by the hops of one walk.
+ *
+ * `declined` is the first hop the pin refused to authenticate, kept rather than
+ * thrown. It must not end the walk — a partitioned account puts its calendars
+ * behind a second host and its *listing* behind the first — but if the walk
+ * then turns up nothing at all, this is the error to report, because its
+ * message is the only one that names the host to paste into the calendar URL.
+ */
+function walkState() {
+  const walk = {
+    declined: null,
+    // The first 403 refusal, kept the same way and for the same reason: one
+    // refused root must not cost the walk the roots after it, and a walk that
+    // finds nothing must say it was refused rather than come back empty (QA,
+    // 2026-10-10, TT-3455).
+    refused: null,
+    note(err) {
+      if (!walk.declined && wasDeclinedAnonymously(err)) walk.declined = err;
+      if (!walk.refused && wasRefused(err)) walk.refused = err;
+    },
+  };
+  return walk;
+}
+
+const distinct = (urls) => urls.filter((u, i) => u && urls.indexOf(u) === i);
+
+/** The principal's calendar-home-set, or null when it would not say. */
+async function homeSetOf(principal, opts, walk) {
+  try {
+    const res = await request('PROPFIND', principal, { ...opts, body: BODY_HOME_SET, depth: 0 });
+    return hrefUnder(discoveryDocument(res), res.url, 'calendar-home-set');
+  } catch (err) {
+    walk.note(err);
+    dav.debug(`calendar-home-set lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * List each root at Depth:1 until one produces calendars. Every result here is
+ * `scope: 'account'` — a listing, re-listed by the sweep — and the caller
+ * narrows it when what was listed turns out to be one calendar.
+ */
+async function listFrom(searchRoots, { base, principal, homeSet, probeError = null, walk, opts }) {
   let listed = false;
   let incompleteListing = false;
   let listError = null;
@@ -932,12 +1319,12 @@ export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS
       // address the server pointed at, and that is the hop worth remembering.
       if (calendars.length) {
         if (incompleteListing || listError || (principal && !homeSet)) Object.defineProperty(calendars, 'incomplete', { value: true, configurable: true });
-        return { principal, homeSet, listRoot: res.url, calendars };
+        return { principal, homeSet, listRoot: res.url, scope: 'account', calendars };
       }
     } catch (err) {
       listError = err;
       if (isCredentialVerdict(err)) throw err;
-      note(err);
+      walk.note(err);
       dav.debug(`collection listing failed at ${hostOf(root)}: ${err.message}`);
     }
   }
@@ -950,16 +1337,24 @@ export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS
   // an empty list makes the source contribute nothing for ever and say nothing
   // about why. `declined` comes first in both throws because it is the error
   // this walk used to raise on the spot, and the one that carries the fix.
+  //
+  // A refusal is the same kind of answer (QA, 2026-10-10, TT-3455) when it hit
+  // the principal, the home set or a root that was listed: what was refused may
+  // be where the calendars are, so "none" would be a guess. A probe refused at a
+  // root the walk then got past is not on that list (see `refusedRoots`) — it
+  // only answers when nothing could be listed at all, and then the refusal at
+  // the URL typed is the one that names it.
   if (!listed) {
-    throw declined || listError || probeError
+    throw walk.declined || (wasRefused(probeError) ? probeError : walk.refused) || listError || probeError
       || new CalDavError(`No DAV collections at ${hostOf(base)}`, { host: hostOf(base) });
   }
-  if (declined) throw declined;
+  if (walk.declined) throw walk.declined;
+  if (walk.refused) throw walk.refused;
   const calendars = [];
   // An empty fallback root does not prove that a home set which failed to
   // answer has no calendars. Keep that uncertainty through to the sweep.
   if (incompleteListing || listError || (principal && !homeSet)) Object.defineProperty(calendars, 'incomplete', { value: true });
-  return { principal, homeSet, listRoot: null, calendars };
+  return { principal, homeSet, listRoot: null, scope: 'account', calendars };
 }
 
 /**
@@ -972,7 +1367,7 @@ export async function discover({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS
  * a partition host, refused because the origin pin sent no password, is exactly
  * that: the next rung down still has to be tried.
  */
-async function listCalendarsAt(root, opts) {
+async function listCalendarsAt(root, opts, refusals = []) {
   try {
     const res = await request('PROPFIND', root, { ...opts, body: BODY_COLLECTIONS, depth: 1 });
     const calendars = calendarsFrom(discoveryDocument(res), res.url);
@@ -980,8 +1375,47 @@ async function listCalendarsAt(root, opts) {
     dav.debug(`the remembered listing at ${hostOf(root)} holds no calendars any more`);
   } catch (err) {
     if (isCredentialVerdict(err)) throw err;
+    if (wasRefused(err)) refusals.push(err);
     dav.debug(`the remembered listing at ${hostOf(root)} failed: ${err.message}`);
   }
+  return null;
+}
+
+/**
+ * Re-read a remembered single calendar. -> the calendar entry, or null when it
+ * has gone (404/410) or is no longer a calendar of events.
+ *
+ * Depth:0, not Depth:1: the calendar's own properties carry the ctag, and a
+ * Depth:1 listing of a calendar collection is a listing of every event in it.
+ *
+ * Only an answer that the calendar is not there sends the sweep back to
+ * discovery (QA, 2026-10-10, TT-3513). A timeout, a 5xx, a 401 or a 207 that
+ * will not say what the resource is are thrown and the record is kept: none of
+ * them is news about the layout, and the sweep that hits one keeps what it had
+ * stored rather than replacing it with nothing.
+ */
+async function readCollection(url, opts) {
+  let res;
+  try {
+    res = await request('PROPFIND', url, { ...opts, body: BODY_COLLECTIONS, depth: 0 });
+  } catch (err) {
+    // A refusal re-scopes too (QA, 2026-10-10, TT-3455): the account may no
+    // longer read this calendar, and asking the URL typed again is what turns
+    // that into the refusal message rather than a sweep stuck on a stale record.
+    if (err instanceof CalDavError && (err.status === 404 || err.status === 410 || wasRefused(err))) {
+      dav.debug(`the remembered calendar at ${hostOf(url)} ${wasRefused(err) ? 'refused access' : 'has gone'} (HTTP ${err.status})`);
+      return null;
+    }
+    throw err;
+  }
+  const self = classifySelf(discoveryDocument(res), res.url);
+  if (self.kind === 'calendar') return self.calendar;
+  if (self.kind === 'unknown') {
+    throw new CalDavError(`${hostOf(url)} answered for the calendar without saying what it is; it was not read this time`, {
+      host: hostOf(url),
+    });
+  }
+  dav.debug(`the remembered calendar at ${hostOf(url)} is no longer a calendar of events`);
   return null;
 }
 
@@ -1003,15 +1437,41 @@ async function listCalendarsAt(root, opts) {
  * Nothing here is patched around. A rung that produces calendars is trusted; a
  * record that produces none anywhere is dropped rather than kept, so an account
  * whose provider moved everything heals itself on the next sweep.
+ *
+ * All of that is for a record that remembers an account. A `scope:
+ * 'collection'` record remembers one calendar and has no rungs: it is read at
+ * Depth:0, and when it has gone the URL typed is asked again — never the home
+ * set or principal around it, which would read calendars nobody named (QA,
+ * 2026-10-10, TT-3513). An expired record goes back through `discover` the same
+ * way, so the passage of time cannot widen it either.
  */
 async function targetsFor(base, key, opts) {
   const known = readLayout(key);
-  if (known) {
+  if (known?.scope === 'collection') {
+    const calendar = await readCollection(known.listRoot, opts);
+    if (calendar) return [calendar];
+    // Gone, or no longer a calendar of events. Back to the URL typed, which
+    // re-scopes to wherever that calendar is now or fails — `discover` cannot
+    // widen a deep URL, so neither can this.
+    forgetLayout(key);
+  } else if (known) {
     const tried = new Set();
+    // Two refusals in a row and the sweep stops here, keeping the record (QA,
+    // 2026-10-10, TT-3455). An account that has stopped letting this login in
+    // used to cost every sweep the whole ladder and then the whole walk — eight
+    // or so credentialed requests every five minutes, each one a failed
+    // attempt in the server's eyes, which is how accounts get locked. The
+    // remembered rungs are still worth one try each: a refusal at the listing
+    // root alone may only mean a collection moved behind a permission.
+    const refusals = [];
+    const refusedTwice = () => {
+      if (refusals.length >= 2) throw refusals[0];
+    };
     for (const root of [known.listRoot, known.homeSet]) {
       if (!root || tried.has(root)) continue;
       tried.add(root);
-      const found = await listCalendarsAt(root, opts);
+      const found = await listCalendarsAt(root, opts, refusals);
+      refusedTwice();
       if (!found) continue;
       if (found.listRoot !== known.listRoot) {
         writeLayout(key, { ...known, listRoot: found.listRoot, at: Date.now() });
@@ -1028,10 +1488,13 @@ async function targetsFor(base, key, opts) {
         homeSet = hrefUnder(discoveryDocument(res), res.url, 'calendar-home-set');
       } catch (err) {
         if (isCredentialVerdict(err)) throw err;
+        if (wasRefused(err)) refusals.push(err);
+        refusedTwice();
         dav.debug(`the remembered principal at ${hostOf(known.principal)} failed: ${err.message}`);
       }
       if (homeSet && !tried.has(homeSet)) {
-        const found = await listCalendarsAt(homeSet, opts);
+        const found = await listCalendarsAt(homeSet, opts, refusals);
+        refusedTwice();
         if (found) {
           writeLayout(key, { ...known, homeSet, listRoot: found.listRoot, at: Date.now() });
           return found.calendars;
@@ -1045,9 +1508,12 @@ async function targetsFor(base, key, opts) {
   const found = await discover({ url: base, ...opts });
   if (found.listRoot) {
     writeLayout(key, {
+      scope: found.scope,
       listRoot: found.listRoot,
-      principal: found.principal,
-      homeSet: found.homeSet,
+      // A single calendar has no rungs: walking up from it is the widening
+      // TT-3513 removed, so there is nothing above it worth remembering.
+      principal: found.scope === 'account' ? found.principal : null,
+      homeSet: found.scope === 'account' ? found.homeSet : null,
       at: Date.now(),
     });
   }
@@ -1079,6 +1545,9 @@ export async function fetchRange({ url, user, pass, from, to, timeoutMs = DEFAUL
 
   const key = accountKey(base, user);
   const targets = await targetsFor(base, key, opts);
+  // Not an empty calendar: an empty list here is a complete snapshot, and it
+  // would remove what was stored for this source (QA, 2026-10-10, TT-3513).
+  if (targets.notEvents) throw taskListError(base);
   if (!targets.length) {
     dav.warn(`no calendar collections found at ${hostOf(base)}`);
     return targets;
@@ -1131,16 +1600,32 @@ export async function fetchRange({ url, user, pass, from, to, timeoutMs = DEFAUL
 
 /**
  * Probe a calendar account without changing anything.
- * -> {ok, calendars:[{href, name}], error}
+ * -> {ok, calendars:[{href, name}], error, suggestions?}
+ * `suggestions` ([{href, name}]) comes back only when a calendar URL deeper
+ * than the account address failed and the account address could name what it
+ * reads instead (QA, 2026-10-10, TT-3513). `zelos doctor` calls this too, so
+ * it gets that explain walk as well — a one-off per failing calendar, at the
+ * person's request, never something a sweep repeats.
  */
 export async function testConnection({ url, user, pass, timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
   try {
-    const { calendars } = await discover({ url, user, pass, timeoutMs, signal });
+    // `explain`: a failing calendar URL names what the account can read instead.
+    // Test only — the sweep never pays for it (QA, 2026-10-10, TT-3513).
+    const { calendars } = await discover({ url, user, pass, timeoutMs, signal, explain: true });
+    if (calendars.notEvents) throw taskListError(normalizeUrl(url));
     if (!calendars.length) {
       return { ok: false, calendars: [], error: `Connected to ${hostOf(normalizeUrl(url))} but found no calendars.` };
     }
     return { ok: true, calendars: calendars.map((c) => ({ href: c.href, name: c.name })), error: null };
   } catch (err) {
-    return { ok: false, calendars: [], error: err?.message || String(err) };
+    return {
+      ok: false,
+      calendars: [],
+      error: err?.message || String(err),
+      ...(err?.suggestions ? { suggestions: err.suggestions } : {}),
+      // The address, not the password — doctor's advice turns on it (QA,
+      // 2026-10-10, TT-3455).
+      ...(wasRefused(err) ? { refused: true } : {}),
+    };
   }
 }

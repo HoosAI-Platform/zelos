@@ -18,6 +18,7 @@
 
 import test, { after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -42,7 +43,9 @@ const EXPECTED_AUTH = `Basic ${Buffer.from(`${USER}:${PASS}`, 'utf8').toString('
 
 /**
  * Start a mock server. `routes` maps "METHOD /path" to a handler that returns
- * {status, body, headers} — or a plain string, meaning 207 + XML.
+ * {status, body, headers} — or a plain string, meaning 207 + XML, or
+ * {hang: true}, meaning no answer at all. A handler is passed the request body
+ * and its Depth header.
  * Every request is recorded for assertions.
  */
 async function startServer(routes, { requireAuth = true } = {}) {
@@ -75,7 +78,8 @@ async function startServer(routes, { requireAuth = true } = {}) {
         return;
       }
 
-      const result = typeof route === 'function' ? route({ body }) : route;
+      const result = typeof route === 'function' ? route({ body, depth: req.headers.depth ?? null }) : route;
+      if (result?.hang) return; // never answered: the client's deadline is what ends it
       if (typeof result === 'string') {
         res.writeHead(207, { 'content-type': 'application/xml; charset=utf-8' });
         res.end(result);
@@ -797,13 +801,21 @@ test('a remembered layout that stops working falls back to the full walk', async
  * the user typed. Remembering them and never reading them back would be two
  * strings that cost a write and bought nothing.
  *
- * The layout here is the one a person creates by pasting the address of a
- * single calendar into Settings: the listing root is that collection, and the
- * home set is somewhere else entirely.
+ * These rungs belong to an account, so the URL typed here names one: `/dav/`
+ * sits above the home set, which is how a person who pastes their server's DAV
+ * root asks for every calendar under it. The listing root is that address and
+ * the home set is somewhere below it.
+ *
+ * This layout used to be built from the address of a single calendar, with the
+ * home set "somewhere else entirely" — and that was the bug, not the fixture. A
+ * typed calendar walking up to the home set beside it reads calendars nobody
+ * named; a single-calendar record has no rungs at all now (QA, 2026-10-10,
+ * TT-3513), and its own tests are under "A typed URL is read for what it
+ * names", below.
  */
 const MOVED_PRINCIPAL = `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">
- <d:response><d:href>/dav/one/</d:href>
+ <d:response><d:href>/dav/</d:href>
   <d:propstat>
    <d:prop><d:current-user-principal><d:href>/dav/principals/nemo/</d:href></d:current-user-principal></d:prop>
    <d:status>HTTP/1.1 200 OK</d:status>
@@ -845,7 +857,7 @@ test('a collection that moved is found from the remembered home set, not by walk
   const mock = await startServer({
     // Depth:0 asks who I am; Depth:1 asks what is here. Same path, so the body
     // is what tells them apart.
-    'PROPFIND /dav/one/': ({ body }) => {
+    'PROPFIND /dav/': ({ body }) => {
       if (body.includes('current-user-principal')) return MOVED_PRINCIPAL;
       return oneLists ? listingDoc('/dav/one/', 'The one calendar', 'one/1') : GONE;
     },
@@ -855,9 +867,9 @@ test('a collection that moved is found from the remembered home set, not by walk
   });
   t.after(() => mock.close());
 
-  const sweep = () => fetchRange({ url: `${mock.origin}/dav/one/`, user: USER, pass: PASS });
+  const sweep = () => fetchRange({ url: `${mock.origin}/dav/`, user: USER, pass: PASS });
 
-  // The home set will not list, so discovery settles on the collection itself —
+  // The home set will not list, so discovery settles on the address typed —
   // which is how the listing root and the home set come to be different URLs.
   assert.equal((await sweep()).length, 1);
 
@@ -869,7 +881,7 @@ test('a collection that moved is found from the remembered home set, not by walk
   assert.equal((await sweep()).length, 1, 'a moved collection lost the sweep its calendars');
   assert.deepEqual(
     propfinds(mock),
-    ['/dav/one/', '/dav/home/nemo/'],
+    ['/dav/', '/dav/home/nemo/'],
     'the remembered home set was never asked; the whole walk ran instead',
   );
 
@@ -884,7 +896,7 @@ test('a home set that moved is found from the remembered principal', async (t) =
   let homeSet = '/dav/home/nemo/';
 
   const mock = await startServer({
-    'PROPFIND /dav/one/': ({ body }) => (body.includes('current-user-principal') ? MOVED_PRINCIPAL : GONE),
+    'PROPFIND /dav/': ({ body }) => (body.includes('current-user-principal') ? MOVED_PRINCIPAL : GONE),
     'PROPFIND /dav/principals/nemo/': () => homeSetDoc(homeSet),
     'PROPFIND /dav/home/nemo/': () =>
       (homeSet === '/dav/home/nemo/' ? listingDoc('/dav/home/nemo/personal/', 'Personal', 'h1/1') : GONE),
@@ -893,7 +905,7 @@ test('a home set that moved is found from the remembered principal', async (t) =
   });
   t.after(() => mock.close());
 
-  const sweep = () => fetchRange({ url: `${mock.origin}/dav/one/`, user: USER, pass: PASS });
+  const sweep = () => fetchRange({ url: `${mock.origin}/dav/`, user: USER, pass: PASS });
   assert.equal((await sweep()).length, 1);
 
   // The account is migrated to a new home set. The principal is the one URL a
@@ -1077,7 +1089,7 @@ test('a remembered home set on the other origin does not end the sweep either', 
   let homeSet = `${partition.origin}/1472538/calendars/`;
 
   const front = await startServer({
-    'PROPFIND /dav/one/': ({ body }) => {
+    'PROPFIND /': ({ body }) => {
       if (body.includes('current-user-principal')) return MOVED_PRINCIPAL;
       return listAtOne ? listingDoc('/dav/one/', 'The one calendar', 'one/1') : GONE;
     },
@@ -1087,11 +1099,12 @@ test('a remembered home set on the other origin does not end the sweep either', 
   });
   t.after(() => front.close());
 
-  const sweep = () => fetchRange({ url: `${front.origin}/dav/one/`, user: USER, pass: PASS });
+  const sweep = () => fetchRange({ url: front.origin, user: USER, pass: PASS });
 
   // The home set is on the other origin and will not talk to an anonymous
-  // caller, so discovery settles on the collection itself — and remembers a
-  // record whose home set is a host it may never authenticate to.
+  // caller, so discovery settles on the address typed — the account address,
+  // as it is for iCloud — and remembers a record whose home set is a host it
+  // may never authenticate to.
   assert.equal((await sweep()).length, 1);
 
   // Then the provider empties that collection and moves the home set back onto
@@ -1102,9 +1115,647 @@ test('a remembered home set on the other origin does not end the sweep either', 
   homeSet = '/dav/home/nemo/';
   front.requests.length = 0;
   assert.equal((await sweep()).length, 1, 'the anonymous 401 on the remembered home set ended the sweep');
-  assert.deepEqual(propfinds(front), ['/dav/one/', '/dav/principals/nemo/', '/dav/home/nemo/']);
+  assert.deepEqual(propfinds(front), ['/', '/dav/principals/nemo/', '/dav/home/nemo/']);
   for (const r of partition.requests) {
     assert.equal(r.auth, null, 'the pin still spends the password on exactly one origin');
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * A typed URL is read for what it names
+ * ------------------------------------------------------------------ */
+
+/**
+ * Radicale answers current-user-principal on any resource it is asked about,
+ * as RFC 5397 servers do. Discovery used to take that answer as its cue to
+ * walk to the home set and list it, so the address of one calendar read every
+ * calendar in the account and handed the model appointments from calendars
+ * nobody had pointed Zelos at (QA, 2026-10-10, TT-3513). The single-calendar
+ * test near the top of this file passed all along only because its mock 404s
+ * current-user-principal — which Radicale, Sabre and Nextcloud never do.
+ *
+ * These fixtures are Radicale's own shape: a default DAV: namespace, `C:` and
+ * `CS:` prefixes, and a principal that is its own home set (`/nemo/`).
+ */
+const RAD_NS = 'xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/" xmlns:CR="urn:ietf:params:xml:ns:carddav"';
+
+const radResponse = (href, props) => `
+ <response><href>${href}</href>
+  <propstat><prop>${props}</prop><status>HTTP/1.1 200 OK</status></propstat>
+ </response>`;
+
+const radDoc = (...responses) => `<?xml version="1.0"?>\n<multistatus ${RAD_NS}>${responses.join('')}\n</multistatus>`;
+
+const RAD_WHOAMI = '<current-user-principal><href>/nemo/</href></current-user-principal>';
+
+const radCalendar = (href, name, ctag, comps = ['VEVENT']) => radResponse(
+  href,
+  `<resourcetype><collection/><C:calendar/></resourcetype><displayname>${name}</displayname>` +
+    `<C:supported-calendar-component-set>${comps.map((c) => `<C:comp name="${c}"/>`).join('')}</C:supported-calendar-component-set>` +
+    `<CS:getctag>${ctag}</CS:getctag>${RAD_WHOAMI}`,
+);
+
+const RAD_PERSONAL = radDoc(radCalendar('/nemo/personal/', 'Personal', '"personal-1"'));
+
+const WORK_ICS = EVENT_ICS.replace('UID:cd-1@example.test', 'UID:work-1@example.test').replace('Kickoff with Marcus & co', 'Work standup');
+
+/**
+ * A Radicale account: Personal and Work, an addressbook and a task list, all
+ * under the home set `/nemo/`. `personal` can be swapped for a handler that
+ * fails, so the cache tests can make the one remembered calendar misbehave.
+ */
+function radicaleRoutes({ personal = () => RAD_PERSONAL } = {}) {
+  return {
+    'PROPFIND /nemo/': ({ body, depth }) => {
+      if (body.includes('calendar-home-set')) return radDoc(radResponse('/nemo/', '<C:calendar-home-set><href>/nemo/</href></C:calendar-home-set>'));
+      if (depth === '0') return radDoc(radResponse('/nemo/', `<resourcetype><collection/><principal/></resourcetype>${RAD_WHOAMI}`));
+      return radDoc(
+        radResponse('/nemo/', '<resourcetype><collection/><principal/></resourcetype>'),
+        radCalendar('/nemo/personal/', 'Personal', '"personal-1"'),
+        radCalendar('/nemo/work/', 'Work', '"work-1"'),
+        radCalendar('/nemo/tasks/', 'Tasks', '"tasks-1"', ['VTODO']),
+        radResponse('/nemo/contacts/', '<resourcetype><collection/><CR:addressbook/></resourcetype>'),
+      );
+    },
+    'PROPFIND /nemo/personal/': personal,
+    'PROPFIND /nemo/personal': personal,
+    'PROPFIND /nemo/tasks/': () => radDoc(radCalendar('/nemo/tasks/', 'Tasks', '"tasks-1"', ['VTODO'])),
+    'PROPFIND /nemo/contacts/': () => radDoc(radResponse('/nemo/contacts/', `<resourcetype><collection/><CR:addressbook/></resourcetype>${RAD_WHOAMI}`)),
+    'PROPFIND /nemo/personal/e0.ics': () => radDoc(radResponse('/nemo/personal/e0.ics', `<resourcetype/>${RAD_WHOAMI}`)),
+    'REPORT /nemo/personal/': () => reportBody([EVENT_ICS]),
+    'REPORT /nemo/work/': () => reportBody([WORK_ICS]),
+  };
+}
+
+const listedHomeSet = (mock) => mock.requests.some((r) => r.method === 'PROPFIND' && r.path === '/nemo/' && r.depth === '1');
+const depth1 = (mock) => mock.requests.filter((r) => r.method === 'PROPFIND' && r.depth === '1').map((r) => r.path);
+
+test('a typed calendar URL is that calendar, from one Depth:0 request', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const result = await discover({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS });
+  assert.deepEqual(result.calendars.map((c) => c.name), ['Personal'], 'the rest of the account was read too');
+  assert.equal(result.calendars[0].ctag, '"personal-1"', 'the one request carries what a sweep needs');
+  assert.deepEqual(
+    mock.requests.map((r) => [r.method, r.path, r.depth]),
+    [['PROPFIND', '/nemo/personal/', '0']],
+    'nothing after the probe: not the principal, not the home set',
+  );
+  assert.match(mock.requests[0].body, /resourcetype/);
+  assert.match(mock.requests[0].body, /getctag/);
+
+  const probe = await testConnection({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS });
+  assert.equal(probe.ok, true);
+  assert.deepEqual(probe.calendars.map((c) => c.name), ['Personal']);
+});
+
+test('two sweeps of a typed calendar: one Depth:0 each, and never a Depth:1', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS });
+  const first = await sweep();
+  assert.equal(first.length, 1);
+  assert.ok(first.every((doc) => !doc.includes('Work standup')), 'another calendar\'s appointments were read');
+  assert.deepEqual(reports(mock), ['/nemo/personal/']);
+
+  mock.requests.length = 0;
+  const second = await sweep();
+  assert.deepEqual(second, first);
+  assert.deepEqual(
+    mock.requests.map((r) => [r.method, r.path, r.depth]),
+    [['PROPFIND', '/nemo/personal/', '0']],
+    'the second sweep re-reads the one calendar at Depth:0 and the unchanged ctag skips its REPORT',
+  );
+  assert.equal(listedHomeSet(mock), false);
+});
+
+test('a typed calendar URL without its trailing slash is still just that calendar', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const result = await discover({ url: `${mock.origin}/nemo/personal`, user: USER, pass: PASS });
+  assert.deepEqual(result.calendars.map((c) => c.name), ['Personal']);
+  assert.equal(mock.requests.length, 1);
+
+  const docs = await fetchRange({ url: `${mock.origin}/nemo/personal`, user: USER, pass: PASS });
+  assert.equal(docs.length, 1);
+  assert.deepEqual(depth1(mock), [], 'the calendar was listed rather than read at Depth:0');
+  assert.equal(listedHomeSet(mock), false);
+});
+
+test('a remembered calendar that 404s is re-scoped from the URL typed, never from the home set', async (t) => {
+  let gone = false;
+  const mock = await startServer(radicaleRoutes({ personal: () => (gone ? GONE : RAD_PERSONAL) }));
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS });
+  await sweep();
+
+  gone = true;
+  mock.requests.length = 0;
+  await assert.rejects(sweep, /HTTP 404/);
+  assert.deepEqual(
+    propfinds(mock),
+    ['/nemo/personal/', '/nemo/personal/'],
+    'the remembered calendar, then the URL typed — and nothing wider',
+  );
+  assert.equal(mock.requests.some((r) => r.path === '/nemo/'), false, 'the home set was asked after all');
+  assert.deepEqual(reports(mock), []);
+});
+
+test('a timeout, a 5xx or an unclassifiable answer keeps the calendar record', async (t) => {
+  let mode = 'ok';
+  const mock = await startServer(radicaleRoutes({
+    personal: () => {
+      if (mode === '5xx') return { status: 503, body: 'Service Unavailable' };
+      if (mode === 'hang') return { hang: true };
+      if (mode === 'bare') return radDoc(radResponse('/nemo/personal/', '<displayname>Personal</displayname>'));
+      return RAD_PERSONAL;
+    },
+  }));
+  t.after(() => {
+    mock.server.closeAllConnections();
+    return mock.close();
+  });
+
+  const sweep = () => fetchRange({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS, timeoutMs: 300 });
+  await sweep();
+
+  for (const failure of ['5xx', 'hang', 'bare']) {
+    mode = failure;
+    mock.requests.length = 0;
+    await assert.rejects(sweep, undefined, `${failure} was read as an empty calendar`);
+    assert.equal(mock.requests.length, 1, `${failure}: one request, and no rediscovery behind it`);
+  }
+
+  mode = 'ok';
+  mock.requests.length = 0;
+  assert.equal((await sweep()).length, 1);
+  assert.deepEqual(propfinds(mock), ['/nemo/personal/']);
+  assert.doesNotMatch(mock.requests[0].body, /current-user-principal/, 'the record was dropped and discovery ran again');
+});
+
+test('an expired calendar record goes back through discovery, which cannot widen it', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS });
+  await sweep();
+
+  const now = Date.now();
+  t.mock.method(Date, 'now', () => now + 7 * 60 * 60 * 1000);
+  mock.requests.length = 0;
+  assert.equal((await sweep()).length, 1);
+  assert.deepEqual(propfinds(mock), ['/nemo/personal/']);
+  assert.match(mock.requests[0].body, /current-user-principal/, 'the expired record was used rather than rediscovered');
+  assert.equal(listedHomeSet(mock), false);
+});
+
+test('a typed home set, principal or address above the home set still reads the account', async (t) => {
+  const radicale = await startServer(radicaleRoutes());
+  t.after(() => radicale.close());
+
+  const home = await discover({ url: `${radicale.origin}/nemo/`, user: USER, pass: PASS });
+  assert.deepEqual(home.calendars.map((c) => c.name), ['Personal', 'Work'], 'Radicale: the principal is the home set');
+  assert.equal(listedHomeSet(radicale), true);
+
+  const nextcloud = await startServer({
+    'PROPFIND /remote.php/dav/': NEXTCLOUD_PRINCIPAL,
+    'PROPFIND /remote.php/dav/principals/users/nemo/': ({ body }) =>
+      (body.includes('calendar-home-set')
+        ? NEXTCLOUD_HOME
+        : `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+ <d:response><d:href>/remote.php/dav/principals/users/nemo/</d:href>
+  <d:propstat><d:prop>
+   <d:resourcetype><d:principal/></d:resourcetype>
+   <d:current-user-principal><d:href>/remote.php/dav/principals/users/nemo/</d:href></d:current-user-principal>
+  </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+</d:multistatus>`),
+    'PROPFIND /remote.php/dav/calendars/nemo/': NEXTCLOUD_COLLECTIONS,
+  });
+  t.after(() => nextcloud.close());
+
+  for (const typed of ['/remote.php/dav/principals/users/nemo/', '/remote.php/dav/']) {
+    const found = await discover({ url: `${nextcloud.origin}${typed}`, user: USER, pass: PASS });
+    assert.deepEqual(found.calendars.map((c) => c.name), ['Personal & family', 'work'], typed);
+    assert.equal(found.scope, 'account', typed);
+  }
+});
+
+test('a typed addressbook or single event never lists the home set beside it', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  for (const typed of ['/nemo/contacts/', '/nemo/personal/e0.ics']) {
+    mock.requests.length = 0;
+    const probe = await testConnection({ url: `${mock.origin}${typed}`, user: USER, pass: PASS });
+    assert.equal(probe.ok, false, `${typed} read the account's calendars`);
+    assert.match(probe.error, /found no calendars/);
+    assert.equal(listedHomeSet(mock), false, `${typed}: the home set was listed`);
+    assert.deepEqual(depth1(mock), [typed], `${typed}: only the URL typed is listed`);
+  }
+});
+
+test('a typed task list says it is a task list, in Test and in the sweep', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const url = `${mock.origin}/nemo/tasks/`;
+  const probe = await testConnection({ url, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /that address is a task list, not a calendar of events/);
+  assert.equal(mock.requests.length, 1);
+
+  // An empty list from the sweep would be a complete, empty snapshot — and
+  // would remove whatever was stored for this source.
+  mock.requests.length = 0;
+  await assert.rejects(
+    () => fetchRange({ url, user: USER, pass: PASS }),
+    /that address is a task list, not a calendar of events/,
+  );
+  assert.equal(mock.requests.length, 1);
+});
+
+test('a typed principal or home set is the account however its @ is spelled', async (t) => {
+  // Cyrus and Fastmail write the @ of a principal as %40 in every href; a
+  // person types it as @. Compared as different resources, the typed principal
+  // stopped counting as the account and the sweep came back empty.
+  const enc = 'nemo%40example.test';
+  const fastmail = (inner) => `<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">${inner}</D:multistatus>`;
+  const whoami = `<D:current-user-principal><D:href>/dav/principals/user/${enc}/</D:href></D:current-user-principal>`;
+  const selfAs = (href, type) => fastmail(`<D:response><D:href>${href}</D:href><D:propstat><D:prop><D:resourcetype>${type}</D:resourcetype>${whoami}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`);
+  const homeSet = fastmail(`<D:response><D:href>/dav/principals/user/${enc}/</D:href><D:propstat><D:prop><C:calendar-home-set><D:href>/dav/calendars/user/${enc}/</D:href></C:calendar-home-set></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`);
+  const listing = fastmail(['personal', 'work'].map((id) => `<D:response><D:href>/dav/calendars/user/${enc}/${id}/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/><C:calendar/></D:resourcetype><D:displayname>${id}</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`).join(''));
+  const principal = ({ body }) => (body.includes('calendar-home-set') ? homeSet : selfAs(`/dav/principals/user/${enc}/`, '<D:principal/>'));
+  const home = ({ depth }) => (depth === '1' ? listing : selfAs(`/dav/calendars/user/${enc}/`, '<D:collection/>'));
+  const mock = await startServer({
+    'PROPFIND /dav/principals/user/nemo@example.test/': principal,
+    [`PROPFIND /dav/principals/user/${enc}/`]: principal,
+    'PROPFIND /dav/calendars/user/nemo@example.test/': home,
+    [`PROPFIND /dav/calendars/user/${enc}/`]: home,
+  });
+  t.after(() => mock.close());
+
+  for (const typed of ['/dav/principals/user/nemo@example.test/', '/dav/calendars/user/nemo@example.test/']) {
+    const found = await discover({ url: `${mock.origin}${typed}`, user: USER, pass: PASS });
+    assert.deepEqual(found.calendars.map((c) => c.name), ['personal', 'work'], typed);
+    assert.equal(found.scope, 'account', typed);
+  }
+});
+
+test('a signed-in URL that holds nothing is not an empty snapshot', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const docs = await fetchRange({ url: `${mock.origin}/nemo/contacts/`, user: USER, pass: PASS });
+  assert.deepEqual([...docs], []);
+  assert.equal(docs.incomplete, true, 'an empty answer here would empty the source');
+});
+
+test('a calendar found only by listing an unclassifiable URL is rediscovered, not remembered', async (t) => {
+  // This server never sends a resource type at Depth:0, only in a listing. A
+  // remembered calendar is re-read at Depth:0, so remembering it would fail
+  // every sweep until the record expired.
+  const single = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">
+ <d:response><d:href>/dav/calendars/personal/</d:href>
+  <d:propstat><d:prop><d:resourcetype><d:collection/><cal:calendar/></d:resourcetype><d:displayname>Just this one</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+</d:multistatus>`;
+  const bare = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/calendars/personal/</d:href><d:propstat><d:prop><d:displayname>Just this one</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`;
+  const mock = await startServer({
+    'PROPFIND /dav/calendars/personal/': ({ depth }) => (depth === '1' ? single : bare),
+    'REPORT /dav/calendars/personal/': () => reportBody([EVENT_ICS]),
+  });
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: `${mock.origin}/dav/calendars/personal/`, user: USER, pass: PASS });
+  assert.equal((await sweep()).length, 1);
+  mock.requests.length = 0;
+  assert.equal((await sweep()).length, 1, 'the remembered calendar would not say what it was');
+  assert.match(mock.requests[0].body, /current-user-principal/, 'the second sweep rediscovers');
+});
+
+test('Test names what the account can read when a calendar URL fails; the sweep does not look', async (t) => {
+  const mock = await startServer({
+    ...NEXTCLOUD_ROUTES,
+    'PROPFIND /apps/calendar/personal': { status: 405, body: 'Method Not Allowed' },
+  });
+  t.after(() => mock.close());
+
+  const url = `${mock.origin}/apps/calendar/personal`;
+  const probe = await testConnection({ url, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /HTTP 405/, 'the failure at the URL typed is still the error');
+  assert.match(probe.error, /this account can read: Personal & family, work\./);
+  assert.ok(probe.error.includes(`or ${mock.origin}/ to read all of them`));
+  assert.deepEqual(probe.suggestions.map((c) => c.name), ['Personal & family', 'work']);
+  assert.deepEqual(probe.calendars, [], 'suggestions are named, never returned as calendars');
+  assert.deepEqual(reports(mock), []);
+  const cacheDir = path.join(HOME, 'cache', 'caldav');
+  assert.deepEqual(fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [], [], 'and never remembered');
+
+  mock.requests.length = 0;
+  await assert.rejects(
+    () => fetchRange({ url, user: USER, pass: PASS }),
+    (err) => {
+      assert.match(err.message, /HTTP 405/);
+      assert.doesNotMatch(err.message, /this account can read/);
+      assert.equal(err.suggestions, undefined);
+      return true;
+    },
+  );
+  assert.equal(mock.requests.length, 1, 'a failing calendar URL costs the sweep one request');
+});
+
+test('a web page at a calendar URL is explained; a URL that never answers is not', async (t) => {
+  let deep = 'html';
+  const mock = await startServer({
+    ...NEXTCLOUD_ROUTES,
+    'PROPFIND /apps/calendar/personal': () => {
+      if (deep === 'hang') return { hang: true };
+      if (deep === '503') return { status: 503, body: 'Service Unavailable' };
+      return { status: 200, headers: { 'content-type': 'text/html' }, body: '<!doctype html><html><body>Calendar</body></html>' };
+    },
+  });
+  t.after(() => {
+    mock.server.closeAllConnections();
+    return mock.close();
+  });
+  const url = `${mock.origin}/apps/calendar/personal`;
+
+  // A 200 HTML page fails to parse and carries no HTTP status of its own — and
+  // it is the commonest wrong address there is: the web UI's.
+  const page = await testConnection({ url, user: USER, pass: PASS, timeoutMs: 300 });
+  assert.equal(page.ok, false);
+  assert.match(page.error, /this account can read: Personal & family, work\./);
+
+  // No answer, or a struggling server: the walk would only wait on it again.
+  for (const failure of ['hang', '503']) {
+    deep = failure;
+    mock.requests.length = 0;
+    const probe = await testConnection({ url, user: USER, pass: PASS, timeoutMs: 300 });
+    assert.equal(probe.ok, false);
+    assert.doesNotMatch(probe.error, /can read/, failure);
+    assert.equal(mock.requests.length, 1, `${failure}: the account address was walked anyway`);
+  }
+
+  const dead = await startServer({});
+  const deadOrigin = dead.origin;
+  await dead.close();
+  const probe = await testConnection({ url: `${deadOrigin}/apps/calendar/personal`, user: USER, pass: PASS, timeoutMs: 2000 });
+  assert.match(probe.error, /could not reach/);
+  assert.doesNotMatch(probe.error, /can read/);
+});
+
+test('explaining a failed calendar URL has one deadline, not one per hop', async (t) => {
+  const mock = await startServer({
+    ...NEXTCLOUD_ROUTES,
+    'PROPFIND /apps/calendar/personal': { status: 405, body: 'Method Not Allowed' },
+    'PROPFIND /': { hang: true },
+    'PROPFIND /.well-known/caldav': NEXTCLOUD_PRINCIPAL,
+  });
+  t.after(() => {
+    mock.server.closeAllConnections();
+    return mock.close();
+  });
+
+  // Per-request deadlines alone would time `/` out and then read the account
+  // from /.well-known: the walk would cost a second deadline to finish.
+  const probe = await testConnection({ url: `${mock.origin}/apps/calendar/personal`, user: USER, pass: PASS, timeoutMs: 300 });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /HTTP 405/);
+  assert.doesNotMatch(probe.error, /can read/, 'the walk ran past its deadline');
+  assert.equal(probe.suggestions, undefined);
+});
+
+test('a 401 while explaining a failed calendar URL is the password verdict', async (t) => {
+  const mock = await startServer({
+    'PROPFIND /apps/calendar/personal': { status: 404, body: 'Not Found' },
+    'PROPFIND /': { status: 401, body: 'Unauthorized' },
+  });
+  t.after(() => mock.close());
+
+  const probe = await testConnection({ url: `${mock.origin}/apps/calendar/personal`, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /rejected the credentials/);
+});
+
+/* ------------------------------------------------------------------ *
+ * A 403 is a refusal, not a wrong password
+ * ------------------------------------------------------------------ */
+
+/**
+ * 401 asks who you are; 403 says it knows, and not this. Radicale answers 403
+ * for another user's calendar with a perfectly good password, and Zelos used to
+ * read that as a verdict on the password — "iCloud and Fastmail need an
+ * app-specific password" — and stop the walk on the spot (QA, 2026-10-10,
+ * TT-3455). Now it is a refusal: it names the address, it does not end a walk
+ * that has other roots to try, and it is never swallowed into an empty result.
+ */
+const radicaleWithRoot = (extra = {}) => ({
+  ...radicaleRoutes(),
+  'PROPFIND /': ({ body }) => (body.includes('current-user-principal') ? radDoc(radResponse('/', `<resourcetype><collection/></resourcetype>${RAD_WHOAMI}`)) : radDoc()),
+  ...extra,
+});
+
+test('another user\'s calendar is refused by address, and Test names what this account can read', async (t) => {
+  const mock = await startServer(radicaleWithRoot({ 'PROPFIND /alice/cal/': { status: 403, body: 'Forbidden' } }));
+  t.after(() => mock.close());
+  const url = `${mock.origin}/alice/cal/`;
+
+  const probe = await testConnection({ url, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.refused, true);
+  assert.match(probe.error, /refused access to \/alice\/cal\/ \(HTTP 403\)/);
+  assert.match(probe.error, /usually not a wrong password/);
+  assert.doesNotMatch(probe.error, /app-specific|rejected the credentials/);
+  assert.match(probe.error, /this account can read: Personal, Work\./);
+  assert.deepEqual(reports(mock), []);
+
+  mock.requests.length = 0;
+  await assert.rejects(() => fetchRange({ url, user: USER, pass: PASS }), (err) => {
+    assert.match(err.message, /refused access to \/alice\/cal\//);
+    assert.doesNotMatch(err.message, /can read/, 'the sweep explains nothing');
+    return true;
+  });
+  assert.equal(mock.requests.length, 1, 'a refused calendar URL costs the sweep one request');
+  assert.deepEqual(reports(mock), []);
+});
+
+test('a 403 at the account address still lets /.well-known find the account', async (t) => {
+  const mock = await startServer({
+    ...NEXTCLOUD_ROUTES,
+    'PROPFIND /': { status: 403, body: 'Forbidden' },
+    'PROPFIND /.well-known/caldav': NEXTCLOUD_PRINCIPAL,
+  });
+  t.after(() => mock.close());
+
+  const found = await discover({ url: mock.origin, user: USER, pass: PASS });
+  assert.deepEqual(found.calendars.map((c) => c.name), ['Personal & family', 'work']);
+});
+
+test('a 403 everywhere is thrown as a refusal naming the address typed', async (t) => {
+  const mock = await startServer({ 'PROPFIND *': { status: 403, body: 'Forbidden' } });
+  t.after(() => mock.close());
+
+  for (const typed of ['/', '/dav/calendars/mine/']) {
+    const probe = await testConnection({ url: `${mock.origin}${typed}`, user: USER, pass: PASS });
+    assert.equal(probe.ok, false, typed);
+    assert.equal(probe.refused, true, typed);
+    assert.ok(probe.error.includes(`refused access to ${typed} (HTTP 403)`), probe.error);
+  }
+});
+
+test('a 401 from a fallback after a 403 is still the password verdict', async (t) => {
+  const mock = await startServer({
+    'PROPFIND /': { status: 403, body: 'Forbidden' },
+    'PROPFIND /.well-known/caldav': { status: 401, body: 'Unauthorized' },
+  });
+  t.after(() => mock.close());
+
+  const probe = await testConnection({ url: mock.origin, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /rejected the credentials/);
+  assert.equal(probe.refused, undefined);
+});
+
+test('a 403 with no username configured asks for one', async (t) => {
+  const mock = await startServer({ 'PROPFIND *': { status: 403, body: 'Forbidden' } }, { requireAuth: false });
+  t.after(() => mock.close());
+
+  const probe = await testConnection({ url: `${mock.origin}/dav/calendars/mine/`, user: '', pass: null });
+  assert.equal(probe.refused, true);
+  assert.match(probe.error, /needs a username and password/);
+  assert.equal(mock.requests[0].auth, null);
+});
+
+test('a 403 on a remembered listing walks the next rung instead of ending the sweep as a password error', async (t) => {
+  let homeRefuses = false;
+  const mock = await startServer({
+    ...NEXTCLOUD_ROUTES,
+    'PROPFIND /remote.php/dav/calendars/nemo/': () => (homeRefuses ? { status: 403, body: 'Forbidden' } : NEXTCLOUD_COLLECTIONS),
+  });
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: mock.origin, user: USER, pass: PASS });
+  await sweep();
+
+  homeRefuses = true;
+  mock.requests.length = 0;
+  await assert.rejects(sweep, (err) => {
+    assert.match(err.message, /refused access to \/remote\.php\/dav\/calendars\/nemo\//);
+    assert.doesNotMatch(err.message, /rejected the credentials/);
+    return true;
+  });
+  assert.deepEqual(
+    propfinds(mock).slice(0, 2),
+    ['/remote.php/dav/calendars/nemo/', '/remote.php/dav/principals/users/nemo/'],
+    'the remembered principal is the next rung',
+  );
+});
+
+test('a 403 at / that /.well-known got past does not stand in for "no calendars"', async (t) => {
+  const mock = await startServer({
+    'PROPFIND /': { status: 403, body: 'Forbidden' },
+    'PROPFIND /.well-known/caldav': NEXTCLOUD_PRINCIPAL,
+    'PROPFIND /remote.php/dav/principals/users/nemo/': NEXTCLOUD_HOME,
+    'PROPFIND /remote.php/dav/calendars/nemo/': NO_COLLECTIONS,
+  });
+  t.after(() => mock.close());
+
+  const probe = await testConnection({ url: mock.origin, user: USER, pass: PASS });
+  assert.equal(probe.ok, false);
+  assert.match(probe.error, /found no calendars/);
+  assert.doesNotMatch(probe.error, /refused/);
+  assert.equal(probe.refused, undefined);
+  assert.equal(
+    mock.requests.some((r) => r.path === '/' && r.depth === '1'),
+    false,
+    'the root that refused its probe was listed anyway',
+  );
+});
+
+test('an account record refused everywhere costs a sweep at most three requests', async (t) => {
+  let refuse = false;
+  const forbidden = { status: 403, body: 'Forbidden' };
+  const routes = Object.fromEntries(Object.entries(NEXTCLOUD_ROUTES).map(([k, v]) => [k, (req) => (refuse ? forbidden : typeof v === 'function' ? v(req) : v)]));
+  const mock = await startServer({ ...routes, 'PROPFIND *': () => forbidden });
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: mock.origin, user: USER, pass: PASS });
+  await sweep();
+
+  refuse = true;
+  for (let i = 0; i < 2; i++) {
+    mock.requests.length = 0;
+    await assert.rejects(sweep, /refused access/);
+    assert.ok(mock.requests.length <= 3, `sweep ${i + 1} made ${mock.requests.length} requests`);
+  }
+});
+
+test('a remembered calendar that starts refusing is re-scoped, then reported as refused', async (t) => {
+  let refuses = false;
+  const mock = await startServer(radicaleRoutes({ personal: () => (refuses ? { status: 403, body: 'Forbidden' } : RAD_PERSONAL) }));
+  t.after(() => mock.close());
+
+  const sweep = () => fetchRange({ url: `${mock.origin}/nemo/personal/`, user: USER, pass: PASS });
+  await sweep();
+
+  refuses = true;
+  mock.requests.length = 0;
+  await assert.rejects(sweep, /refused access to \/nemo\/personal\//);
+  assert.deepEqual(propfinds(mock), ['/nemo/personal/', '/nemo/personal/'], 'the record, then the URL typed');
+
+  mock.requests.length = 0;
+  await assert.rejects(sweep, /refused access/);
+  assert.equal(mock.requests.length, 1, 'the stale record was not kept');
+});
+
+/**
+ * Records written before TT-3513 hold the home set as the listing root of a
+ * typed calendar URL, which is the widening itself. Bumping the schema changes
+ * the key, so they are never found again.
+ */
+function plantRecord({ schema, base, record }) {
+  const key = crypto.createHash('sha256').update([schema, base, USER].join('\n'), 'utf8').digest('hex').slice(0, 32);
+  const dir = path.join(HOME, 'cache', 'caldav');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${key}.json`), JSON.stringify({ schema, ...record, at: Date.now() }));
+}
+
+test('a layout record from before calendar scopes is never read back', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const base = `${mock.origin}/nemo/personal/`;
+  const widened = { listRoot: `${mock.origin}/nemo/`, principal: `${mock.origin}/nemo/`, homeSet: `${mock.origin}/nemo/` };
+  plantRecord({ schema: 1, base, record: widened });
+
+  const docs = await fetchRange({ url: base, user: USER, pass: PASS });
+  assert.equal(docs.length, 1);
+  assert.equal(listedHomeSet(mock), false, 'the v1 record listed the whole home set');
+  assert.deepEqual(propfinds(mock), ['/nemo/personal/']);
+});
+
+test('a layout record without a known scope is not trusted', async (t) => {
+  const mock = await startServer(radicaleRoutes());
+  t.after(() => mock.close());
+
+  const base = `${mock.origin}/nemo/personal/`;
+  const widened = { listRoot: `${mock.origin}/nemo/`, principal: `${mock.origin}/nemo/`, homeSet: `${mock.origin}/nemo/` };
+  for (const scope of [undefined, 'everything']) {
+    invalidate();
+    mock.requests.length = 0;
+    plantRecord({ schema: 2, base, record: { ...widened, scope } });
+    assert.equal((await fetchRange({ url: base, user: USER, pass: PASS })).length, 1);
+    assert.equal(listedHomeSet(mock), false, `scope ${scope}: the record was trusted`);
   }
 });
 
