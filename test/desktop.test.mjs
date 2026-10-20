@@ -69,7 +69,8 @@ it('shutdown retries native quit after Electron clears its reentrant quit guard'
 it('a restart for an update hands off to the installer only after the core has stopped, then quits', async () => {
   /* The Windows installer and the macOS swap script both wait for this
      process to exit, so the shell quits after the hand-off — and quits just
-     the same when the hand-off is refused. */
+     the same when the hand-off is refused, asking first to be started again
+     so a restart with nothing to hand off still comes back (TT-3486). */
   const source = fs.readFileSync(path.join(REPO, 'desktop/main.js'), 'utf8');
   const shutdown = /function beginShutdown\(\) \{[\s\S]*?\n\}/.exec(source)?.[0];
   for (const installs of [true, false]) {
@@ -80,10 +81,46 @@ it('a restart for an update hands off to the installer only after the core has s
       let zelos = { stop: async () => { order.push('core-stop'); } };
       ${shutdown}
       beginShutdown();
-    `, { order, installs, setImmediate, clearTimeout, app: { quit: () => order.push('quit') } });
+    `, { order, installs, setImmediate, clearTimeout, app: { quit: () => order.push('quit'), relaunch: () => order.push('relaunch') } });
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(order, ['updater-stop', 'core-stop', 'install', 'quit'], `install ${installs}`);
+    assert.deepEqual(order, installs
+      ? ['updater-stop', 'core-stop', 'install', 'quit']
+      : ['updater-stop', 'core-stop', 'install', 'relaunch', 'quit'], `install ${installs}`);
+  }
+});
+
+it('an installer that cannot start brings Zelos back rather than leaving it closed', async () => {
+  /* (QA, 2026-10-10, TT-3486) The failure handler was empty, so Restart to
+     update with an installer that would not start quit and stayed quit. The
+     two ways it fails: a check that throws inside install(), and a spawn that
+     reports its error a tick later — after install() has returned true and
+     the quit has been asked for, but before the process has gone. */
+  const source = fs.readFileSync(path.join(REPO, 'desktop/main.js'), 'utf8');
+  const shutdown = /function beginShutdown\(\) \{[\s\S]*?\n\}/.exec(source)?.[0];
+  for (const when of ['at once', 'a tick later']) {
+    const order = [];
+    vm.runInNewContext(`
+      let shuttingDown = null, crashTimer = null, windowState = null, installAfterShutdown = true;
+      let updater = { stop: () => {}, install: ({ onFailure }) => {
+        order.push('install');
+        const fail = () => onFailure(new Error('spawn EACCES'));
+        if (when === 'at once') { fail(); return false; }
+        nextTick(fail);
+        return true;
+      } };
+      let zelos = { stop: async () => {} };
+      ${shutdown}
+      beginShutdown();
+    `, {
+      order, when, setImmediate, clearTimeout, nextTick: process.nextTick,
+      app: { quit: () => order.push('quit'), relaunch: () => order.push('relaunch') },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(order.filter((x) => x === 'relaunch').length, 1,
+      `${when}: relaunched ${order.filter((x) => x === 'relaunch').length} times, not once (${order}); each call starts a copy`);
+    assert.ok(order.includes('quit'), `${when}: it still has to leave for the relaunch to happen`);
   }
 });
 

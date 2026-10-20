@@ -1188,9 +1188,23 @@ function beginShutdown() {
       // or an idle core can stop while the second app.quit is ignored.
       // A restart for an update first hands off to the installer (Windows)
       // or the swap script (macOS); both wait for this process to exit, so
-      // the quit follows either way.
+      // the quit follows either way. A restart whose installer or swap does
+      // not start, or that has nothing to hand off, brings Zelos back instead
+      // of leaving it closed with no word; the relaunch's check of the attempt
+      // file then says the update did not install (QA, 2026-10-10, TT-3486).
+      // A spawn reports its failure on a later tick, still before this quit
+      // has finished, which is all app.relaunch needs. Once only: each call
+      // starts another copy.
       setImmediate(() => {
-        if (installAfterShutdown) updater?.install({ onFailure: () => {} });
+        if (installAfterShutdown) {
+          let relaunched = false;
+          const relaunch = () => {
+            if (relaunched) return;
+            relaunched = true;
+            app.relaunch();
+          };
+          if (updater?.install({ onFailure: relaunch }) !== true) relaunch();
+        }
         app.quit();
       });
     }
