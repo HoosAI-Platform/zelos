@@ -1698,6 +1698,29 @@ test('the walk up is bounded by `attempts`, and gives up rather than landing any
   assert.equal(server.address(), null, 'it bound something after reporting that it could not');
 });
 
+/**
+ * ZELOS_PORT=0 means "any free port", as `--port 0` does and as the desktop
+ * shell reads it. `Number(env) || DEFAULT_PORT` used to read the 0 as unset and
+ * walk up from 7777, so the CLI and the app disagreed about one setting
+ * (QA, 2026-10-10, TT-3499). An ephemeral port is never in 7777's walk.
+ */
+test('ZELOS_PORT=0 asks for any free port, not 7777', async (t) => {
+  const before = process.env.ZELOS_PORT;
+  t.after(() => {
+    if (before === undefined) delete process.env.ZELOS_PORT;
+    else process.env.ZELOS_PORT = before;
+  });
+  process.env.ZELOS_PORT = '0';
+  const server = unboundServer(t);
+
+  const bound = await listen(server);
+
+  assert.ok(
+    bound.port < 7777 || bound.port > 7777 + 20,
+    `expected an OS-assigned port outside 7777's walk, got ${bound.port}`,
+  );
+});
+
 test('the server binds 127.0.0.1, not every interface', async (t) => {
   const ctx = await startServer(t);
   assert.equal(ctx.server.address().address, '127.0.0.1');

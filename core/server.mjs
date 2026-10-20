@@ -3606,6 +3606,20 @@ export function createServer({
  * ------------------------------------------------------------------ */
 
 /**
+ * The port `$ZELOS_PORT` asks for, or DEFAULT_PORT when it is unset or not a
+ * port. 0 is a port here, "any free one", exactly as `--port 0` is and as the
+ * desktop shell reads the same variable; `Number(raw) || DEFAULT_PORT` used to
+ * turn it into 7777, so one setting meant two things depending on which way
+ * Zelos was launched (QA, 2026-10-10, TT-3499).
+ */
+function portFromEnv() {
+  const raw = process.env.ZELOS_PORT;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_PORT;
+  const port = Number(raw);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : DEFAULT_PORT;
+}
+
+/**
  * Bind 127.0.0.1, walking up from `port` until a free one is found. Resolves
  * `{port, host, url, tokenUrl}` — `url` is the bare origin; `tokenUrl` is the
  * one that carries the session token, and it is the only way into the app.
@@ -3613,7 +3627,7 @@ export function createServer({
  * a one-shot handoff), never the bare origin.
  */
 export function listen(server, {
-  port = Number(process.env.ZELOS_PORT) || DEFAULT_PORT,
+  port = portFromEnv(),
   host = HOST,
   attempts = 20,
 } = {}) {
