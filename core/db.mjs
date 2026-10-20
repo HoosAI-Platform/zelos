@@ -1440,6 +1440,18 @@ export function reindex(db) {
   });
 }
 
+/**
+ * `id -> source_id` for the given message ids, in one query and without the
+ * bodies: what the server needs to say where each cited message came from
+ * (TT-3515). Ids that name no message are simply absent.
+ */
+export function messageSourceIds(db, ids) {
+  const list = [...new Set((ids || []).filter((id) => typeof id === 'string' && id))];
+  if (!list.length) return new Map();
+  const rows = prep(db, 'SELECT id, source_id FROM messages WHERE id IN (SELECT value FROM json_each(?))').all(JSON.stringify(list));
+  return new Map(rows.map((r) => [r.id, r.source_id]));
+}
+
 /** Resolve "msg:<id>" / "evt:<id>" / "item:<id>" / "cap:<id>" to its row. */
 export function resolveRef(db, ref) {
   const m = /^(msg|evt|item|cap):(.+)$/.exec(str(ref));

@@ -3796,10 +3796,12 @@ function dataPanel() {
         exportedAt: new Date().toISOString(),
         version: state.health?.version || null,
         config: snapshotConfig(config.config),
-        /* A sweep before TT-3423 recorded an unlabelled calendar under its full
-           address, and `runs.last` still serves that record until the next
-           sweep replaces it. */
-        board: { ...board, runs: snapshotConfig(board.runs) },
+        /* The whole board, not only `runs`. A sweep before TT-3423 recorded an
+           unlabelled calendar under its full address, and `runs.last` still
+           serves that record until the next sweep replaces it; and since
+           TT-3515 each item's `origins` carries its source's label, which can
+           be a pasted feed address. */
+        board: snapshotConfig(board),
       }, null, 2);
       const blob = new Blob([payload], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
