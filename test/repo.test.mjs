@@ -1544,6 +1544,29 @@ test('every path in the SPEC.md layout exists', () => {
   assert.ok(!spec.includes('assets/fonts'), 'SPEC.md still names assets/fonts, which does not exist');
 });
 
+test('SPEC.md §8 has a row for every route in ROUTES, and none for a route that is gone', async () => {
+  /* QA, 2026-10-10 (TT-3520): §8 said its route table was "28 rows and it must
+     stay exact" while it had 32 rows and five routes were missing from it. A
+     count in prose cannot hold a table; comparing the table with ROUTES can. */
+  const { readRouterTable } = await import('./router-table.mjs');
+  const spec = fs.readFileSync(path.join(ROOT, 'docs', 'SPEC.md'), 'utf8');
+  const section = spec.slice(spec.indexOf('## 8. '), spec.indexOf('## 9. '));
+  const documented = new Set();
+  // Padding is the table author's choice, so the cells are read with any of it,
+  // and every line that starts like a route row has to have been read as one.
+  const rowLines = section.split('\n').filter((line) => /^\|\s*[A-Z]+(?:\/[A-Z]+)*\s*\|/.test(line));
+  const rows = [...section.matchAll(/^\|\s*([A-Z]+(?:\/[A-Z]+)*)\s*\|\s*`([^`]+)`\s*\|/gm)];
+  assert.equal(rows.length, rowLines.length, `some §8 route rows were not read: ${rowLines.filter((l) => !/^\|\s*[A-Z/]+\s*\|\s*`[^`]+`\s*\|/.test(l)).join(' / ')}`);
+  for (const [, methods, route] of rows) {
+    for (const method of methods.split('/')) documented.add(`${method} ${route.replace(/:\w+/g, ':id')}`);
+  }
+  const served = new Set(readRouterTable().map(([method, route]) => `${method} ${route.replace(/\?.*$/, '').replaceAll('probe.id-1', ':id')}`));
+  served.add('GET /oauth/callback');                     // outside ROUTES on purpose; §8 says so
+  for (const route of served) assert.ok(documented.has(route), `SPEC.md §8 has no row for ${route}`);
+  for (const route of documented) assert.ok(served.has(route), `SPEC.md §8 documents ${route}, which core/server.mjs does not serve`);
+  assert.doesNotMatch(section, /\b\d+ rows\b/, 'SPEC.md §8 states a row count again; the comparison above is what holds the table');
+});
+
 test('docs/INSTALL.md recommends only the Windows installers a release publishes', () => {
   /* QA, 2026-10-09 (TT-3478): INSTALL.md told a Windows user who was not sure of
      their machine to take "the combined installer", in three places. A release
