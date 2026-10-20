@@ -286,7 +286,7 @@ const PACK_SKIP = process.platform === 'win32'
   ? 'the tarball is identical wherever it is built and is verified on the POSIX legs; npm and tar on Windows runners need a harness this suite does not have'
   : (NPM ? false : 'npm-cli.js was not found beside this Node, and npm cannot be spawned without a shell');
 
-describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
+describe('npm pack produces a tarball that runs', () => {
   const packDir = path.join(SCRATCH, 'pack');
   const extractDir = path.join(SCRATCH, 'extract');
   let tarball = null;
@@ -294,6 +294,12 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
   let extracted = null;
 
   before(async () => {
+    // The skip is on each test, not on the describe: node counts a skipped
+    // describe as nothing at all, so its tests never showed among the run's
+    // skips (QA, 2026-10-10, TT-3527). The hook bails for the same reason the
+    // tests do, since a hook still runs when every test beside it is skipped.
+    if (PACK_SKIP) return;
+
     fs.mkdirSync(packDir, { recursive: true });
     fs.mkdirSync(extractDir, { recursive: true });
 
@@ -369,14 +375,14 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
     extracted = path.join(extractDir, 'package');
   });
 
-  test('the tarball carries the app and its docs', () => {
+  test('the tarball carries the app and its docs', { skip: PACK_SKIP }, () => {
     for (const wanted of ['package.json', 'zelos.mjs', 'LICENSE', 'core/server.mjs', 'core/doctor.mjs', 'ui/index.html', 'ui/app.css', 'docs/INSTALL.md', 'docs/SECURITY.md']) {
       assert.ok(entries.includes(wanted), `${wanted} is missing from the tarball`);
     }
     assert.ok(entries.some((e) => e.startsWith('assets/')), 'no assets shipped');
   });
 
-  test('it carries the home lock, because zelos.mjs cannot take it otherwise', () => {
+  test('it carries the home lock, because zelos.mjs cannot take it otherwise', { skip: PACK_SKIP }, () => {
     /* REGRESSION. The lock on the data home was defined in
        desktop/runtime.js — which this same suite asserts, three tests down, is
        NOT in the tarball. So `zelos.mjs`'s `await import('./desktop/
@@ -390,7 +396,7 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
       'the home lock is not in the tarball, so an installed zelos cannot take it');
   });
 
-  test('it ships the OAuth module the mail sign-in imports', () => {
+  test('it ships the OAuth module the mail sign-in imports', { skip: PACK_SKIP }, () => {
     /* core/sources/oauth.mjs used to be negated out of `files`: it had no
        production importer, and publishing a thousand lines of unreachable
        network code to everyone who types `npm i zelos-app` was the wrong
@@ -404,7 +410,7 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
       'the OAuth module the server imports is not being published');
   });
 
-  test('it leaves out the desktop-only app icon, and keeps the one the UI asks for', () => {
+  test('it leaves out the desktop-only app icon, and keeps the one the UI asks for', { skip: PACK_SKIP }, () => {
     /* REGRESSION. assets/icon.png is the 1024px app icon at 290 kB. Only the
        desktop shell reads it — desktop/main.js for the Linux window and the
        tray fallback, and electron-builder's mac and win blocks — and
@@ -423,12 +429,12 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
       'assets/icon.svg is missing — ui/index.html asks for it by name, so the board has no icon');
   });
 
-  test('it does not carry the tests, the Electron shell, or the screenshots', () => {
+  test('it does not carry the tests, the Electron shell, or the screenshots', { skip: PACK_SKIP }, () => {
     const strays = entries.filter((e) => /^(test|desktop)\//.test(e) || e.startsWith('docs/shots/'));
     assert.deepEqual(strays, [], `the tarball ships files it should not:\n  ${strays.join('\n  ')}`);
   });
 
-  test('nothing outside the allowlist sneaks in', () => {
+  test('nothing outside the allowlist sneaks in', { skip: PACK_SKIP }, () => {
     const allowed = (e) => e === 'package.json' || e === 'zelos.mjs' || e === 'LICENSE'
       || e === 'README.md'
       || e.startsWith('core/') || e.startsWith('ui/') || e.startsWith('assets/')
@@ -437,13 +443,13 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
     assert.deepEqual(strays, [], `unexpected files in the tarball:\n  ${strays.join('\n  ')}`);
   });
 
-  test('the extract has no node_modules and no lockfile', () => {
+  test('the extract has no node_modules and no lockfile', { skip: PACK_SKIP }, () => {
     for (const name of ['node_modules', 'package-lock.json', 'npm-shrinkwrap.json']) {
       assert.ok(!fs.existsSync(path.join(extracted, name)), `${name} is present in the extract`);
     }
   });
 
-  test('--version runs from the clean extract', async () => {
+  test('--version runs from the clean extract', { skip: PACK_SKIP }, async () => {
     const home = freshHome();
     const result = await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['zelos.mjs', '--version'], {
@@ -462,7 +468,7 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
     assert.equal(result.stdout.trim(), pkg.version);
   });
 
-  test('--help runs from the clean extract and names every command', async () => {
+  test('--help runs from the clean extract and names every command', { skip: PACK_SKIP }, async () => {
     const home = freshHome();
     const result = await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['zelos.mjs', '--help'], {
@@ -483,7 +489,7 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
     }
   });
 
-  test('the installed `zelos` command actually runs, through npm\'s bin symlink', async () => {
+  test('the installed `zelos` command actually runs, through npm\'s bin symlink', { skip: PACK_SKIP }, async () => {
     /* REGRESSION, and the reason "--version runs from the clean extract" above
        could not catch it: that test spawns `node zelos.mjs`, which is not how
        anybody who installs this ever invokes it.
@@ -556,7 +562,7 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
     assert.equal(result.code, 0, result.stderr);
   });
 
-  test('a `zelos` installed from the tarball holds the data home', async () => {
+  test('a `zelos` installed from the tarball holds the data home', { skip: PACK_SKIP }, async () => {
     /* The behavioural half of the missing-lock regression above: the file
        being in the tarball is necessary and not sufficient, and the failure
        this replaces was precisely a feature that existed everywhere except
@@ -601,7 +607,7 @@ describe('npm pack produces a tarball that runs', { skip: PACK_SKIP }, () => {
     }
   });
 
-  test('the bin the tarball declares is the file the tarball contains', () => {
+  test('the bin the tarball declares is the file the tarball contains', { skip: PACK_SKIP }, () => {
     const shipped = JSON.parse(fs.readFileSync(path.join(extracted, 'package.json'), 'utf8'));
     assert.equal(shipped.name, 'zelos-app');
     assert.ok(fs.existsSync(path.join(extracted, shipped.bin.zelos)), 'bin points at a file the tarball does not have');
@@ -1445,9 +1451,11 @@ async function seedMailPassword(home, ref, value) {
   }
 }
 
-describe('Ctrl-C during a sweep', { skip: process.platform === 'win32'
+const SIGNAL_SKIP = process.platform === 'win32'
   ? 'Windows does not deliver POSIX signals; a handler that answers one cannot be tested here'
-  : false }, () => {
+  : false;
+
+describe('Ctrl-C during a sweep', () => {
   /**
    * REGRESSION, in two halves that landed a wave apart.
    *
@@ -1492,6 +1500,12 @@ describe('Ctrl-C during a sweep', { skip: process.platform === 'win32'
   let home;
 
   before(async () => {
+    // The skip is on each test, not on the describe: node counts a skipped
+    // describe as nothing at all, so its tests never showed among the run's
+    // skips (QA, 2026-10-10, TT-3527). The hook bails for the same reason the
+    // tests do, since a hook still runs when every test beside it is skipped.
+    if (SIGNAL_SKIP) return;
+
     imap = await startChattyImap();
     home = freshHome({
       mail: [{
@@ -1531,7 +1545,7 @@ describe('Ctrl-C during a sweep', { skip: process.platform === 'win32'
     return { child, seen, exited };
   }
 
-  test('one Ctrl-C both says so and cuts the read', async () => {
+  test('one Ctrl-C both says so and cuts the read', { skip: SIGNAL_SKIP }, async () => {
     const grace = sweepStopGraceMs();
     const { child, seen, exited } = await sweepingChild();
     try {
@@ -1572,7 +1586,7 @@ describe('Ctrl-C during a sweep', { skip: process.platform === 'win32'
     }
   });
 
-  test('one SIGTERM on its own still ends it, without a second signal', async () => {
+  test('one SIGTERM on its own still ends it, without a second signal', { skip: SIGNAL_SKIP }, async () => {
     /* Cron itself never sends SIGTERM, so a plain crontab never met this. The
        wrappers do — `timeout N zelos sweep`, systemd's TimeoutStopSec, launchd
        — and those send one signal and then wait. Before any of this they waited

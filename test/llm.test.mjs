@@ -1860,8 +1860,30 @@ test('probeLocal returns runtimes that answer and stays silent about ones that d
 });
 
 test('probeLocal with no arguments probes the four documented ports and never throws', async () => {
+  // The name promised the ports and nothing checked them: a default list that
+  // lost LM Studio, or probed somewhere off this machine, still passed (QA,
+  // 2026-10-10, TT-3527). The fetch is watched, not replaced, so the real
+  // probe still runs against whatever is or is not listening.
+  const asked = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    asked.push(String(input?.url ?? input));
+    return original(input, init);
+  };
   const started = Date.now();
-  const found = await probeLocal();
+  let found;
+  try {
+    found = await probeLocal();
+  } finally {
+    globalThis.fetch = original;
+  }
+  // README.md and docs/SPEC.md name these four: Ollama, LM Studio, llama.cpp, vLLM.
+  assert.deepEqual(asked.sort(), [
+    'http://127.0.0.1:11434/v1/models',
+    'http://127.0.0.1:1234/v1/models',
+    'http://127.0.0.1:8000/v1/models',
+    'http://127.0.0.1:8080/v1/models',
+  ].sort(), 'probeLocal asked somewhere other than the four documented local runtimes');
   assert.ok(Array.isArray(found), 'probeLocal always resolves to an array');
   assert.ok(Date.now() - started < 5000, 'the probe is time-boxed');
   for (const entry of found) {

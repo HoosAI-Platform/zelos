@@ -1818,7 +1818,14 @@ describe('the Mac updater', () => {
   });
 });
 
-describe('the macOS swap script', { skip: process.platform === 'win32' }, () => {
+// On each test rather than on the describe: node counts a skipped describe as
+// nothing at all, so these never showed among the run's skips (QA, 2026-10-10,
+// TT-3527).
+const SWAP_SKIP = process.platform === 'win32'
+  ? 'the swap script is run by /bin/sh, which Windows does not have'
+  : false;
+
+describe('the macOS swap script', () => {
   /* The real script, run by /bin/sh against throwaway folders. The pid it
      waits on has already exited, so it proceeds at once, and its reopen step
      is pointed at a recorder so nothing on the machine running the suite opens. */
@@ -1845,7 +1852,7 @@ describe('the macOS swap script', { skip: process.platform === 'win32' }, () => 
     return { root, target, incoming, result: read(result), opened: read(opened).trim().split('\n').filter(Boolean) };
   }
 
-  it('renames the new app into place, removes the old one, records success and reopens', () => {
+  it('renames the new app into place, removes the old one, records success and reopens', { skip: SWAP_SKIP }, () => {
     const r = run();
     assert.equal(fs.readFileSync(path.join(r.target, 'which'), 'utf8'), 'new');
     assert.equal(fs.existsSync(`${r.target}.zelos-previous`), false);
@@ -1854,7 +1861,7 @@ describe('the macOS swap script', { skip: process.platform === 'win32' }, () => 
     assert.deepEqual(r.opened, [r.target]);
   });
 
-  it('leaves the old app untouched when it cannot be moved aside', () => {
+  it('leaves the old app untouched when it cannot be moved aside', { skip: SWAP_SKIP }, () => {
     // A read-only parent stands in for macOS refusing to rename the app.
     const r = run(({ root }) => fs.chmodSync(root, 0o555));
     fs.chmodSync(r.root, 0o755);
@@ -1863,14 +1870,14 @@ describe('the macOS swap script', { skip: process.platform === 'win32' }, () => 
     assert.deepEqual(r.opened, [r.target]);
   });
 
-  it('puts the old app back when the new one cannot be moved in', () => {
+  it('puts the old app back when the new one cannot be moved in', { skip: SWAP_SKIP }, () => {
     const r = run(({ incoming }) => fs.rmSync(incoming, { recursive: true }));
     assert.equal(fs.readFileSync(path.join(r.target, 'which'), 'utf8'), 'old');
     assert.equal(r.result, 'failed replace 1.9.0\n');
     assert.deepEqual(r.opened, [r.target]);
   });
 
-  it('when even the restore fails, keeps the old app under a fresh name and never nests it', () => {
+  it('when even the restore fails, keeps the old app under a fresh name and never nests it', { skip: SWAP_SKIP }, () => {
     // A stand-in `mv` that refuses both renames back into place, as a full
     // disk or a protected folder might, with an earlier "(previous)" already there.
     const r = run(({ root, incoming }) => {
@@ -1886,7 +1893,7 @@ describe('the macOS swap script', { skip: process.platform === 'win32' }, () => 
     assert.deepEqual(r.opened, [path.join(r.root, 'Zelos (previous 2).app')]);
   });
 
-  it('treats every path as data, never as script', () => {
+  it('treats every path as data, never as script', { skip: SWAP_SKIP }, () => {
     const r = run(null, { target: 'Zelos $(touch pwned) ; `touch pwned2` ".app' });
     assert.equal(fs.readFileSync(path.join(r.target, 'which'), 'utf8'), 'new');
     assert.equal(r.result, 'ok 1.9.0\n');
