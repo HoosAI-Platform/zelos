@@ -104,20 +104,20 @@ const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex'
  * replaces did by not matching it — except that the regex took 22 ms to decide
  * so for 64 KB of openers and four times that per doubling.
  */
-function unwrapCdata(input) {
+function unwrapCdata(input, outside = (text) => text) {
   const s = String(input ?? '');
   let start = s.indexOf('<![CDATA[');
-  if (start < 0) return s;
+  if (start < 0) return outside(s);
   let out = '';
   let plain = 0;
   while (start >= 0) {
     const end = s.indexOf(']]>', start + 9);
     if (end < 0) break;
-    out += s.slice(plain, start) + s.slice(start + 9, end);
+    out += outside(s.slice(plain, start)) + s.slice(start + 9, end);
     plain = end + 3;
     start = s.indexOf('<![CDATA[', plain);
   }
-  return out + s.slice(plain);
+  return out + outside(s.slice(plain));
 }
 
 /**
@@ -141,14 +141,137 @@ function stripComments(xml) {
 }
 
 /**
+ * The most of one element `textOf` will read, in characters: mime.mjs's
+ * MAX_HTML_CHARS, applied here as well because the XML-layer decode below runs
+ * before `htmlToText` gets the chance to cap its input.
+ */
+const MAX_TEXT_CHARS = 512 * 1024;
+
+/**
+ * A `<` that does not open a complete tag, as `&lt;`.
+ *
+ * After the XML layer is decoded, "x&lt;y" is "x<y", and `stripTags` reads an
+ * unterminated `<y` as a tag running to the end of the input — the rest of a
+ * title gone. Escaping it again lets `htmlToText` hand it back as the character
+ * it was.
+ *
+ * "Complete" is decided by mime.mjs's own tag rules, quotes included: a quote
+ * directly after `=` runs to its partner, so `<a title="x<y">` is one tag. A
+ * regex that knew about quotes was measured quadratic (72 s on 512 KB of
+ * `'='a<a`), so this is a scan. Every (position, just-after-`=`) state a failed
+ * scan passes through is recorded, and a later scan that reaches one fails
+ * there — the outcome from a state does not depend on where the scan began —
+ * so each state is visited once and the whole thing is linear.
+ */
+function escapeStrayLt(s) {
+  let i = s.indexOf('<');
+  if (i < 0) return s;
+  const n = s.length;
+  const dead = [new Uint8Array(n + 1), new Uint8Array(n + 1)];
+  const opensTag = (code) => (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)
+    || code === 0x2f /* / */ || code === 0x21 /* ! */ || code === 0x3f /* ? */;
+
+  // Whether a `-->` exists at or after this index; once a search fails, every
+  // later one would too, so it is made once.
+  let noCommentEndFrom = n + 1;
+
+  /* The index of the `>` that closes the tag opened at `at`, or -1. */
+  const tagEnd = (at) => {
+    // A closed comment is one unit, `<` and all, as stripTags reads it: the
+    // publisher's commented-out markup must not reach the model as text.
+    if (s.startsWith('<!--', at)) {
+      if (at + 4 >= noCommentEndFrom) return -1;
+      const close = s.indexOf('-->', at + 4);
+      if (close >= 0) return close + 2;
+      noCommentEndFrom = at + 4;
+      return -1;
+    }
+    if (!opensTag(s.charCodeAt(at + 1))) return -1;
+    const seen = [];
+    let j = at + 1;
+    let afterEq = 0;
+    while (j < n && !dead[afterEq][j]) {
+      seen.push(j, afterEq);
+      const code = s.charCodeAt(j);
+      if (code === 0x3e /* > */) return j;
+      if (code === 0x3c /* < */) break;
+      if (afterEq && (code === 0x22 || code === 0x27)) {
+        const close = s.indexOf(s[j], j + 1);
+        if (close < 0) break;
+        j = close + 1;
+        afterEq = 0;
+        continue;
+      }
+      if (code === 0x3d /* = */) afterEq = 1;
+      else if (!isSpace(code) && code !== 0x0c) afterEq = 0;
+      j += 1;
+    }
+    for (let k = 0; k < seen.length; k += 2) dead[seen[k + 1]][seen[k]] = 1;
+    return -1;
+  };
+
+  let out = '';
+  let plain = 0;
+  while (i >= 0) {
+    const end = tagEnd(i);
+    if (end >= 0) {
+      i = s.indexOf('<', end + 1);
+      continue;
+    }
+    out += `${s.slice(plain, i)}&lt;`;
+    plain = i + 1;
+    i = s.indexOf('<', i + 1);
+  }
+  return out + s.slice(plain);
+}
+
+/**
  * The text of one element, markup removed and entities decoded.
  *
  * `htmlToText` is core/sources/mime.mjs's, the same function that turns an HTML
  * mail part into something a model can read: a feed's `<description>` is HTML
  * inside XML about half the time, and re-deriving a tag stripper here would be a
  * second answer to a question this repo has already answered carefully.
+ *
+ * The XML layer is decoded first, and only outside CDATA. RSS 2.0's own form
+ * for markup in a `<description>` is entity-encoded HTML, and Atom's
+ * `type="html"` is the same: `&lt;b&gt;cash&lt;/b&gt;` is the tag `<b>`, not the
+ * text "<b>". Stripping tags before decoding handed the model — and the stored
+ * row — the markup itself. Inside CDATA the text is already the HTML, so
+ * decoding it there would turn an escaped `&amp;lt;` into a tag that was never
+ * one.
  */
-const textOf = (raw) => htmlToText(unwrapCdata(raw ?? ''));
+function textOf(raw, type = 'html') {
+  let s = String(raw ?? '');
+  if (s.length > MAX_TEXT_CHARS) s = s.slice(0, MAX_TEXT_CHARS);
+  // Atom xhtml is real elements in the XML: they are the markup and `&lt;` in
+  // them is text, so tags come off before entities are decoded, as always.
+  if (type === 'xhtml') return htmlToText(unwrapCdata(s));
+  // Atom type="text" is the characters themselves; `&lt;b&gt;` is "<b>". They
+  // are escaped for htmlToText so it only tidies the whitespace.
+  if (type === 'text') {
+    return htmlToText(unwrapCdata(s, decodeXmlEntities).replace(/&/g, '&amp;').replace(/</g, '&lt;'));
+  }
+  return htmlToText(unwrapCdata(s, (text) => escapeStrayLt(decodeXmlEntities(text))));
+}
+
+/**
+ * How an element's text is to be read -> 'html', 'xhtml' or 'text'.
+ *
+ * Only Atom says: its `type` attribute is `text`, `html` or `xhtml` (or, on
+ * `<content>`, a media type). Everything in RSS is read as HTML, which is what
+ * its `<description>` is and the safe reading of a title. An Atom element with
+ * no `type` is text by RFC 4287, but feeds that put escaped HTML there without
+ * saying so are common, and reading those as text hands the model the markup —
+ * so only an explicit `text` is read literally.
+ */
+function textTypeOf(attrs) {
+  const type = attr(attrs, 'type').trim().toLowerCase();
+  if (type === 'xhtml' || type === 'application/xhtml+xml') return 'xhtml';
+  // `plain` is Media RSS's word for it (`<media:title type="plain">`).
+  if (type === 'text' || type === 'text/plain' || type === 'plain') return 'text';
+  return 'html';
+}
 
 const collapse = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
@@ -232,7 +355,7 @@ function nextElement(xml, name, from) {
     if (tag.selfClosing) { pos = tag.open; continue; }
     const closer = nextCloser(xml, name, tag.open);
     if (!closer) return null;
-    return { start: tag.start, open: tag.open, close: closer.at, end: closer.end };
+    return { start: tag.start, attrsAt: tag.attrsAt, open: tag.open, close: closer.at, end: closer.end };
   }
 }
 
@@ -240,6 +363,19 @@ function nextElement(xml, name, from) {
 function first(xml, name) {
   const el = nextElement(xml, name, 0);
   return el ? xml.slice(el.open, el.close) : '';
+}
+
+/**
+ * The text of the first of `names` that has any, read as its own `type` says.
+ * `first(a) || first(b)`, keeping the attributes `first` throws away.
+ */
+function textOfFirst(xml, ...names) {
+  for (const name of names) {
+    const el = nextElement(xml, name, 0);
+    if (!el || el.close === el.open) continue;
+    return textOf(xml.slice(el.open, el.close), textTypeOf(xml.slice(el.attrsAt, el.open - 1)));
+  }
+  return '';
 }
 
 /** One attribute off a tag's attribute string. */
@@ -350,13 +486,13 @@ export function parseFeed(input) {
   // taking the first `<title>` in the document without that check picks up the
   // first article's title on a feed whose channel has none.
   const head = xml.slice(0, firstEntryAt);
-  const title = collapse(textOf(first(head, 'title')));
+  const title = collapse(textOfFirst(head, 'title'));
   const date = collapse(unwrapCdata(
     first(head, 'lastBuildDate') || first(head, 'updated') || first(head, 'pubDate') || first(head, 'date'),
   ));
 
   const entries = blocks.map((block) => ({
-    title: collapse(textOf(first(block, 'title'))),
+    title: collapse(textOfFirst(block, 'title')),
     link: linkOf(block),
     // The guid gets the same treatment as the link, and for the same reason:
     // it is usually a URL, it is the FIRST choice for messageId, and an escaped
@@ -367,9 +503,7 @@ export function parseFeed(input) {
     date: collapse(unwrapCdata(
       first(block, 'pubDate') || first(block, 'published') || first(block, 'updated') || first(block, 'date'),
     )),
-    body: textOf(
-      first(block, 'encoded') || first(block, 'content') || first(block, 'description') || first(block, 'summary'),
-    ),
+    body: textOfFirst(block, 'encoded', 'content', 'description', 'summary'),
   }));
 
   return { title, date, entries };
