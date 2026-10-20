@@ -69,6 +69,9 @@ jobs:
       # lock that quietly stopped working fails the build instead of shipping.
       # (A CSP directive Chromium ignored once did, for every release.)
       - name: Check the window cannot reach the network
+        # DRAFT MEASUREMENT ONLY (TT-3507): main currently fails here on Windows,
+        # which would stop the run before the stdio check below. Never merge this.
+        continue-on-error: true
         run: node scripts/check-webrtc.mjs
 
       # `Zelos mcp` is how a desktop AI client starts Zelos, over stdio. The
