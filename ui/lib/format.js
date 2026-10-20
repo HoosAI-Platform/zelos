@@ -121,16 +121,47 @@ export function personLabel(item) {
  * it is the absence of provenance, not a variety of it. A kind this build does
  * not know makes no claim rather than a wrong one.
  */
+/** The connector names that are ordinary words, not brands, as they read mid-sentence. */
+const COMMON_SOURCE_NOUN = { rss: 'feed', folder: 'folder' };
+
 export function sourceStamp(item) {
   const refs = Array.isArray(item?.sourceRefs) ? item.sourceRefs.length : 0;
   const count = refs > 1 ? ` (${refs})` : '';
   const kind = item?.kind;
-  if (kind === 'mail') return { text: `from your mail${count}`, derived: false };
+  if (kind === 'mail') {
+    // Stored as `mail` is "cited a message", and a feed entry, a Slack post or
+    // a GitHub notification is a message too: all were "from your mail" (QA,
+    // 2026-10-10, TT-3515). /api/state says where each message came from.
+    const origins = Array.isArray(item.origins) ? item.origins : [];
+    const others = origins.filter((o) => o?.family !== 'mail');
+    if (others.length && others.length < origins.length) return { text: `from more than one place${count}`, derived: false };
+    // In a sentence, a brand keeps its capital ("from your Slack") and a
+    // common noun does not ("from your feed").
+    if (others.length === 1) {
+      const o = others[0];
+      return { text: `from ${o.label || `your ${COMMON_SOURCE_NOUN[o.family] || o.kind || 'other sources'}`}${count}`, derived: false };
+    }
+    if (others.length > 1) return { text: `from your other sources${count}`, derived: false };
+    return { text: `from your mail${count}`, derived: false };
+  }
   if (kind === 'calendar') return { text: `from your calendar${count}`, derived: false };
   if (kind === 'capture') return { text: `from a note you typed${count}`, derived: false };
   if (kind === 'mixed') return { text: `from more than one place${count}`, derived: false };
   if (kind === 'derived') return { text: 'no source saved', derived: true };
   return null;
+}
+
+/**
+ * What a message is called in the mono tags of Ask and Search, by where it
+ * came from: "mail" for an email account, and the connector's own name
+ * otherwise, in the tags' lower case ("feed", "slack", "whatsapp", without
+ * the "export" that makes "whatsapp export 3" read as a sum). A message with
+ * no known origin is mail, which is what every one used to be called.
+ */
+export function messageLabel(origin) {
+  return origin && origin.family !== 'mail' && typeof origin.kind === 'string' && origin.kind
+    ? origin.kind.replace(/\s+export$/i, '').toLowerCase()
+    : 'mail';
 }
 
 /**

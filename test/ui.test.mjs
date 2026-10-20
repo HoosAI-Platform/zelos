@@ -450,6 +450,28 @@ test('every item wears where it came from, and "derived" wears that nothing was 
     { text: 'from a note you typed', derived: false });
   assert.deepEqual(fmt.sourceStamp({ kind: 'mixed', sourceRefs: ['msg:a', 'evt:b'] }),
     { text: 'from more than one place (2)', derived: false });
+  // A feed entry, a Slack post or a GitHub notification is stored as a message
+  // too, and is not "from your mail" (TT-3515). /api/state sends `origins`.
+  const hn = { family: 'rss', kind: 'Feed', label: 'Hacker News' };
+  const studio = { family: 'slack', kind: 'Slack', label: '' };
+  const work = { family: 'mail', kind: 'Mail', label: 'Work mail' };
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a'], origins: [hn] }),
+    { text: 'from Hacker News', derived: false });
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a'], origins: [studio] }),
+    { text: 'from your Slack', derived: false });
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a'], origins: [{ family: 'whatsapp', kind: 'WhatsApp export', label: '' }] }),
+    { text: 'from your WhatsApp export', derived: false });
+  // A common noun is not a brand: an unlabelled feed is "your feed", not "your Feed".
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a'], origins: [{ family: 'rss', kind: 'Feed', label: '' }] }),
+    { text: 'from your feed', derived: false });
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a'], origins: [{ family: 'folder', kind: 'Folder', label: '' }] }),
+    { text: 'from your folder', derived: false });
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a', 'msg:b'], origins: [hn, studio] }),
+    { text: 'from your other sources (2)', derived: false });
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a', 'msg:b'], origins: [hn, work] }),
+    { text: 'from more than one place (2)', derived: false });
+  assert.deepEqual(fmt.sourceStamp({ kind: 'mail', sourceRefs: ['msg:a'], origins: [work] }),
+    { text: 'from your mail', derived: false });
   // "derived" is core/triage.mjs's word for "every cited receipt failed to
   // resolve" — the one stamp that must not read like provenance.
   assert.deepEqual(fmt.sourceStamp({ kind: 'derived', sourceRefs: [] }),
@@ -1827,6 +1849,18 @@ test('the results summary counts in the words the app uses, board first', async 
   assert.equal(search.kindLabel('capture'), 'note');
   assert.equal(search.kindLabel('message'), 'mail');
   assert.equal(search.kindLabel(''), 'result');
+  // A feed entry is a message too, and not "mail" (TT-3515).
+  const feed = { family: 'rss', kind: 'Feed', label: 'Hacker News' };
+  assert.equal(search.kindLabel('message', feed), 'feed');
+  assert.equal(search.kindLabel('message', { family: 'whatsapp', kind: 'WhatsApp export', label: '' }), 'whatsapp');
+  assert.equal(search.kindLabel('message', { family: 'github', kind: 'GitHub', label: '' }), 'github');
+  assert.equal(search.kindLabel('message', { family: 'mail', kind: 'Mail', label: 'Work' }), 'mail');
+  assert.equal(
+    search.summariseKinds([{ kind: 'message', origin: feed }, { kind: 'item' }, { kind: 'message' }, { kind: 'message', origin: feed }]),
+    'board 1 · feed 2 · mail 1',
+  );
+  const searchSrc = fs.readFileSync(path.join(UI, 'views/search.js'), 'utf8');
+  assert.doesNotMatch(searchSrc, /'aria-label': 'Search your mail/, 'the search box still calls everything mail');
 });
 
 test('the calendar opens where the day is, not at midnight', async () => {
@@ -7084,7 +7118,7 @@ test('Ask labels a response cut short by its answer limit and keeps that notice 
   let stopReason = 'length';
   globalThis.fetch = async reqPath => {
     assert.equal(reqPath, '/api/ask');
-    return new Response(`event: sources\ndata: ${JSON.stringify([{ ref: 'msg:old-task', kind: 'message', title: 'Old task', sourceInactive: true }, { ref: 'msg:current', kind: 'message', title: 'Current mail', sourceInactive: false }])}\n\nevent: delta\ndata: ${JSON.stringify({ text: 'The reply so far' })}\n\nevent: done\ndata: ${JSON.stringify({ stopReason })}\n\n`);
+    return new Response(`event: sources\ndata: ${JSON.stringify([{ ref: 'msg:old-task', kind: 'message', title: 'Old task', sourceInactive: true }, { ref: 'msg:current', kind: 'message', title: 'Current mail', sourceInactive: false }, { ref: 'msg:post', kind: 'message', title: 'A feed post', origin: { family: 'rss', kind: 'Feed', label: 'Hacker News' } }])}\n\nevent: delta\ndata: ${JSON.stringify({ text: 'The reply so far' })}\n\nevent: done\ndata: ${JSON.stringify({ stopReason })}\n\n`);
   };
   store.state.health = { model: { configured: true } };
   const view = ask.renderAsk({ navigate() {} });
@@ -7098,6 +7132,8 @@ test('Ask labels a response cut short by its answer limit and keeps that notice 
   const note = plainWalk(exchange).find(n => n.attributes.class === 'exchange-note-slot');
   const sources = plainWalk(exchange).find(n => n.attributes.class === 'sources-slot');
   assert.equal((textOf(sources).match(/No longer in task selection/g) || []).length, 1, 'historical task evidence must be visibly labelled separately from current mail');
+  // A feed post is labelled by where it came from, not "mail" (TT-3515).
+  assert.deepEqual(plainWalk(sources).filter((n) => n.attributes.class === 'source-kind mono').map(textOf), ['mail', 'mail', 'feed']);
   assert.equal(textOf(answer), 'The reply so far');
   assert.match(textOf(note), /answer limit.*may be incomplete/);
   assert.equal(answer.attributes['aria-busy'], 'false');
@@ -8399,12 +8435,18 @@ test('the board snapshot does not carry a calendar or feed secret address', asyn
   // And the export uses it.
   const src = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
   assert.match(src, /config: snapshotConfig\(config\.config\)/, 'exportSnapshot writes the config unfiltered');
-  assert.match(src, /runs: snapshotConfig\(board\.runs\)/, 'exportSnapshot writes a stored run record unfiltered');
+  assert.match(src, /board: snapshotConfig\(board\)/, 'exportSnapshot writes the board unfiltered');
 
   // A run recorded before the sweep stopped using the address as a label.
   const runs = { last: { stats: { sources: [{ kind: 'calendar', id: 'g', label: google, ok: true }] } } };
   assert.equal(settings.snapshotConfig(runs).last.stats.sources[0].label,
     'https://calendar.google.com/… (rest of the address removed)');
+
+  // An item's origin carries its source's label, which can be a pasted feed address (TT-3515).
+  const board = { runs, items: [{ id: 'i1', origins: [{ family: 'rss', kind: 'Feed', label: 'https://feeds.example.com/private?token=abc' }] }] };
+  const kept = settings.snapshotConfig(board);
+  assert.equal(kept.items[0].origins[0].label, 'https://feeds.example.com/… (rest of the address removed)');
+  assert.equal(kept.items[0].origins[0].kind, 'Feed');
 });
 
 /*

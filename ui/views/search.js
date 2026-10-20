@@ -28,7 +28,7 @@ import { emptyState } from '../lib/items.js';
 import { api, isMissingRoute } from '../lib/api.js';
 import { state } from '../lib/store.js';
 import { dayKey, formatDay } from '../lib/time.js';
-import { BUCKET_TAG, eventTimeLabel, plural } from '../lib/format.js';
+import { BUCKET_TAG, eventTimeLabel, plural, messageLabel } from '../lib/format.js';
 
 /**
  * Long enough that typing a word is one query rather than five, short enough
@@ -74,7 +74,9 @@ function hashForItem(item) {
   return item.state === 'snoozed' ? '#/now/snoozed' : hashForBucket(item.bucket);
 }
 
-export function kindLabel(kind) {
+export function kindLabel(kind, origin = null) {
+  // A feed entry or a Slack post is a message too, and was labelled "mail" (TT-3515).
+  if (kind === 'message') return messageLabel(origin);
   if (KIND_LABEL[kind]) return KIND_LABEL[kind];
   return typeof kind === 'string' && kind ? kind : 'result';
 }
@@ -87,17 +89,21 @@ export function refParts(ref) {
 
 /** "board 2 · mail 9 · calendar 1" — what the hits are made of, in one line. */
 export function summariseKinds(results) {
+  // Counted by label, so feed entries are "feed 3" and not more "mail".
   const counts = new Map();
+  const kindOf = new Map();
   for (const result of results || []) {
-    const kind = result?.kind;
-    counts.set(kind, (counts.get(kind) || 0) + 1);
+    const label = kindLabel(result?.kind, result?.origin);
+    counts.set(label, (counts.get(label) || 0) + 1);
+    if (!kindOf.has(label)) kindOf.set(label, result?.kind);
   }
-  const seen = [...counts.keys()];
-  const ordered = [
-    ...KIND_ORDER.filter((k) => counts.has(k)),
-    ...seen.filter((k) => !KIND_ORDER.includes(k)),
-  ];
-  return ordered.map((kind) => `${kindLabel(kind)} ${counts.get(kind)}`).join(' · ');
+  const rank = (label) => {
+    const at = KIND_ORDER.indexOf(kindOf.get(label));
+    return at === -1 ? KIND_ORDER.length : at;
+  };
+  // A stable sort: within a kind, labels keep the order they first appeared in.
+  const ordered = [...counts.keys()].sort((a, b) => rank(a) - rank(b));
+  return ordered.map((label) => `${label} ${counts.get(label)}`).join(' · ');
 }
 
 /**
@@ -193,7 +199,7 @@ function hitRow(result, board) {
   const title = String(result.title || '').trim();
   return el('article', { class: 'hit' }, [
     el('div', { class: 'hit-head' }, [
-      el('span', { class: 'hit-kind mono', text: kindLabel(result.kind) }),
+      el('span', { class: 'hit-kind mono', text: kindLabel(result.kind, result.origin) }),
       el('h2', { class: 'hit-title', text: title || '(no title)' }),
     ]),
     result.excerpt ? el('p', { class: 'hit-excerpt', text: String(result.excerpt) }) : null,
@@ -339,7 +345,7 @@ function build() {
     autocapitalize: 'none',
     spellcheck: 'false',
     placeholder: 'survey invoice, Marcus, the thing about Thursday…',
-    'aria-label': 'Search your mail, calendar, board and notes',
+    'aria-label': 'Search everything Zelos has read, your board and your notes',
   });
 
   field.addEventListener('input', () => {
