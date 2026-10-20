@@ -2889,8 +2889,8 @@ test('Add an email account opens the simple form, and the simple form reaches th
   assert.ok(open, 'openAdvanced is missing');
   assert.match(open[0], /expertSlot\.replaceChildren\(mailForm\(\{/, 'the expert form does not open beneath the card');
   assert.match(open[0], /\.\.\.prefill\(\),/, 'what the guess found never reaches the full form');
-  assert.match(open[0], /onCancel: \(\) => expertSlot\.replaceChildren\(\),/, 'closing the full form must leave the card, not the editor, behind');
-  assert.match(open[0], /if \(expertSlot\.children\.length\) \{ expertSlot\.replaceChildren\(\); return; \}/, 'pressing the expert button again must close the drawer');
+  assert.match(open[0], /onCancel: \(\) => \{ expertSlot\.replaceChildren\(\); syncExpert\(\); \},/, 'closing the full form must leave the card, not the editor, behind');
+  assert.match(open[0], /if \(expertSlot\.children\.length\) \{ expertSlot\.replaceChildren\(\); syncExpert\(\); return; \}/, 'pressing the expert button again must close the drawer');
   const prefill = /const prefill = \(\) => \(\{[\s\S]*?\}\);/m.exec(simple[0]);
   assert.ok(prefill, 'prefill is missing');
   assert.match(prefill[0], /keyRef,/, 'the full form opens on a different keyRef, so the stored password is lost');
@@ -4919,6 +4919,8 @@ test('no screen in onboarding, and no mail card, shows a first-timer a protocol 
   seen = onScreen(view);
   assert.match(seen, /Your address stays on this computer\./);
   assert.ok(findButton(view, 'Server settings (for experts)'), 'no expert button under the address');
+  // It opens and closes the full form, and says which, as fold() does (TT-3490).
+  assert.equal(findButton(view, 'Server settings (for experts)').getAttribute('aria-expanded'), 'false', 'the expert button under the address has no aria-expanded');
   assert.doesNotMatch(seen, JARGON, `the empty email form: ${seen.match(JARGON)?.[0]}`);
   const emailInput = findInput(view, (n) => n.attributes.type === 'email');
   for (const [address, expect] of [
@@ -4939,12 +4941,15 @@ test('no screen in onboarding, and no mail card, shows a first-timer a protocol 
     assert.doesNotMatch(anywhere(view), /over IMAP|16 September 2024/, `${address}: the server's note is on screen before anyone asked`);
     const expert = findButtons(view, /^Server settings \(for experts\)$/).find((b) => !plainHidden(b));
     assert.ok(expert, `${address}: no expert button on the card`);
+    assert.equal(expert.getAttribute('aria-expanded'), 'false', `${address}: the card's expert button has no aria-expanded`);
     expert.fire('click');
     await settle();
+    assert.equal(expert.getAttribute('aria-expanded'), 'true', `${address}: the expert button does not say the form is open`);
     assert.match(anywhere(view), /over IMAP|16 September 2024/, `${address}: the server's own note is gone rather than folded`);
     assert.match(onScreen(view), new RegExp(GUESSES[address].host.replace(/\./g, '\\.')), `${address}: the expert form does not show the host`);
     expert.fire('click');
     await settle();
+    assert.equal(expert.getAttribute('aria-expanded'), 'false', `${address}: the expert button still says the form is open`);
     assert.doesNotMatch(onScreen(view), /IMAP host/, `${address}: the expert form did not close`);
     assert.equal(emailInput.value, address, `${address}: closing the expert form lost the address`);
     assert.match(onScreen(view), expect, `${address}: closing the expert form lost the card`);
