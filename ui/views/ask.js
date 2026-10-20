@@ -58,8 +58,11 @@ function exchange(question) {
   const copyButton = button('Copy', {
     class: 'btn quiet',
     onClick: async (e) => {
-      const ok = await copyText(answer.textContent || '');
+      // Before the await: a browser resets currentTarget to null once the
+      // event has finished dispatching, so read after it the label never
+      // changed and the page threw (QA, 2026-10-10, TT-3452).
       const btn = e.currentTarget;
+      const ok = await copyText(answer.textContent || '');
       btn.textContent = ok ? 'Copied' : 'Copy failed';
       setTimeout(() => { btn.textContent = 'Copy'; }, 1_600);
     },

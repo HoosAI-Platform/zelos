@@ -3673,7 +3673,14 @@ class PlainNode {
   fire(type) {
     const bubbles = type === 'input' || type === 'change';
     for (let n = this; n; n = bubbles ? n.parentNode : null) {
-      for (const fn of n.listeners?.get(type) ?? []) fn.call(n, { target: this, currentTarget: n, preventDefault() {} });
+      for (const fn of n.listeners?.get(type) ?? []) {
+        const event = { target: this, currentTarget: n, preventDefault() {} };
+        fn.call(n, event);
+        // As a browser does once dispatch is over: a handler that reads
+        // currentTarget after an await gets null. Keeping it alive here is
+        // how a Copy that never confirmed passed (TT-3452).
+        event.currentTarget = null;
+      }
     }
   }
 }
@@ -5786,6 +5793,37 @@ test('the mailto rides the live textarea at click time, and says so when only th
   assert.match(actions.children[0].attributes.class, /solid/);
 });
 
+test('the draft card\'s "Copy the text" says Copied, then goes back (TT-3452)', async (t) => {
+  withPlainDom(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => '{}' });
+  const realNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let copied = null;
+  Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { writeText: async (text) => { copied = text; } } }, configurable: true });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const owed = await import(fileUrl(UI, 'views/owed.js'));
+  t.after(() => {
+    delete globalThis.fetch;
+    store.notify(null);
+    if (realNavigator) Object.defineProperty(globalThis, 'navigator', realNavigator); else delete globalThis.navigator;
+  });
+  store.state.board = {
+    ...store.state.board,
+    items: [],
+    drafts: [{ id: 'd1', state: 'pending', to_email: 'sam@example.com', subject: 'the survey', body: 'First line.', item_id: null }],
+  };
+
+  const view = owed.renderOwed({ tz: 'UTC', navigate() {}, rerender() {} });
+  const copy = findButton(view, 'Copy the text');
+  copy.fire('click');
+  await settle();
+  assert.equal(copied, 'First line.');
+  // textContent, not textOf: this DOM's setter keeps the old text child.
+  assert.equal(copy.textContent, 'Copied', 'the label never changed');
+  t.mock.timers.tick(1_600);
+  assert.equal(copy.textContent, 'Copy the text');
+});
+
 test('the hero can be told "Not a thing", through the same controls the rows get', async (t) => {
   withPlainDom(t);
   const calls = [];
@@ -7019,9 +7057,13 @@ test('Ask labels a response cut short by its answer limit and keeps that notice 
   assert.equal(answer.attributes['aria-busy'], 'false');
   // Reflect the real DOM's descendant textContent for the clipboard read.
   Object.defineProperty(answer, 'textContent', { get: () => answer.children.map(textOf).join('') });
-  findButton(exchange, 'Copy').fire('click');
+  const copy = findButton(exchange, 'Copy');
+  copy.fire('click');
   await settle();
   assert.equal(copied, 'The reply so far');
+  assert.equal(copy.textContent, 'Copied', 'Copy never confirms');
+  t.mock.timers.tick(1_600);
+  assert.equal(copy.textContent, 'Copy');
   assert.equal(findButton(view, 'Ask').disabled, false);
 
   stopReason = 'stop';
