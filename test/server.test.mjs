@@ -465,6 +465,65 @@ test('static serving only answers GET and HEAD', async (t) => {
  * Secrets are write-only
  * ================================================================== */
 
+test('the model probes never send a stored secret a caller names (TT-3430)', async (t) => {
+  /* QA, 2026-10-10: /api/model/test and /api/model/list accepted any keyRef,
+     so a session-token holder could send a stored mail password as a Bearer
+     token to an address of their choosing. Fixed by TT-3417, which made the
+     address the key's whole identity (324aef6, PR #12); pinned here as the
+     attack QA ran. The mail and calendar Test routes are held to their own
+     kind's secrets below. */
+  const upstream = await startMockUpstream(t);
+  const ctx = await startServer(t, {
+    config: baseConfig({ model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' } }),
+  });
+  const MAIL_PASSWORD = 'mail-password-never-a-bearer-token';
+  await call(ctx, 'POST', '/api/secrets', { body: { ref: 'mail.m_victim', value: MAIL_PASSWORD } });
+  t.after(async () => { await deleteSecret('mail.m_victim').catch(() => {}); });
+
+  const q = `protocol=openai&baseUrl=${encodeURIComponent(upstream.baseUrl)}&keyRef=mail.m_victim`;
+  await call(ctx, 'GET', `/api/model/list?${q}`);
+  await call(ctx, 'POST', '/api/model/test', {
+    body: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model', keyRef: 'mail.m_victim' },
+  });
+  // The calendar Test, aimed at the same upstream with the mail account's ref.
+  const borrowed = await call(ctx, 'POST', '/api/calendar/test', {
+    body: { kind: 'ics', url: `${upstream.baseUrl.replace(/\/v1$/, '')}/calendar.ics`, user: 'x', keyRef: 'mail.m_victim' },
+  });
+  assert.equal(borrowed.status, 400, 'the calendar Test accepted a mail account\'s password');
+  const paths = upstream.received.map((r) => r.url);
+  assert.ok(paths.some((p) => p.endsWith('/models')), 'the model list never reached the endpoint, so this proves nothing');
+  assert.ok(paths.some((p) => p.endsWith('/chat/completions')), 'the model test never reached the endpoint, so this proves nothing');
+  for (const r of upstream.received) {
+    assert.ok(!JSON.stringify(r).includes(MAIL_PASSWORD), `a stored mail password was sent to ${r.url}`);
+  }
+
+  // And the mail Test refuses a secret that is not a mail account's.
+  await call(ctx, 'POST', '/api/secrets', { body: { ref: 'calendar.c_victim', value: 'calendar-password' } });
+  t.after(async () => { await deleteSecret('calendar.c_victim').catch(() => {}); });
+  for (const keyRef of ['calendar.c_victim', 'oauth.google.clientSecret']) {
+    const res = await call(ctx, 'POST', '/api/mail/test', { body: { host: '127.0.0.1', port: 1, secure: false, user: 'x', keyRef } });
+    assert.equal(res.status, 400, `the mail Test accepted ${keyRef}`);
+  }
+
+  // Naming the mail ref on a saved calendar first does not make it a calendar's.
+  await call(ctx, 'PUT', '/api/config', {
+    body: { calendars: [{ id: 'c_evil', kind: 'caldav', label: 'x', url: upstream.baseUrl, user: 'x', keyRef: 'mail.m_victim', enabled: true }] },
+  });
+  const viaConfig = await call(ctx, 'POST', '/api/calendar/test', {
+    body: { kind: 'caldav', url: upstream.baseUrl, user: 'x', keyRef: 'mail.m_victim' },
+  });
+  assert.equal(viaConfig.status, 400, 'a config naming a mail ref let the calendar Test send the mail password');
+
+  // Nor a source's token (sources store theirs as `${type}.${id}`).
+  await call(ctx, 'PUT', '/api/config', {
+    body: { calendars: [{ id: 'c_evil', kind: 'caldav', label: 'x', url: upstream.baseUrl, user: 'x', keyRef: 'slack.s_victim', enabled: true }] },
+  });
+  const viaSource = await call(ctx, 'POST', '/api/calendar/test', {
+    body: { kind: 'caldav', url: upstream.baseUrl, user: 'x', keyRef: 'slack.s_victim' },
+  });
+  assert.equal(viaSource.status, 400, 'a config naming a source ref let the calendar Test send its token');
+});
+
 test('no route returns a stored secret', async (t) => {
   const upstream = await startMockUpstream(t);
   const ctx = await startServer(t, {

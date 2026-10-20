@@ -501,13 +501,32 @@ async function checkModelKey(config, deps) {
     return { result: check('model.key', label, 'skip', 'No AI service has been chosen yet, so there is no key to check.'), key: null };
   }
   if (isLocalAddress(address)) {
-    const older = await olderKeyNote(deps, null);
+    /* A local runtime needs no key — unless it was started with one, and since
+       Settings → AI offers an optional key box for a local address, the key
+       saved there is read and sent here exactly as the sweep and the server
+       send it (core/model-key.mjs has no local exception). Doctor used to
+       send none, so a runtime with --api-key and its key saved answered 401,
+       and was told to save the key it already had (TT-3451). */
+    let key = null;
+    let unreadable = false;
+    try {
+      key = await readModelKey(model.baseUrl, { getSecret: deps.getSecret, configuredBaseUrl: model.baseUrl });
+    } catch { unreadable = true; /* the secret store line says why */ }
+    const older = await olderKeyNote(deps, key);
+    const saved = key ? ' — a key is saved for it, and is sent.'
+      : unreadable ? ' — Zelos could not read whether a key is saved for it (see the secret store line).'
+        : ' — no API key needed.';
     return {
+      // `checked` — a local runtime is always worth asking, an unused older
+      // key or not; only a missing key for a hosted service skips that.
       result: older
-        ? check('model.key', label, 'warn', `${address} runs on this machine — no API key needed.${older}`,
-          'Open Settings → AI → Advanced and choose Forget the stored key to remove it.')
-        : check('model.key', label, 'pass', `${address} runs on this machine — no API key needed.`),
-      key: null,
+        ? check('model.key', label, 'warn', `${address} is a local AI program${saved}${older}`,
+          key
+            ? 'Open Settings → AI → Advanced and choose Forget the stored key to remove both, then paste the current key again.'
+            : 'Open Settings → AI → Advanced and choose Forget the stored key to remove it.')
+        : check('model.key', label, 'pass', `${address} is a local AI program${saved}`),
+      key,
+      checked: true,
     };
   }
   // The key saved for this address, and only that one (core/model-key.mjs). A
@@ -594,6 +613,28 @@ async function checkModelEndpoint(config, deps, { key, keyChecked, timeoutMs, si
     });
   } catch (err) {
     const status = err?.status ?? null;
+    /* No key was sent, so none was refused: a local runtime started WITH one
+       — llama.cpp, vLLM or LocalAI run with --api-key, LM Studio with
+       authentication on — and none saved. "Refused the stored key … paste a
+       fresh one" named a key that does not exist (QA, 2026-10-10, TT-3451).
+       The box is under Settings → AI → Advanced; a probed runtime's guided
+       card has none. */
+    if ((status === 401 || status === 403) && !key) {
+      return check(
+        'model', label, 'fail',
+        `The AI program at ${address} wants a key, and none is saved for it. For experts: it answered HTTP ${status} to a request with no key.`,
+        'If you started it with a key (--api-key for llama.cpp, vLLM or LocalAI, or authentication in LM Studio), open Settings → AI → Advanced and paste that same key under "API key (optional)". Or start it without one.',
+      );
+    }
+    // A local runtime refusing the key saved for it: it was started with a
+    // different one. There is no "website" to make a fresh one on.
+    if ((status === 401 || status === 403) && isLocalAddress(address)) {
+      return check(
+        'model', label, 'fail',
+        `The AI program at ${address} refused the key saved for it. For experts: it answered HTTP ${status}.`,
+        'The key saved in Zelos is not the one the program was started with. Open Settings → AI → Advanced and paste the key it was started with (its --api-key) under "API key (optional)".',
+      );
+    }
     if (status === 401 || status === 403) {
       return check(
         'model', label, 'fail',
@@ -1232,11 +1273,11 @@ async function diagnoseUnlocked({ config = null, timeoutMs = 10_000, signal, dep
   checks.push(await checkSecrets(d, home));
 
   if (cfg) {
-    const { result: keyCheck, key } = await checkModelKey(cfg, d);
+    const { result: keyCheck, key, checked } = await checkModelKey(cfg, d);
     checks.push(keyCheck);
     checks.push(await checkModelEndpoint(cfg, d, {
       key,
-      keyChecked: keyCheck.status === 'pass',
+      keyChecked: checked === true || keyCheck.status === 'pass',
       timeoutMs,
       signal,
     }));

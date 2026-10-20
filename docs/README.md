@@ -179,10 +179,11 @@ and offers whatever it finds first.
 3. Zelos will find it. Again: no key.
 
 **llama.cpp, vLLM, LocalAI** and anything else with an OpenAI-compatible server
-work the same way. If Zelos doesn't find yours automatically, choose the
-matching preset — or "Custom (OpenAI-compatible)" — and type the address its
-server prints, ending in `/v1`. Zelos checks the address by asking it for its
-model list, and tells you exactly what went wrong if it can't reach it.
+work the same way. If Zelos doesn't find yours automatically, open **More
+choices** and pick **Custom (OpenAI-compatible)**, then type the address its
+server prints, ending in `/v1`. **List available models** and **Test the
+connection** ask that address for its model list and a reply, and tell you
+exactly what went wrong if they can't reach it.
 
 > **A note on quality.** A small local model will produce a rougher board than a
 > large hosted one — it will miscategorise things and write clumsier drafts.

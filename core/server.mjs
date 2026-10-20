@@ -1554,12 +1554,39 @@ async function handleMailGuess(ctx) {
   sendJSON(ctx.res, 200, { ...answer, signIn, clientReady });
 }
 
+const OWNED_NAMESPACES = ['mail', 'calendar', 'oauth', 'model'];
+
+/**
+ * May a Test route use this stored secret? Only one that belongs to the kind
+ * being tested: its own namespace (`mail.…`, `calendar.…`, which is what the
+ * Settings forms mint before an account is saved), or a hand-named ref an
+ * account of that kind is configured with — never one in another kind's
+ * namespace (`mail.`, `calendar.`, `oauth.`, `model.`, or a source type's own,
+ * like `slack.`), whatever the config says. Without this a session-token
+ * holder could have ANY stored credential — a calendar password, an OAuth
+ * client secret — delivered as an IMAP password or as Basic auth to a host of
+ * their choosing. The model routes
+ * were closed by TT-3417; these two were the rest of it (QA, 2026-10-10,
+ * TT-3430).
+ */
+function refBelongsTo(kind, ref, cfg) {
+  if (!ref) return true;
+  const prefix = String(ref).split('.')[0];
+  if (prefix === kind) return true;
+  // Another kind's namespace is refused even when a config names it: a config
+  // is written with the same session token, so "an account uses it" cannot be
+  // what makes a mail password a calendar's.
+  if (OWNED_NAMESPACES.includes(prefix) || typesFor('sources').includes(prefix) || isModelKeyRef(ref)) return false;
+  const list = kind === 'mail' ? cfg?.mail : cfg?.calendars;
+  return Array.isArray(list) && list.some((account) => account?.keyRef === ref);
+}
+
 async function handleMailTest(ctx) {
   const body = await readJSON(ctx.req);
   const host = requireString(body, 'host', { max: 255 });
   const user = requireString(body, 'user', { max: 320 });
   const keyRef = requireString(body, 'keyRef', { max: 64 });
-  if (isModelKeyRef(keyRef)) throw new HttpError(400, 'keyRef must name a mail account, like mail.m_9f3a1c');
+  if (!refBelongsTo('mail', keyRef, ctx.config())) throw new HttpError(400, 'keyRef must name a mail account, like mail.m_9f3a1c');
   const port = Number(body.port ?? 993);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, 'port must be a port number');
   const requireTls = requireTlsFrom(body);
@@ -2245,7 +2272,7 @@ async function handleCalendarTest(ctx) {
      handler — in a file that knows nothing about calendars. */
   const kinds = typesFor('calendars');
   if (!kinds.includes(kind)) throw new HttpError(400, `kind must be ${orList(kinds)}`);
-  if (isModelKeyRef(body.keyRef)) throw new HttpError(400, 'keyRef must name a calendar, like calendar.c_9f3a1c');
+  if (!refBelongsTo('calendar', body.keyRef, ctx.config())) throw new HttpError(400, 'keyRef must name a calendar, like calendar.c_9f3a1c');
 
   if (kind === 'caldav') {
     const url = requireString(body, 'url', { max: 2_048 });

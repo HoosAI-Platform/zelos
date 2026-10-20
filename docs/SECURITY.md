@@ -1008,8 +1008,8 @@ table, are where a sign-in *creates* one:
 | `POST /api/model/test`, `GET /api/model/list` | sends the model key saved **for** the `baseUrl` in the request — and only that one. Naming another address gets that address's key, or none |
 | `POST /api/model/key`, `DELETE /api/model/key`, `GET /api/model/key` | files, forgets or reports (`{stored}`) the key for a `baseUrl`; the server derives the ref and never echoes the value |
 | `POST /api/mail/guess` | nothing — it names a provider from the address’s domain and reads no secret. For a domain its table does not list it may send the **domain** of the address (never the address) to the system DNS resolver, for its MX and then its SRV record, and nothing else |
-| `POST /api/mail/test` | sends the mail password to the `host`/`port` **in the request**; a `model.` ref is refused |
-| `POST /api/calendar/test` | sends the calendar password to the `url` **in the request**; a `model.` ref is refused |
+| `POST /api/mail/test` | sends the mail password to the `host`/`port` **in the request**; the ref must be a `mail.` one, or a hand-named one a configured mail account uses — never a `calendar.`, `oauth.`, `model.` or source (`slack.`, `github.`, …) one |
+| `POST /api/calendar/test` | sends the calendar password to the `url` **in the request**; the ref must be a `calendar.` one, or a hand-named one a configured calendar uses — never a `mail.`, `oauth.`, `model.` or source (`slack.`, `github.`, …) one |
 | `POST /api/mail/oauth` | starts a sign-in and reads no stored secret. **Microsoft** (`provider: 'microsoft'`): asks `login.microsoftonline.com` for a device code and, when you finish in your browser, stores the refresh token under the account's `keyRef`; the device code stays in this process and the page sees only the user code. **Google** (`provider: 'google'`): mints a PKCE verifier and a `state`, answers with the `accounts.google.com` URL for the page to open, and stores nothing until the callback below lands. A `clientSecret` in the body is written to the store under `oauth.google.clientSecret` before it is used and is never echoed; `GET /api/mail/oauth/:id` answers with the state of the flow and nothing credential-shaped |
 | `GET /oauth/callback` | the one route that takes no session token (section 6). Reads no stored secret; **writes** one — it trades the `code` and the PKCE verifier at `oauth2.googleapis.com` (with the client id, and the client secret when the client has one) and files the refresh token under the flow's `keyRef`. Refuses anything not from `127.0.0.1` or whose `state` does not match a pending flow, with one generic `400`. The page it returns contains no token and no address |
 
@@ -1017,7 +1017,10 @@ That is not a bug — it is what "test this connection" means, and during first-
 setup the address you are testing is by definition not saved yet. But it does
 mean the honest statement is narrower than "a hole in the local server cannot
 read your keys". Anything holding the session token can name a host it controls
-and have Zelos deliver a stored credential to it. **The session token is the
+and have Zelos deliver a stored credential to it. The Test routes only send a
+secret as the kind it belongs to — they will not hand a mail password to a
+calendar URL — but the settings are written with the same token, and an account
+can be saved naming any stored ref. **The session token is the
 whole boundary around your secrets, exactly as it is around everything else** —
 and per section 6, any process running as you can read that token.
 
