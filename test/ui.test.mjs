@@ -7213,6 +7213,36 @@ test('"Try again" on the sharing panel\'s error banner reads the ordinary window
   assert.ok(!findButton(panel, 'Show fewer'), '"Show fewer" is offered for a window nobody widened');
 });
 
+test('with sharing off, the summary counts "boxes", and one box "does" nothing (TT-3466)', async (t) => {
+  withPlainDom(t);
+  const base = plainFetch({});
+  let effectiveScopes = {};
+  const scopeInfo = [
+    { id: 'board', label: 'Board', summary: 'Items.', tools: ['zelos_board'] },
+    { id: 'calendar', label: 'Calendar', summary: 'Events.', tools: ['zelos_calendar'] },
+  ];
+  globalThis.fetch = async (reqPath, init = {}) => {
+    if (reqPath === '/api/ai' || reqPath.startsWith('/api/ai?')) {
+      const payload = { enabled: false, scopes: effectiveScopes, effectiveScopes, maxRows: 50, tokens: [], access: [], accessMore: false, accessMax: 500, client: null, scopeInfo };
+      return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+    }
+    return base(reqPath, init);
+  };
+  t.after(() => { delete globalThis.fetch; });
+  const access = await import(fileUrl(UI, 'views/ai-access.js'));
+
+  effectiveScopes = { board: true, calendar: true };
+  let panel = access.aiAccessPanel();
+  await settle();
+  assert.match(onScreen(panel), /The switch is off, so the 2 boxes ticked below do nothing until you switch it on\./);
+  assert.doesNotMatch(anywhere(panel), /boxs/);
+
+  effectiveScopes = { board: true };
+  panel = access.aiAccessPanel();
+  await settle();
+  assert.match(onScreen(panel), /The switch is off, so the 1 box ticked below does nothing until you switch it on\./);
+});
+
 /* ------------------------------------------------ 8. "Stuck? Ask Claude" */
 
 /**
