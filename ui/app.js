@@ -29,6 +29,7 @@ import { createCommandMenu, commandShortcut } from './lib/commands.js';
 import { parseConnectionTarget } from './lib/source-status.js';
 import { updateBanner } from './lib/update-banner.js';
 import { updatesPanel } from './lib/updates.js';
+import { isEditing } from './lib/editing.js';
 
 import { renderNow } from './views/now.js';
 import { renderToday } from './views/today.js';
@@ -36,7 +37,7 @@ import { renderOwed } from './views/owed.js';
 import { renderCalendar, tickNowLine } from './views/calendar.js';
 import { renderSearch } from './views/search.js';
 import { renderAsk } from './views/ask.js';
-import { renderSettings } from './views/settings.js';
+import { renderSettings, forgetOutcomes } from './views/settings.js';
 import { renderOnboarding } from './views/onboarding.js';
 
 // Search carries no count. Every other number in the rail is a claim about work
@@ -603,18 +604,24 @@ function closeSetupUpdates() {
  */
 let renderQueued = false;
 
+/** Whether the outcomes Settings keeps were said on the setup screens or on the board. */
+let outcomesOnboarding = null;
+
 function editingInMain() {
-  const active = document.activeElement;
-  if (!active || !main || !main.contains(active)) return false;
-  if (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT') return true;
-  // A button inside an open editor still counts. Tabbing from a text field to
-  // "Save account" lands focus on the button, and flushing in that moment
-  // rebuilds the view — the open form and everything typed into it gone
-  // before the button can be pressed, the result of "Test the connection"
-  // written into detached nodes. Focus anywhere else in the view — an item
-  // row's tick, a panel-level button — still flushes, because those hold no
-  // half-finished typing to protect.
-  return Boolean(active.closest('form, .account-form'));
+  // The rule itself lives in ui/lib/editing.js so the test suite can name the
+  // selector it checks. A button inside an open editor still counts: Tabbing
+  // from a text field to "Save account" lands focus on the button, and
+  // flushing in that moment rebuilds the view — the open form and everything
+  // typed into it gone before the button can be pressed, the result of "Test
+  // the connection" written into detached nodes. The same is true of Save on
+  // You, AI, Schedule and Privacy, which sit in plain panels rather than
+  // editors: a check finishing while a name was half-typed queued a redraw,
+  // Tab to Save flushed it, and the panel came back from the stored settings
+  // with the typing gone, so Enter saved nothing (QA, 2026-10-10, TT-3465).
+  // Those panels now carry `data-editing-region`. Focus anywhere else in the
+  // view — an item row's tick, a button on Your data — still flushes, because
+  // those hold no half-finished typing to protect.
+  return isEditing(document.activeElement, main);
 }
 
 /**
@@ -697,6 +704,13 @@ function render({ force = false } = {}) {
   }
 
   const onboarding = showOnboarding();
+  // Setup starting or finishing is a move to another screen, as a change of
+  // route is: what a Settings panel last said about a save is not carried
+  // into it (TT-3448; onRoute() has the reason).
+  if (onboarding !== outcomesOnboarding) {
+    outcomesOnboarding = onboarding;
+    forgetOutcomes();
+  }
   if (onboarding) {
     setupActive = true;
     // The flow gets the whole window: no rail, no tab bar, nothing to click past.
@@ -927,6 +941,11 @@ function onRoute() {
   const beforeSub = route.sub;
   route = next;
   routeHash = window.location.hash || '#/now';
+  // A Settings panel keeps what it last said about a save across the redraw
+  // the save causes (ui/views/settings.js, statusLine). That is for the
+  // person still looking at it: one who went to another view or tab and came
+  // back finds the panel as it is, not "Saved." from a visit ago (TT-3448).
+  if (before !== route.view || beforeSub !== route.sub) forgetOutcomes();
   render({ force: true });
   if (before !== route.view) {
     // A new view starts at its top. Same-view re-renders (a deferred board

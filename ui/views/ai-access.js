@@ -878,7 +878,7 @@ export function aiAccessPanel() {
           'Paste a key you created above in place of the placeholder. This address only answers on this machine, and only while Zelos is running.',
           onCopied,
         ),
-      ]),
+      ], { id: 'ai.connect' }),
     ]);
   }
 

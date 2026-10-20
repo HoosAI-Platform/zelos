@@ -73,18 +73,29 @@ const nextId = (prefix) => `${prefix}-${(uid += 1)}`;
  * all still built, and all still reachable by one press. A guard in
  * test/ui.test.mjs walks the rendered tree and reads only what is NOT inside
  * one of these, so the register of the open text is tested, not trusted.
+ *
+ * A drawer with an `id` remembers whether it was left open, for as long as
+ * the page is. A save redraws the panel it was pressed in, and a drawer that
+ * always came back shut closed Privacy's Advanced under the person who had
+ * just changed a number in it (QA, 2026-10-10, TT-3448). Only the panels'
+ * own drawers carry one; a drawer inside an account's editor goes when the
+ * editor does, so there is nothing for it to come back to.
  */
-export function fold(label, children, { open = false } = {}) {
+const openFolds = new Map();
+
+export function fold(label, children, { open = false, id = null } = {}) {
+  const shown = id && openFolds.has(id) ? openFolds.get(id) : open;
   const body = el('div', { class: 'unfold-body' }, children);
-  body.hidden = !open;
+  body.hidden = !shown;
   const toggle = el('button', {
     type: 'button',
     class: 'unfold-toggle',
-    'aria-expanded': open ? 'true' : 'false',
+    'aria-expanded': shown ? 'true' : 'false',
     onclick() {
       const was = this.getAttribute('aria-expanded') === 'true';
       this.setAttribute('aria-expanded', was ? 'false' : 'true');
       body.hidden = was;
+      if (id) openFolds.set(id, !was);
     },
   }, [
     el('span', { class: 'unfold-caret', 'aria-hidden': 'true', text: '▸' }),
@@ -321,15 +332,81 @@ export function checkbox(labelText, { checked = false, onChange, hint = null } =
   ]);
 }
 
-/** A status line that can say "working", "good" or exactly what went wrong. */
-export function statusLine() {
+/*
+ * What each panel last said about a save, kept outside the panel.
+ *
+ * A save redraws the panel it was pressed in: saveConfig() moves `rev`, the
+ * shell rebuilds the view, and Email, Calendars and Other things it can read
+ * rebuild themselves on top of that to close the editor. The line the click
+ * handler then wrote "Saved." into was no longer on the page, so Settings
+ * never showed the outcome of a save — or of "Check it works" (QA,
+ * 2026-10-10, TT-3448). A line made with a key now keeps what it last said
+ * here, and the line that replaces it on the next redraw starts out saying
+ * the same thing.
+ *
+ * Only panel-level lines take a key — one per panel, named by its route. The
+ * line inside an account's editor goes away with the editor, so the editor
+ * hands its outcome to the panel's line instead, naming the account. An
+ * outcome lasts until the next edit in that panel, or until the person goes
+ * somewhere else: forgetOutcomes() runs on every change of view or Settings
+ * tab, and on every step of first-run setup.
+ */
+const outcomes = new Map();      // key → { tone, text }
+const shownLines = new Map();    // key → the newest line made for it
+/* Moved on by every forgetOutcomes(). A save still in flight when the person
+   left belongs to the visit they left: when it lands it writes only into its
+   own, detached line, never "Saved." or "Saving…" into a panel they have
+   come back to and done nothing in. */
+let outcomeGeneration = 0;
+
+function paintStatus(node, tone, text) {
+  node.textContent = text;
+  node.className = tone ? `status is-${tone}` : 'status';
+}
+
+/** Drop every kept outcome. Called by the shell on navigation and by first-run setup on each step. */
+export function forgetOutcomes() {
+  outcomes.clear();
+  shownLines.clear();
+  outcomeGeneration += 1;
+}
+
+/** Drop one panel's outcome, and take it off the screen: the person has started changing something else. */
+export function forgetOutcome(key) {
+  outcomes.delete(key);
+  const shown = shownLines.get(key);
+  if (shown) paintStatus(shown, null, '');
+}
+
+/**
+ * A status line that can say "working", "good" or exactly what went wrong.
+ * With a `key` it is a panel's line, and what it says outlives a redraw of
+ * the panel; see above.
+ */
+export function statusLine(key = null) {
   const node = el('p', { class: 'status', role: 'status' });
+  const generation = outcomeGeneration;
+  if (key) {
+    shownLines.set(key, node);
+    const kept = outcomes.get(key);
+    if (kept) paintStatus(node, kept.tone, kept.text);
+  }
+  const say = (tone, text) => {
+    paintStatus(node, tone, text);
+    if (!key || generation !== outcomeGeneration) return;
+    if (tone) outcomes.set(key, { tone, text });
+    else outcomes.delete(key);
+    // The panel this line was made for may have been redrawn while the save
+    // was in flight; the line on screen now is the one that has to say it.
+    const shown = shownLines.get(key);
+    if (shown && shown !== node) paintStatus(shown, tone, text);
+  };
   return {
     node,
-    clear() { node.textContent = ''; node.className = 'status'; },
-    working(text) { node.textContent = text; node.className = 'status is-working'; },
-    good(text) { node.textContent = text; node.className = 'status is-good'; },
-    bad(text) { node.textContent = text; node.className = 'status is-bad'; },
+    clear() { say(null, ''); },
+    working(text) { say('working', text); },
+    good(text) { say('good', text); },
+    bad(text) { say('bad', text); },
   };
 }
 
@@ -611,7 +688,7 @@ export function defaultIdentityEmail(config) {
 
 function youPanel() {
   const identity = state.config?.identity || {};
-  const status = statusLine();
+  const status = statusLine('you');
   const stored = String(identity.email || '').trim();
   const guess = defaultIdentityEmail(state.config);
 
@@ -629,7 +706,13 @@ function youPanel() {
   // Writing it back here would freeze the zone it was in the day it was typed.
   const tzInput = input({ value: identity.timezone || '', readonly: true });
 
-  return el('div', { class: 'panel panel-you' }, [
+  // `data-editing-region`: Save here sits in a plain div, so without the mark a
+  // focused Save counted as "not editing" and a redraw queued by a finished
+  // check flushed the moment Tab reached it — the panel rebuilt from the
+  // stored settings, the typed name gone, Enter saving nothing (QA,
+  // 2026-10-10, TT-3465). The same mark is on the AI, Schedule and Privacy
+  // panels; ui/lib/editing.js says why it is on these and not on every panel.
+  return el('div', { class: 'panel panel-you', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: 'Two facts about you. Neither leaves this computer except inside what Zelos sends to the AI you chose.' }),
     field('Your name', nameInput, {
       hint: 'Signs the replies Zelos writes. If you leave this blank, the replies Zelos writes for you will not be signed.',
@@ -767,7 +850,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     suggested: [],
   };
 
-  const status = statusLine();
+  const status = statusLine('model');
   const localWrap = el('div', { class: 'runtime-list' });
   const choiceWrap = el('div', { class: 'preset-grid' }, el('p', { class: 'quiet-note', text: 'Loading the list of AI services…' }));
   const moreWrap = el('div', { class: 'preset-grid' });
@@ -775,6 +858,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
   guidedWrap.hidden = true;
   const formWrap = el('div', { class: 'chosen' });
   const probeNote = el('p', { class: 'quiet-note' });
+  const expertLine = el('div');
   // The "Stuck?" line, redrawn with the card's name once one is chosen so the
   // message Claude gets is about Anthropic's key page and not both.
   const helpSlot = el('div');
@@ -1115,10 +1199,14 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
           })
           : null,
       ]),
-      // The status line has one home. It sits in the guided card when there
-      // is one, so the expert form borrows it only when it is the whole panel.
-      guide ? null : status.node,
     ]);
+
+    // The status line has one home. It sits in the guided card when there is
+    // one; otherwise just under the Advanced drawer, not inside it. A save's
+    // redraw can rebuild this panel with no card — before the presets
+    // arrive, or when they never do — and a line inside a shut drawer said
+    // its outcome to nobody (TT-3448).
+    replace(expertLine, [guide ? null : status.node]);
 
     replace(helpSlot, [askClaude({
       step: 'ai',
@@ -1126,10 +1214,10 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     })]);
   }
 
-  function choose(next, { scroll = true } = {}) {
+  function choose(next, { scroll = true, keepKey = false } = {}) {
     Object.assign(draft, next);
     protocolPicked = false;
-    drawForm();
+    drawForm({ keepKey });
     if (scroll) (draft.guide ? guidedWrap : formWrap).scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     // The chosen service's own key, if one was saved for it before.
     const address = draft.baseUrl;
@@ -1137,6 +1225,15 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       learnKeyStored().then((found) => { if (found && draft.baseUrl === address) drawForm({ keepKey: true }); });
     }
   }
+
+  // A card the person pressed: what the panel said about the last service is
+  // not about this one. Not choose() itself, which also restores the saved
+  // card after every redraw — the redraw a save causes, whose outcome has to
+  // stay on screen (TT-3448).
+  const pick = (next) => {
+    status.clear();
+    choose(next);
+  };
 
   /** The guided card for a hosted preset, or for a runtime the probe found. */
   const guideFor = (preset) => ({
@@ -1161,7 +1258,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     localWrap.replaceChildren(...found.map((rt) => el('button', {
       type: 'button',
       class: 'preset',
-      onclick: () => choose({
+      onclick: () => pick({
         protocol: 'openai',
         label: rt.label,
         baseUrl: rt.baseUrl,
@@ -1172,6 +1269,11 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       el('span', { class: 'preset-label', text: `An AI program on this computer — ${rt.label}` }),
       el('span', { class: 'preset-note', text: 'Most private. The AI processes what Zelos reads on this computer.' }),
     ])));
+    // A saved runtime gets its card back on open, as a saved hosted service
+    // does below — so the redraw after "Check it works" shows the card, and
+    // the outcome in it, rather than the expert form (TT-3448).
+    const current = found.find((rt) => rt.baseUrl && rt.baseUrl === draft.baseUrl);
+    if (current) choose({ guide: guideForRuntime(current), model: draft.model || current.models?.[0]?.id || '' }, { scroll: false, keepKey: true });
   }).catch((err) => {
     probeNote.textContent = `Could not look for an AI program on this computer: ${err.message}`;
   });
@@ -1201,7 +1303,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
       return el('button', {
         type: 'button',
         class: 'preset',
-        onclick: () => choose({
+        onclick: () => pick({
           protocol: p.protocol,
           label: p.label,
           baseUrl: p.baseUrl,
@@ -1217,7 +1319,7 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     moreWrap.replaceChildren(...rest.map((p) => el('button', {
       type: 'button',
       class: 'preset',
-      onclick: () => choose({
+      onclick: () => pick({
         protocol: p.protocol,
         label: p.label,
         baseUrl: p.baseUrl,
@@ -1237,7 +1339,9 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
     // person to press "Check it works" that it could not pick a model — found
     // by driving the app, not by the tests, which always clicked the card.
     const current = guided.find((p) => p.baseUrl && p.baseUrl === draft.baseUrl);
-    if (current) choose({ guide: guideFor(current), model: draft.model || pickDefaultModel(current) }, { scroll: false });
+    // The service is the one already on screen, so a key typed before the
+    // list arrived is for it, and stays.
+    if (current) choose({ guide: guideFor(current), model: draft.model || pickDefaultModel(current) }, { scroll: false, keepKey: true });
   }).catch(() => {
     choiceWrap.replaceChildren(el('p', { class: 'quiet-note', text: 'Could not load the list of AI services.' }));
     moreWrap.replaceChildren(customChoice);
@@ -1245,15 +1349,19 @@ export function modelPanel({ compact = false, onDone = null } = {}) {
 
   drawForm();
 
-  return el('div', { class: 'panel panel-model' }, [
+  // An editing region, as on You (TT-3465): the guided card's key and the
+  // Advanced form's fields are saved by buttons in plain divs. Set here, not
+  // in renderSettings, so onboarding's copy of this panel is covered too.
+  return el('div', { class: 'panel panel-model', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: compact
       ? 'Zelos sends your mail summaries to the AI you pick here, and to nothing else.'
       : 'Pick the AI that reads your mail. Your mail summaries go to the AI you choose.' }),
     localWrap,
     choiceWrap,
     guidedWrap,
-    fold('More choices', moreWrap),
-    fold('Advanced', [probeNote, formWrap]),
+    fold('More choices', moreWrap, { id: 'model.more' }),
+    fold('Advanced', [probeNote, formWrap], { id: 'model.advanced' }),
+    expertLine,
     helpSlot,
   ]);
 }
@@ -1976,10 +2084,12 @@ function mailForm(account, { onSaved, onCancel }) {
             const adopted = !known && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draft.user) ? draft.user : '';
             if (adopted) patch.identity = { email: adopted };
             await saveConfig(patch);
-            status.good(adopted
-              ? `Saved. Zelos will also treat ${adopted} as your own address — change it under Settings → You.`
-              : 'Saved.');
-            onSaved();
+            const also = adopted ? ` Zelos will also treat ${adopted} as your own address — change it under Settings → You.` : '';
+            status.good(`Saved.${also}`);
+            // The panel closes this editor once it is saved, and this line
+            // with it, so the panel's own line says it too — naming the
+            // account, because it sits under the whole list (TT-3448).
+            onSaved(`Saved ${draft.label || draft.user}.${also}`);
           } catch (err) {
             status.bad(err.message);
           }
@@ -2265,6 +2375,9 @@ export function simpleMailForm({ onSaved, onCancel }) {
       return;
     }
     status.working(`Connecting to ${guess.known ? guess.label : guess.host}…`);
+    // Read once: the outcome names the address that was connected, even if
+    // the field is edited while the connection is being tried.
+    const address = email();
     try {
       // A signed-in mailbox carries no password, whatever was pasted before
       // the sign-in finished.
@@ -2272,7 +2385,7 @@ export function simpleMailForm({ onSaved, onCancel }) {
       const outcome = await connectSimpleMail({
         id,
         keyRef,
-        email: email(),
+        email: address,
         password,
         guess,
         auth,
@@ -2294,9 +2407,13 @@ export function simpleMailForm({ onSaved, onCancel }) {
         return;
       }
       const sent = outcome.sentMailbox ? `sent folder “${outcome.sentMailbox}”` : 'no sent folder found';
-      status.good(`Connected · ${plural(outcome.mailboxes, 'mailbox', 'mailboxes')} · ${sent}`
-        + (outcome.adopted ? ` · Zelos will also treat ${outcome.adopted} as your own address — change it under Settings → You.` : ''));
-      onSaved();
+      const found = `${plural(outcome.mailboxes, 'mailbox', 'mailboxes')} · ${sent}`
+        + (outcome.adopted ? ` · Zelos will also treat ${outcome.adopted} as your own address — change it under Settings → You.` : '');
+      status.good(`Connected · ${found}`);
+      // As in the full form: the panel closes this card once it is saved, so
+      // its own line carries the outcome, with the address it is about. It is
+      // the only place the adopted address is announced (TT-3448).
+      onSaved(`Connected ${address} · ${found}`);
     } catch (err) {
       status.bad(err.message);
     }
@@ -2487,6 +2604,14 @@ export function simpleMailForm({ onSaved, onCancel }) {
 export function mailPanel({ compact = false, onDone = null, rerender, connectionId = null } = {}) {
   const accounts = state.config?.mail || [];
   const wrap = el('div', { class: 'panel panel-mail' });
+  // The panel's line, under the list: where an editor's outcome is said once
+  // the editor has closed (TT-3448). Kept across the redraw that closes it.
+  const status = statusLine('mail');
+  const saved = (text) => {
+    status.good(text);
+    onDone?.();
+    rerender?.();
+  };
 
   if (!compact) {
     wrap.appendChild(el('p', { class: 'panel-lede', text: 'The email account Zelos reads. It only looks: nothing it reads gets marked read, moved or deleted, and what it reads is kept on this computer and nowhere else.' }));
@@ -2505,16 +2630,27 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
         button(account.enabled === false ? 'Enable' : 'Disable', {
           class: 'btn quiet',
           onClick: async () => {
-            const next = (state.config.mail || []).map((m) => (m.id === account.id ? { ...m, enabled: account.enabled === false } : m));
-            await saveConfig({ mail: next });
+            // Each of these says what it did on the panel's line, which the
+            // redraw keeps: otherwise the line would go on saying what the
+            // last save did, about an account that may now be gone (TT-3448).
+            status.working(account.enabled === false ? 'Turning on…' : 'Turning off…');
+            try {
+              const next = (state.config.mail || []).map((m) => (m.id === account.id ? { ...m, enabled: account.enabled === false } : m));
+              await saveConfig({ mail: next });
+            } catch (err) {
+              status.bad(err.message);
+              return;
+            }
+            status.good(`${account.enabled === false ? 'Turned on' : 'Turned off'} ${account.label || account.user}.`);
             rerender?.();
           },
         }),
         button('Edit', {
           class: 'btn quiet',
           onClick: () => {
+            status.clear();
             editor.replaceChildren(mailForm(account, {
-              onSaved: () => rerender?.(),
+              onSaved: (text) => { status.good(text); rerender?.(); },
               onCancel: () => editor.replaceChildren(),
             }));
           },
@@ -2522,9 +2658,16 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
         button('Remove', {
           class: 'btn quiet',
           onClick: async () => {
-            const next = (state.config.mail || []).filter((m) => m.id !== account.id);
-            await saveConfig({ mail: next });
+            status.working('Removing…');
+            try {
+              const next = (state.config.mail || []).filter((m) => m.id !== account.id);
+              await saveConfig({ mail: next });
+            } catch (err) {
+              status.bad(err.message);
+              return;
+            }
             await api.deleteSecret(account.keyRef).catch(() => {});
+            status.good(`Removed ${account.label || account.user}.`);
             rerender?.();
           },
         }),
@@ -2544,15 +2687,17 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
   const addButton = button('Add an email account', {
     class: 'btn solid',
     onClick: () => {
+      status.clear();
       help.hidden = true;
       editor.replaceChildren(simpleMailForm({
-        onSaved: () => { onDone?.(); rerender?.(); },
+        onSaved: saved,
         onCancel: () => { editor.replaceChildren(); help.hidden = false; },
       }));
     },
   });
 
   wrap.appendChild(list);
+  wrap.appendChild(status.node);
   if (connectionId && !accounts.some(account => account.id === connectionId)) wrap.prepend(missingConnection());
   wrap.appendChild(el('div', { class: 'row-inline' }, addButton));
   wrap.appendChild(editor);
@@ -2754,7 +2899,8 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
       const others = (state.config.calendars || []).filter((c) => c.id !== draft.id);
       await saveConfig({ calendars: [...others, { ...draft, kind: kindNow(), requireTls: requireTls() }] });
       status.good('Saved.');
-      onSaved();
+      // Said again on the panel's line, which outlives this editor (TT-3448).
+      onSaved(`Saved ${draft.label || 'the calendar'}.`);
       return true;
     } catch (err) {
       status.bad(err.message);
@@ -2865,7 +3011,7 @@ export function calendarPanel({ compact = false, onDone = null, rerender, connec
   const calendars = state.config?.calendars || [];
   const wrap = el('div', { class: 'panel panel-calendars' });
   const editor = el('div', { class: 'editor' });
-  const status = statusLine();
+  const status = statusLine('calendars');
   // The "Stuck?" line, redrawn for the calendar a card names once one is pressed.
   const helpSlot = el('div', {}, [askClaude({ step: 'calendar' })]);
 
@@ -2887,16 +3033,25 @@ export function calendarPanel({ compact = false, onDone = null, rerender, connec
           class: 'btn quiet',
           onClick: () => openEditor(editor, status, (manifests) => calendarForm(calendar, {
             manifests,
-            onSaved: () => rerender?.(),
+            onSaved: (text) => { status.good(text); rerender?.(); },
             onCancel: () => editor.replaceChildren(),
           })),
         }),
         button('Remove', {
           class: 'btn quiet',
           onClick: async () => {
-            await saveConfig({ calendars: (state.config.calendars || []).filter((c) => c.id !== calendar.id) });
+            // Said on the panel's line, which the redraw keeps, so the line
+            // stops describing the last save (TT-3448).
+            status.working('Removing…');
+            try {
+              await saveConfig({ calendars: (state.config.calendars || []).filter((c) => c.id !== calendar.id) });
+            } catch (err) {
+              status.bad(err.message);
+              return;
+            }
             // The stored password goes with it, as a mail account's does.
             if (calendar.keyRef) await api.deleteSecret(calendar.keyRef).catch(() => {});
+            status.good(`Removed ${calendar.label || calendar.url}.`);
             rerender?.();
           },
         }),
@@ -2934,7 +3089,7 @@ export function calendarPanel({ compact = false, onDone = null, rerender, connec
         manifests,
         guide,
         links,
-        onSaved: () => { onDone?.(); rerender?.(); },
+        onSaved: (text) => { status.good(text); onDone?.(); rerender?.(); },
         onCancel: () => editor.replaceChildren(),
       }));
     },
@@ -3038,7 +3193,8 @@ export function sourceForm(source, { manifests = [], onSaved, onCancel }) {
               }],
             });
             status.good('Saved. Zelos reads it the next time it checks.');
-            onSaved();
+            // Said again on the panel's line, which outlives this editor (TT-3448).
+            onSaved(`Saved ${labelInput.value.trim() || type}. Zelos reads it the next time it checks.`);
           } catch (err) {
             status.bad(err.message);
           }
@@ -3054,7 +3210,7 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
   const sources = state.config?.sources || [];
   const wrap = el('div', { class: 'panel panel-sources' });
   const editor = el('div', { class: 'editor' });
-  const status = statusLine();
+  const status = statusLine('sources');
 
   wrap.appendChild(el('p', { class: 'panel-lede', text: 'Most people need nothing here. If you use any of these work tools, add them. Zelos only ever reads them — nothing is ever written back.' }));
 
@@ -3071,8 +3227,17 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
         button(src.enabled === false ? 'Enable' : 'Disable', {
           class: 'btn quiet',
           onClick: async () => {
-            const next = (state.config.sources || []).map((s) => (s.id === src.id ? { ...s, enabled: src.enabled === false } : s));
-            await saveConfig({ sources: next });
+            // Said on the panel's line, which the redraw keeps, so the line
+            // stops describing the last save (TT-3448).
+            status.working(src.enabled === false ? 'Turning on…' : 'Turning off…');
+            try {
+              const next = (state.config.sources || []).map((s) => (s.id === src.id ? { ...s, enabled: src.enabled === false } : s));
+              await saveConfig({ sources: next });
+            } catch (err) {
+              status.bad(err.message);
+              return;
+            }
+            status.good(`${src.enabled === false ? 'Turned on' : 'Turned off'} ${src.label || src.id}.`);
             rerender?.();
           },
         }),
@@ -3080,15 +3245,22 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
           class: 'btn quiet',
           onClick: () => openEditor(editor, status, (manifests) => sourceForm(src, {
             manifests,
-            onSaved: () => rerender?.(),
+            onSaved: (text) => { status.good(text); rerender?.(); },
             onCancel: () => editor.replaceChildren(),
           })),
         }),
         button('Remove', {
           class: 'btn quiet',
           onClick: async () => {
-            await saveConfig({ sources: (state.config.sources || []).filter((s) => s.id !== src.id) });
+            status.working('Removing…');
+            try {
+              await saveConfig({ sources: (state.config.sources || []).filter((s) => s.id !== src.id) });
+            } catch (err) {
+              status.bad(err.message);
+              return;
+            }
             if (src.keyRef) await api.deleteSecret(src.keyRef).catch(() => {});
+            status.good(`Removed ${src.label || src.id}.`);
             rerender?.();
           },
         }),
@@ -3109,7 +3281,7 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
         settings: {},
       }, {
         manifests,
-        onSaved: () => rerender?.(),
+        onSaved: (text) => { status.good(text); rerender?.(); },
         onCancel: () => editor.replaceChildren(),
       }));
     },
@@ -3161,7 +3333,7 @@ export const END_HOUR_CHOICES = HOUR_CHOICES.slice(1);
 
 function sweepPanel() {
   const cfg = state.config?.sweep || { intervalMinutes: 30, activeHours: [6, 23], auto: true };
-  const status = statusLine();
+  const status = statusLine('sweep');
 
   const [everyMin, everyMax] = SWEEP_INTERVAL_RANGE;
   const intervalInput = input({ type: 'number', value: String(cfg.intervalMinutes), min: String(everyMin), max: String(everyMax) });
@@ -3169,7 +3341,8 @@ function sweepPanel() {
   const toSelect = select(END_HOUR_CHOICES, { value: String(cfg.activeHours?.[1] ?? 23) });
   let auto = cfg.auto !== false;
 
-  return el('div', { class: 'panel' }, [
+  // An editing region, as on You (TT-3465): Save is in a plain div.
+  return el('div', { class: 'panel', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: 'When Zelos looks at your mail and calendar on its own. You can always press Check now as well.' }),
     checkbox('Check my mail automatically', { checked: auto, onChange: (v) => { auto = v; } }),
     el('div', { class: 'grid-2' }, [
@@ -3216,7 +3389,7 @@ function sweepPanel() {
     status.node,
     fold('Advanced', [
       el('p', { class: 'quiet-note', text: 'A check fetches your email account, your calendars and anything under “Other things it can read”, and, only when something new arrived, asks the AI to re-read the board. Between those calls it still re-derives what is stale and what comes first, which costs nothing and contacts nobody.' }),
-    ]),
+    ], { id: 'sweep.advanced' }),
   ]);
 }
 
@@ -3247,7 +3420,7 @@ export function wholeNumberIn(value, min, max) {
 
 function privacyPanel() {
   const cfg = state.config?.privacy || { maxItemsPerSweep: 150, sendBodies: true, bodyChars: 4000 };
-  const status = statusLine();
+  const status = statusLine('privacy');
   // Ticked only for a real `true` (or no setting at all, which is the
   // default): a "false", 0 or null on disk is off to the engine, and a box
   // that showed it ticked would turn bodies on at the next Save (TT-3424).
@@ -3257,7 +3430,8 @@ function privacyPanel() {
   const charsInput = input({ type: 'number', value: String(cfg.bodyChars), min: String(charsMin), max: String(charsMax) });
   const maxInput = input({ type: 'number', value: String(cfg.maxItemsPerSweep), min: String(itemsMin), max: String(itemsMax) });
 
-  return el('div', { class: 'panel' }, [
+  // An editing region, as on You (TT-3465): Save is in a plain div.
+  return el('div', { class: 'panel', 'data-editing-region': true }, [
     el('p', { class: 'panel-lede', text: 'Zelos only talks to the AI service you chose. It sends nothing to us and nothing to anyone else.' }),
     checkbox('Let the AI read the full text of your emails (recommended — it does a better job)', {
       checked: sendBodies,
@@ -3270,7 +3444,7 @@ function privacyPanel() {
         field('Characters of each email sent to the AI', charsInput),
         field('Most items per check', maxInput, { hint: 'Ask uses this too, up to 12 sources.' }),
       ]),
-    ]),
+    ], { id: 'privacy.advanced' }),
     el('div', { class: 'row-inline' }, [
       button('Save', {
         class: 'btn solid',
@@ -3374,7 +3548,7 @@ function dataStats() {
 }
 
 function dataPanel() {
-  const status = statusLine();
+  const status = statusLine('data');
   const home = state.health?.home || '(unknown)';
   const platform = typeof window !== 'undefined' ? (window.zelos?.platform || window.navigator?.platform || '') : '';
 
@@ -3435,7 +3609,7 @@ function dataPanel() {
         el('p', { class: 'quiet-note', text: 'Zelos deliberately has no route that wipes your data — a local server that can destroy the database on request is a local server a stray web page can point at. Done by hand, with the app closed, it is one command:' }),
         el('pre', { class: 'code' }, el('code', { text: `rm -rf "${home}"` })),
         el('p', { class: 'quiet-note', text: secretStoreNotes(state.health?.backend?.name).data }),
-      ]),
+      ], { id: 'data.experts' }),
     ]),
     status.node,
   ]);
@@ -3498,7 +3672,7 @@ function aboutPanel() {
           el('li', { text: 'Prompt-injection defences here are mitigation, not proof. The guarantee is the one above: nothing acts on model output but you.' }),
         ]),
       ]),
-    ]),
+    ], { id: 'about.security' }),
     section('Start over', {}, [
       el('p', { class: 'quiet-note', text: 'Run the first-time setup again. Nothing is deleted; it just walks you back through the choices.' }),
       el('div', { class: 'row-inline' }, button('Run setup again', {
@@ -3612,6 +3786,9 @@ function appearancePanel() {
  *    `aria-labelledby` pointing at the id the tab had one paint ago.
  */
 const tabId = (id) => `settings-tab-${id}`;
+
+/** The panels whose line is made with their route as its key, and so keeps an outcome across a redraw. */
+const OUTCOME_PANELS = new Set(['you', 'model', 'mail', 'calendars', 'sweep', 'privacy', 'sources', 'data']);
 const panelId = (id) => `settings-panel-${id}`;
 
 export function renderSettings(ctx) {
@@ -3683,6 +3860,15 @@ export function renderSettings(ctx) {
   body.setAttribute('role', 'tabpanel');
   body.setAttribute('aria-labelledby', tabId(panel));
   body.setAttribute('tabindex', '-1');
+
+  // A panel's kept outcome lasts until the person changes something in it:
+  // "Saved." under a field they have since typed over is no longer true.
+  // One listener on the panel, which input and change bubble up to.
+  if (OUTCOME_PANELS.has(panel)) {
+    const forget = () => forgetOutcome(panel);
+    body.addEventListener('input', forget);
+    body.addEventListener('change', forget);
+  }
 
   const errors = state.configErrors || [];
 
