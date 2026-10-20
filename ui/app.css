@@ -1073,6 +1073,12 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 
 .cal-scroll { max-height: min(70dvh, 44rem); overflow-y: auto; overflow-x: hidden; }
+/* The scroller is a tab stop (TT-3472), but its ring can show on neither side
+   of its edge: .cal-grid's overflow: hidden clips one outside, and the
+   positioned columns, chips and now-line paint over one inside. So the
+   grid around it wears the ring instead. */
+.cal-scroll:focus-visible { outline: none; }
+.cal-grid:has(.cal-scroll:focus-visible) { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .cal-body { display: grid; grid-template-columns: var(--gutter) minmax(0, 1fr); }
 
 .cal-gutter { position: relative; height: calc(1440 * var(--min-h)); }

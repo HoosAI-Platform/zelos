@@ -1773,6 +1773,29 @@ test('the calendar opens where the day is, not at midnight', async () => {
   assert.equal(cal.shouldOpenAtTarget({ signature: sig, lastSignature: 'week|x|y', wasOnScreen: true }), true);
 });
 
+test('the calendar\'s scrolling hours are a named tab stop, so a keyboard can scroll them (TT-3472)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({ calls: [] });
+  // The plain DOM runs a frame at once; the grid measures in its second.
+  globalThis.getComputedStyle = () => ({ lineHeight: 'normal', getPropertyValue: () => '' });
+  t.after(() => { delete globalThis.fetch; delete globalThis.getComputedStyle; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const cal = await import(fileUrl(UI, 'views/calendar.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [{ id: 'home', label: 'Home' }], sources: [] };
+  const view = cal.renderCalendar({ sub: null, navigate() {}, rerender() {} });
+  const scroller = plainWalk(view).find((n) => (n.attributes.class || '').split(/\s+/).includes('cal-scroll'));
+  assert.ok(scroller, 'the week grid has no scroller');
+  // WebKit does not focus a scroll box on its own, and nothing inside this one
+  // takes focus, so without a tabindex the hours out of view are out of reach.
+  assert.equal(scroller.getAttribute('tabindex'), '0');
+  assert.equal(scroller.getAttribute('role'), 'region');
+  assert.match(scroller.getAttribute('aria-label'), /^(Day|Week) schedule$/);
+  // Its focus ring is the grid's: .cal-grid clips one outside the scroller,
+  // and the positioned columns and chips paint over one inside it.
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
+  assert.match(css, /\.cal-grid:has\(\.cal-scroll:focus-visible\)\s*\{[^}]*outline:/, 'nothing shows that the hours have focus');
+});
+
 test('the tab bar does not keep a second copy of how many views there are', () => {
   const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
   const bar = /^\.tabbar \{([^}]*)\}/m.exec(css);
