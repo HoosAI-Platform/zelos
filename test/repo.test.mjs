@@ -1517,6 +1517,33 @@ test('docs/INSTALL.md lists the files the desktop updater keeps', () => {
   assert.ok(!/nothing else/.test(table), 'the table still says the shell profile holds nothing else');
 });
 
+test('every path in the SPEC.md layout exists', () => {
+  /* QA, 2026-10-10 (TT-3435): SPEC §1 drew an assets/fonts/ folder that has
+     never existed; the UI uses system font stacks. The tree is the first map a
+     contributor reads, so each file and folder it names must be there. */
+  const spec = fs.readFileSync(path.join(ROOT, 'docs', 'SPEC.md'), 'utf8');
+  const at = spec.indexOf('## 1. Layout');
+  assert.ok(at >= 0, 'SPEC.md has no "## 1. Layout" section');
+  const tree = spec.slice(spec.indexOf('```\n', at) + 4, spec.indexOf('\n```', at + 20));
+  const named = [];
+  let parent = '';
+  for (const raw of tree.split('\n').slice(1)) {          // the first line is the repo itself
+    const line = raw.replace(/\(.*$/, '').trimEnd();       // drop "(plus any split modules…)" notes
+    const indent = line.length - line.trimStart().length;
+    const words = line.trim().split(/\s+/).filter((w) => /^[\w.-]+(?:\/[\w.-]+)*(?:\/|\.\w+)$/.test(w));   // paths only, not the notes beside them
+    if (!words.length) continue;
+    let base = '';
+    if (indent <= 2) {
+      if (words[0].endsWith('/')) { parent = words.shift(); base = parent; } else parent = '';
+    } else base = parent;
+    for (const w of words) named.push(base + w);
+    if (indent <= 2 && base) named.push(base);
+  }
+  assert.ok(named.includes('core/server.mjs') && named.includes('assets/icon.png'), `the layout parser lost its way: ${named.join(' ')}`);
+  for (const rel of named) assert.ok(fs.existsSync(path.join(ROOT, rel)), `SPEC.md §1 names ${rel}, which does not exist`);
+  assert.ok(!spec.includes('assets/fonts'), 'SPEC.md still names assets/fonts, which does not exist');
+});
+
 test('docs/INSTALL.md leads each first-open warning with what to click, in plain words', () => {
   const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
 

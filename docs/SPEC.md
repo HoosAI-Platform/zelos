@@ -49,7 +49,7 @@ zelos/
   ui/  index.html  app.css  app.js  (plus any split modules; all served from disk)
   test/  *.test.mjs
   desktop/  main.js  preload.js  package.json   (Electron shell — its own deps)
-  assets/  icon.png  fonts/
+  assets/  icon.png  icon.svg
   docs/  SPEC.md  README.md  SECURITY.md
 ```
 
@@ -558,7 +558,8 @@ setup.
 ## 9. `ui/` — the face
 
 Zero build step, zero dependencies, no CDN. Plain ES modules, hand-written CSS.
-Must work offline. All fonts self-hosted in `assets/fonts` (or a good system stack).
+Must work offline. No web fonts: the UI uses system font stacks (`--serif`, `--sans` and
+`--mono` in `ui/app.css`).
 
 **Design identity.** Zelos is Greek — but the *app* is the quiet half of that identity. It is
 not a pottery museum; it is an operator's board that happens to be carved from the same stone
