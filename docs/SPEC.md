@@ -512,7 +512,7 @@ Routes (JSON in/out unless noted):
 | GET | `/api/items/:id/history` | `?limit&before` — `limit` 1–50, default 20 | `{entries[], nextBefore, recordedSince}` — the item's recorded changes, newest first; 404 for an unknown item |
 | POST | `/api/updates/check` | `{}` — any field is refused with 400 | `{currentVersion, latestVersion, updateAvailable, ahead, releaseUrl, publishedAt, notes, downloads[], checkedAt}` from the official GitHub release; 502 if it cannot be reached |
 | POST | `/api/capture` | `{text}` | `{id}` |
-| GET/PUT | `/api/config` | config patch | `{config, errors, secretRefs, modelKeyStored}` — **never returns secrets** |
+| GET/PUT | `/api/config` | config patch — saved first, reported second: a value `validateConfig` refuses is kept and listed in `errors`, so a half-filled form can come back. The one exception: a `ui.accent` that is not `#rrggbb` is a 400 and nothing is written (the default to reset to is `#5b8cff`) | `{config, errors, secretRefs, modelKeyStored}` — **never returns secrets** |
 | POST | `/api/secrets` | `{ref, value}` | `{ok}` — write-only, no read route exists; refuses `model.` refs |
 | DELETE | `/api/secrets/:ref` | | `{ok}` |
 | POST | `/api/model/test` | `{protocol,baseUrl,model}` — uses the key saved for `baseUrl`; a `keyRef` is ignored | `{ok, sample, ms, error}` |

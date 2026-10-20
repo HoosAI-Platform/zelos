@@ -695,6 +695,24 @@ test('anything filled with the raw accent states its own label colour', () => {
   assert.deepEqual(offenders, [], 'text on a filled accent must take --on-accent (or --ground)');
 });
 
+/**
+ * One rule for what an accent is (TT-3491). The server refuses a PUT whose
+ * accent fails core/config.mjs's isAccent; the page applies only what its own
+ * copy passes, and ui/boot.js paints the first frame by the same pattern. The
+ * page cannot import core/, so the copies are pinned to agree here. The UI's
+ * used to trim, and so took " #5b8cff " — spaces and all — into the stylesheet.
+ */
+test('the page and the server agree on what an accent is (TT-3491)', async () => {
+  stubBrowserGlobals();
+  const config = await import(fileUrl(ROOT, 'core/config.mjs'));
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  for (const value of ['#5b8cff', '#5B8CFF', ' #5b8cff', '#5b8cff ', '#fff', 'rebeccapurple', '5b8cff', '#5b8cff0', '', null, 5, undefined]) {
+    assert.equal(store.isAccent(value), config.isAccent(value), `the page and the server disagree about ${JSON.stringify(value)}`);
+  }
+  const boot = fs.readFileSync(path.join(UI, 'boot.js'), 'utf8');
+  assert.ok(boot.includes(`/${config.ACCENT_RE.source}/.test(stored)`), 'ui/boot.js paints the first frame by a different rule');
+});
+
 /* ------------------------------------------------- 4. store and item state */
 
 /**

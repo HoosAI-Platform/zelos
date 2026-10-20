@@ -191,9 +191,13 @@ export function notify(message, { tone = 'info', action = null } = {}) {
 export const DEFAULT_ACCENT = '#5b8cff';
 
 /** Six digit hex only. Anything else is refused rather than written to a CSS
- *  custom property, where a hostile string would land unescaped in a style. */
+ *  custom property, where a hostile string would land unescaped in a style.
+ *  The same rule as core/config.mjs's isAccent, which the server applies to
+ *  a save; test/ui.test.mjs pins the two to agree (TT-3491). Not trimmed:
+ *  the server refuses " #5b8cff ", and this used to pass it through with its
+ *  spaces into the stylesheet. */
 export function isAccent(value) {
-  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value.trim());
+  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
 }
 
 export function currentAccent() {
