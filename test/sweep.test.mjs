@@ -1443,6 +1443,29 @@ test('a mail server that answers with megabytes does not get megabytes of storag
     'the whole stats blob must stay small enough to serve on every read');
 });
 
+test('a source\'s error is screened before it is stored (TT-3453)', async () => {
+  /* QA, 2026-10-10: a model error body's markup reached runs.error, and
+     source errors (IMAP, ICS) took the same path. The sweep's backstop keeps
+     the sentence and drops the markup. */
+  const db = fresh();
+  const result = await runSweep({
+    db,
+    config: baseConfig({ mail: [mailAccount()] }),
+    mode: 'full',
+    deps: {
+      getSecret: SECRETS,
+      complete: fakeModel(board([item()])),
+      fetchMail: async () => { throw new Error('NO login refused <script>alert(1)</script> try later'); },
+    },
+  });
+  const source = result.stats.sources.find((s) => s.kind === 'mail' && s.ok === false);
+  assert.ok(source, 'the failed mailbox should still be reported');
+  assert.doesNotMatch(source.error, /<script/i, `markup was stored: ${source.error}`);
+  assert.match(source.error, /NO login refused/, 'the server\'s own words around the markup should survive');
+  const stored = getRun(db, result.runId).stats.sources.find((s) => s.ok === false);
+  assert.doesNotMatch(stored.error, /<script/i);
+});
+
 test('a run that fails on a huge error stores a bounded reason', async () => {
   const db = fresh();
   const huge = 'B'.repeat(1_000_000);

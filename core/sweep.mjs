@@ -21,7 +21,7 @@
  */
 
 import { loadConfig } from './config.mjs';
-import { complete as llmComplete, extractJSON, LLMError, isLocalAddress } from './llm.mjs';
+import { complete as llmComplete, extractJSON, isLocalAddress } from './llm.mjs';
 import { getSecret as realGetSecret, setSecret as realSetSecret, deleteSecret as realDeleteSecret } from './secrets.mjs';
 import { readModelKey, isModelKeyRef } from './model-key.mjs';
 import {
@@ -475,8 +475,35 @@ function authResting(state, secret, nowMs) {
 
 function errorText(err) {
   if (!err) return 'unknown error';
-  if (err instanceof LLMError && err.address) return err.message;
-  return err.message || String(err);
+  return screenedError(err.message || String(err));
+}
+
+/**
+ * The backstop for every failure's words on their way to `runs.error`, the
+ * source rows, `/api/state` and the log. The model's own error text is screened
+ * where it is read (llm.mjs `screenedDetail`); a source's is whatever an IMAP,
+ * CalDAV or feed server sent, and took the same path unscreened (QA,
+ * 2026-10-10, TT-3453). Tags are stripped first so the sentence around them
+ * survives; if what is left still trips the screen, only that is said.
+ */
+function screenedError(text) {
+  // Bounded before it is screened: a hostile server's error can be megabytes,
+  // and every caller keeps a few hundred characters at most. Twice the stored
+  // ceiling, so a tag the final cap would cut through is still seen whole.
+  const raw = String(text).slice(0, ERROR_CHARS * 2);
+  try {
+    return screenContent(raw);
+  } catch (err) {
+    if (!(err instanceof SafetyError)) throw err;
+  }
+  const stripped = raw.replace(/<[^>]*>?/g, ' ').replace(/\s+/g, ' ').trim();
+  try {
+    // The marker first, so the cap that follows cannot cut it off.
+    return `(markup removed) ${screenContent(stripped)}`;
+  } catch (err) {
+    if (!(err instanceof SafetyError)) throw err;
+    return 'the error text looked like markup and was not kept';
+  }
 }
 
 /**
