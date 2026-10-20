@@ -20,7 +20,7 @@ import {
   ATTEMPT_FILE, createUpdater, downloadToFile, isStrongPublicKey, MAC_NEW_SUFFIX, MAC_SWAP_SCRIPT, macReplaceCheck,
   manifestAsset, openReleaseDownload, parseSwapResult, PENDING_DIR, publicKeyFrom, readUpdateSettings, RESULT_FILE,
   signatureMatches, signManifest, updateAssetName, verifyReleaseManifest, windowsReplaceCheck, writeUpdateSettings,
-  CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS, RETRY_INTERVAL_MS,
+  CHECK_INTERVAL_MS, CHECK_SLACK_MS, FIRST_CHECK_DELAY_MS, QUIET_FAILURES_SHOWN, RETRY_INTERVAL_MS, TICK_MS,
 } from '../desktop/updater.js';
 import { RELEASE_API, REPOSITORY } from '../core/updates.mjs';
 
@@ -117,7 +117,12 @@ function windowsUpdater(fx, overrides = {}) {
     publicKeys: [KEY.x],
     windowsPublisher: overrides.publisher ?? '',
     windows: {
-      verifySignature: async (file) => { signatures.push(file); await overrides.duringVerify?.(); return overrides.signature ?? { status: 'Valid', publisher: PUBLISHER }; },
+      verifySignature: async (file) => {
+        signatures.push(file);
+        await overrides.duringVerify?.(file);
+        const signature = typeof overrides.signature === 'function' ? overrides.signature(file) : overrides.signature;
+        return signature ?? { status: 'Valid', publisher: PUBLISHER };
+      },
       launchInstaller: (file, onError) => { launched.push(file); overrides.onLaunch?.(onError); },
     },
     fetchImpl: github.fetchImpl, setTimer: timers.setTimer, clearTimer: timers.clearTimer,
@@ -134,6 +139,7 @@ function macUpdater(fx, overrides = {}) {
   const bundlePath = path.join(sandbox, 'Applications', 'Zelos.app');
   fs.mkdirSync(bundlePath, { recursive: true });
   const swaps = [];
+  const extracted = [];
   const updater = createUpdater({
     currentVersion: '1.8.1', platform: 'darwin', arch: 'arm64', isPackaged: true,
     settingsFile: path.join(sandbox, 'updates.json'),
@@ -143,6 +149,7 @@ function macUpdater(fx, overrides = {}) {
       bundlePath,
       canReplace: overrides.canReplace ?? (() => ''),
       extractZip: async (zip, dest) => {
+        extracted.push(dest);
         // The fake ZIP is JSON naming the apps inside it and their Info.plist values.
         const contents = JSON.parse(fs.readFileSync(zip, 'utf8'));
         for (const [app, info] of Object.entries(contents)) {
@@ -164,7 +171,7 @@ function macUpdater(fx, overrides = {}) {
     fetchImpl: github.fetchImpl, setTimer: timers.setTimer, clearTimer: timers.clearTimer,
     currentVersion: overrides.currentVersion ?? '1.8.1',
   });
-  return { updater, github, timers, swaps, bundlePath };
+  return { updater, github, timers, swaps, bundlePath, extracted };
 }
 
 const macZip = (apps) => Buffer.from(JSON.stringify(apps));
@@ -412,7 +419,7 @@ describe('the Windows updater', () => {
     assert.equal(state.releaseUrl, `${REPOSITORY}/releases/tag/v1.9.0`);
     assert.ok(h.states.some((s) => s.status === 'downloading'), 'the download reports progress');
 
-    const file = path.join(sandbox, PENDING_DIR, fx.name);
+    const file = path.join(sandbox, PENDING_DIR, '1.9.0', fx.name);
     assert.deepEqual(fs.readFileSync(file), fx.payload);
     assert.deepEqual(h.github.seen.map((s) => s.url).filter((u) => !u.includes('githubusercontent')),
       [RELEASE_API, download('1.9.0', 'release.json'), download('1.9.0', 'release.json.sig'), download('1.9.0', fx.name)],
@@ -509,7 +516,7 @@ describe('the Windows updater', () => {
     await h.updater.start();
     await h.updater.checkNow();
     await until(() => h.updater.state().status === 'ready', 'the download');
-    const file = path.join(sandbox, PENDING_DIR, fx.name);
+    const file = path.join(sandbox, PENDING_DIR, '1.9.0', fx.name);
     fs.appendFileSync(file, 'swapped');
     assert.equal(await h.updater.prepareInstall(), false);
     assert.equal(h.updater.state().status, 'error');
@@ -525,7 +532,7 @@ describe('the Windows updater', () => {
     await h.updater.checkNow();
     await until(() => h.updater.state().status === 'ready', 'the download');
     assert.equal(await h.updater.prepareInstall(), true);
-    const file = path.join(sandbox, PENDING_DIR, fx.name);
+    const file = path.join(sandbox, PENDING_DIR, '1.9.0', fx.name);
     const swapped = Buffer.from(fx.payload);
     swapped[10] ^= 1;
     fs.writeFileSync(file, swapped);
@@ -566,7 +573,8 @@ describe('the Windows updater', () => {
     const newer = windowsUpdater(fixture('1.9.1'));
     await newer.updater.start();
     await newer.updater.checkNow();
-    await until(() => newer.updater.state().status === 'ready', 'the newer download');
+    assert.equal(newer.updater.state().banner, '', 'the skipped 1.9.0 is ready again at launch, still skipped');
+    await until(() => newer.updater.state().latestVersion === '1.9.1', 'the newer download');
     assert.equal(newer.updater.state().banner, '1.9.1', 'a newer version gets its own banner');
   });
 
@@ -611,10 +619,10 @@ describe('the Windows updater', () => {
       await first.updater.checkNow();
       await until(() => first.updater.state().status === 'ready', 'the download');
       first.updater.stop();
-      tamper(path.join(sandbox, PENDING_DIR), fx);
+      tamper(path.join(sandbox, PENDING_DIR, '1.9.0'), fx);
       const again = windowsUpdater(fx);
       assert.equal((await again.updater.start()).status, 'idle');
-      assert.equal(fs.existsSync(path.join(sandbox, PENDING_DIR)), false, 'the leftovers are deleted');
+      await until(() => !fs.existsSync(path.join(sandbox, PENDING_DIR)), 'the leftovers to be deleted');
     });
   }
 
@@ -627,7 +635,7 @@ describe('the Windows updater', () => {
     first.updater.stop();
     const upgraded = windowsUpdater(fx, { deps: { currentVersion: '1.9.0' } });
     assert.equal((await upgraded.updater.start()).status, 'idle');
-    assert.equal(fs.existsSync(path.join(sandbox, PENDING_DIR)), false);
+    await until(() => !fs.existsSync(path.join(sandbox, PENDING_DIR)), 'the kept update to be deleted');
   });
 
   it('keeps checking while an update is ready: a newer release replaces it, a failed check does not', async () => {
@@ -654,7 +662,8 @@ describe('the Windows updater', () => {
     now += RETRY_INTERVAL_MS;
     tick().fn();
     await until(() => h.updater.state().status === 'ready' && h.updater.state().latestVersion === '1.9.1', 'the newer download');
-    assert.deepEqual(fs.readdirSync(path.join(sandbox, PENDING_DIR)).filter((f) => f.endsWith('.exe')), ['Zelos-1.9.1-setup-x64.exe'], 'only the newer installer is kept');
+    assert.deepEqual(fs.readdirSync(path.join(sandbox, PENDING_DIR)), ['1.9.1'], 'only the newer update is kept');
+    assert.ok(fs.existsSync(path.join(sandbox, PENDING_DIR, '1.9.1', 'Zelos-1.9.1-setup-x64.exe')));
     assert.equal(h.updater.state().banner, '1.9.1');
   });
 
@@ -762,7 +771,7 @@ describe('the Windows updater', () => {
     tick().fn();
     await until(() => h.updater.state().status === 'error', 'the failed check');
     const failedAt = h.github.seen.length;
-    now += RETRY_INTERVAL_MS - 1;
+    now += RETRY_INTERVAL_MS - CHECK_SLACK_MS - 1;
     tick().fn();
     await settle();
     assert.equal(h.github.seen.length, failedAt);
@@ -775,6 +784,101 @@ describe('the Windows updater', () => {
     tick().fn();
     await settle();
     assert.equal(h.github.seen.length, failedAt + 1);
+  });
+
+  /**
+   * A Windows updater on the clock it really has: the launch check a minute in,
+   * then a tick every TICK_MS from launch. Each release lookup takes `latency`
+   * and records when it began, counted from launch.
+   */
+  async function onTheClock(fx, { latency = 0 } = {}) {
+    const launch = 1_000_000;
+    let now = launch;
+    const asked = [];
+    const h = windowsUpdater(fx, { deps: { now: () => now }, github: { override: { [RELEASE_API]: async () => {
+      asked.push(now - launch);
+      now += latency;
+      return Response.json(fx.release);
+    } } } });
+    await h.updater.start();
+    now = launch + FIRST_CHECK_DELAY_MS;
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => asked.length === 1 && h.updater.state().status !== 'checking', 'the launch check');
+    let ticks = 0;
+    const tickAt = async (at) => {
+      now = launch + at;
+      h.timers.timers.find((t) => !t.cleared && t.ms === TICK_MS).fn();
+      await until(() => h.updater.state().status !== 'checking', 'the tick');
+    };
+    return {
+      ...h, asked, tickAt,
+      /** Run the ticks up to and including the one `count` ticks after launch. */
+      tickTo: async (count) => { while (ticks < count) await tickAt(++ticks * TICK_MS); },
+    };
+  }
+
+  const HOURS = 60 * 60 * 1000;
+
+  it('checks on the tick six hours after the last check, not a tick later', async () => {
+    const h = await onTheClock(fixture('1.8.1'));
+    await h.tickTo(6 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS], 'the launch check, then the tick at six hours');
+    await h.tickTo(12 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS, 12 * HOURS], 'and every six hours after that');
+  });
+
+  it('a check is not due a whole tick early, only within half a tick', async () => {
+    const h = await onTheClock(fixture('1.8.1'));
+    await h.tickTo(6 * HOURS / TICK_MS - 1);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS], 'not at five hours forty-five');
+    const due = FIRST_CHECK_DELAY_MS + CHECK_INTERVAL_MS;
+    await h.tickAt(due - CHECK_SLACK_MS - 1);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS], 'not more than half a tick early');
+    await h.tickAt(due - CHECK_SLACK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, due - CHECK_SLACK_MS], 'but half a tick early is near enough');
+  });
+
+  it('a check asked for in the first minute stands in for the launch check', async () => {
+    const launch = 1_000_000;
+    let now = launch;
+    const fx = fixture('1.8.1');
+    const asked = [];
+    const h = windowsUpdater(fx, { deps: { now: () => now }, github: { override: { [RELEASE_API]: async () => {
+      asked.push(now - launch);
+      return Response.json(fx.release);
+    } } } });
+    await h.updater.start();
+    now = launch + 30_000;
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status !== 'checking', 'the asked check');
+    now = launch + FIRST_CHECK_DELAY_MS;
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await settle();
+    assert.deepEqual(asked, [30_000], 'no second check at one minute');
+  });
+
+  it('retries a failed check on the tick an hour later, not a tick after that', async () => {
+    const fx = fixture('1.8.1');
+    fx.release.prerelease = true;
+    const h = await onTheClock(fx);
+    assert.equal(h.updater.state().status, 'error');
+    await h.tickTo(3);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS], 'not again within the hour');
+    await h.tickTo(8);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 1 * HOURS, 2 * HOURS], 'hourly, each on the tick nearest the hour');
+  });
+
+  it('a slow check is timed from when it began, so the network does not push the next one back', async () => {
+    const fx = fixture('1.8.1');
+    // Ten minutes is more than half a tick: timed from the answer, the next
+    // check would miss its tick even with the slack.
+    const h = await onTheClock(fx, { latency: 10 * 60 * 1000 });
+    fx.release.prerelease = true;
+    await h.tickTo(6 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS], 'six hours after the last check began');
+    assert.equal(h.updater.state().status, 'error');
+    await h.tickTo(7 * HOURS / TICK_MS);
+    assert.deepEqual(h.asked, [FIRST_CHECK_DELAY_MS, 6 * HOURS, 7 * HOURS], 'and the retry an hour after the failed one began');
   });
 
   it('stop() ends the schedule and an in-flight download', async () => {
@@ -796,6 +900,804 @@ describe('the Windows updater', () => {
   });
 });
 
+describe('a Restart to update in progress', () => {
+  /* The restart is three steps the shell takes in turn: prepareInstall checks
+     the ready update, leaveBoard saves drafts and stops the core, and install
+     hands over. Nothing the clock does in between may change what is handed
+     over (QA, 2026-10-10, TT-3485). */
+
+  /** A Windows updater with 1.9.0 ready, whose later release lookups wait for the test. */
+  async function readyWithHeldChecks() {
+    let now = 1_000_000;
+    const fx = fixture();
+    let hold = false;
+    const held = [];
+    const h = windowsUpdater(fx, {
+      deps: { now: () => now },
+      // A lookup that ignores being stopped, as a slow network can: only the
+      // updater's own bookkeeping can keep its answer from mattering.
+      github: { override: { [RELEASE_API]: async () => (hold ? new Promise((resolve) => held.push(resolve)) : Response.json(fx.release)) } },
+    });
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    hold = true;
+    const newer = fixture('1.9.1');
+    const tick = () => h.timers.timers.find((t) => !t.cleared && t.ms !== FIRST_CHECK_DELAY_MS && t.ms > 30_000);
+    return {
+      ...h, fx, newer, held, tick,
+      advance: (ms) => { now += ms; },
+      lookups: () => h.github.seen.filter((x) => x.url === RELEASE_API).length,
+      // Answer every waiting lookup with 1.9.1, the newer release.
+      answer: () => { while (held.length) held.shift()(Response.json(newer.release)); },
+    };
+  }
+
+  it('a scheduled check that falls during the shutdown does not run, and the prepared update is installed', async () => {
+    const h = await readyWithHeldChecks();
+    assert.equal(await h.updater.prepareInstall(), true);
+    // Drafts are saving; six hours have passed and the clock ticks.
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await settle();
+    assert.equal(h.lookups(), 1, 'no check while a restart is under way');
+    h.answer();
+    await settle();
+    h.updater.stop();
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [path.join(sandbox, PENDING_DIR, '1.9.0', h.fx.name)]);
+  });
+
+  it('a check already running when Restart is chosen is stopped, and its answer changes nothing', async () => {
+    const h = await readyWithHeldChecks();
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.held.length === 1, 'the scheduled lookup');
+    assert.equal(h.updater.state().status, 'ready');
+    assert.equal(await h.updater.prepareInstall(), true);
+    h.answer(); // 1.9.1 is out — but this check was stopped
+    await settle();
+    await settle();
+    assert.ok(!h.github.seen.some((x) => x.url.includes('1.9.1')), 'nothing of the newer release is fetched');
+    assert.equal(h.updater.state().status, 'ready');
+    h.updater.stop();
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [path.join(sandbox, PENDING_DIR, '1.9.0', h.fx.name)]);
+  });
+
+  it('stop() stops a check made while an update is ready, so the update survives to be installed', async () => {
+    const h = await readyWithHeldChecks();
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.held.length === 1, 'the scheduled lookup');
+    // The shell's shutdown: stop first, then the hand-off a moment later.
+    h.updater.stop();
+    h.answer();
+    await settle();
+    await settle();
+    assert.ok(!h.github.seen.some((x) => x.url.includes('1.9.1')));
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [path.join(sandbox, PENDING_DIR, '1.9.0', h.fx.name)]);
+  });
+
+  it('a check the restart stopped is due again at once when the restart does not go ahead', async () => {
+    const h = await readyWithHeldChecks();
+    // Check for updates, an hour after the last check: not yet due on the clock.
+    h.advance(RETRY_INTERVAL_MS);
+    h.updater.checkNow();
+    await until(() => h.held.length === 1, 'the manual lookup');
+    assert.equal(await h.updater.prepareInstall(), true, 'the lookup is stopped');
+    h.updater.abandonInstall();
+    h.tick().fn();
+    await until(() => h.lookups() === 3, 'the stopped check, run at the next tick rather than in five hours');
+    h.answer();
+  });
+
+  it('a restart that does not go ahead lets the clock check again', async () => {
+    const h = await readyWithHeldChecks();
+    assert.equal(await h.updater.prepareInstall(), true);
+    h.updater.abandonInstall(); // drafts would not save; nothing is staged on Windows
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.lookups() === 2, 'the next scheduled check');
+  });
+});
+
+describe('a newer release while an update is ready', () => {
+  /* One folder per version: 1.9.0 stays ready, offered and installable while
+     1.9.1 downloads beside it, until 1.9.1 has verified (QA, 2026-10-10,
+     TT-3485). */
+  const pending = (...parts) => path.join(sandbox, PENDING_DIR, ...parts);
+  const installer = (version) => updateAssetName(version, 'win32', 'x64');
+
+  /** Point the fake GitHub at another release, as publishing one would. */
+  function publish(fx, next) {
+    fx.release = next.release;
+    fx.files = next.files;
+    fx.version = next.version;
+  }
+
+  /** A Windows updater with 1.9.0 ready, a clock the test moves, and 1.9.1 about to be published. */
+  async function readyWindows(overrides = {}) {
+    let now = 1_000_000;
+    const fx = fixture('1.9.0');
+    const h = windowsUpdater(fx, { ...overrides, deps: { now: () => now, ...overrides.deps } });
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the first download');
+    const tick = () => h.timers.timers.find((t) => !t.cleared && t.ms !== FIRST_CHECK_DELAY_MS && t.ms > 30_000);
+    return {
+      ...h, fx, tick,
+      advance: (ms) => { now += ms; },
+      lookups: () => h.github.seen.filter((x) => x.url === RELEASE_API).length,
+      asked: (version) => h.github.seen.some((x) => x.url === download(version, installer(version))),
+    };
+  }
+
+  /** Everything the person can see or do names 1.9.0, and Restart installs 1.9.0. */
+  async function stillOffers190(h, what) {
+    const state = h.updater.state();
+    assert.equal(state.status, 'ready', what);
+    assert.equal(state.latestVersion, '1.9.0', what);
+    assert.equal(state.releaseUrl, `${REPOSITORY}/releases/tag/v1.9.0`, what);
+    assert.equal(state.notes, 'Fixes.', what);
+    assert.equal(state.banner, '1.9.0', what);
+    assert.equal(state.error, '', what);
+    assert.ok(fs.existsSync(pending('1.9.0', installer('1.9.0'))), what);
+  }
+
+  async function installs190(h) {
+    assert.equal(await h.updater.prepareInstall(), true);
+    h.updater.stop();
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [pending('1.9.0', installer('1.9.0'))]);
+  }
+
+  it('replaces the ready update only once the newer one has verified, and that one is ready at the next launch with no network', async () => {
+    const h = await readyWindows();
+    let checked = false;
+    const newer = fixture('1.9.1');
+    publish(h.fx, newer);
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.asked('1.9.1'), 'the newer download');
+    assert.equal(h.updater.state().latestVersion, '1.9.0', 'while it downloads, the screen still describes 1.9.0');
+    assert.ok(!h.states.some((x) => x.status === 'downloading' && x.latestVersion === '1.9.1'), 'quietly: no downloading status over a ready update');
+    await until(() => h.updater.state().latestVersion === '1.9.1', 'the replacement');
+    checked = true;
+    const state = h.updater.state();
+    assert.equal(state.status, 'ready');
+    assert.equal(state.banner, '1.9.1');
+    assert.equal(state.releaseUrl, `${REPOSITORY}/releases/tag/v1.9.1`);
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.1'], 'the replaced 1.9.0 is gone');
+    assert.deepEqual(fs.readdirSync(pending('1.9.1')).sort(), ['Zelos-1.9.1-setup-x64.exe', 'release-notes.json', 'release.json', 'release.json.sig']);
+    h.updater.stop();
+
+    const again = windowsUpdater(h.fx);
+    const restored = await again.updater.start();
+    assert.ok(checked);
+    assert.equal(restored.status, 'ready');
+    assert.equal(restored.latestVersion, '1.9.1');
+    assert.equal(again.github.seen.length, 0, 'nothing is fetched to know that');
+    assert.equal(await again.updater.prepareInstall(), true);
+    assert.equal(again.updater.install(), true);
+    assert.deepEqual(again.launched, [pending('1.9.1', installer('1.9.1'))]);
+  });
+
+  it('a newer release whose bytes differ from the signed hash leaves 1.9.0 ready everywhere, and is tried again in an hour', async () => {
+    const tampered = Buffer.from(fixture('1.9.1').payload);
+    const h = await readyWindows({ github: { override: { [storage(installer('1.9.1'))]: async () => new Response(tampered) } } });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.asked('1.9.1') && !fs.existsSync(pending('1.9.1')), 'the refused newer download');
+    await settle();
+    await stillOffers190(h, 'after the refusal');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.0'], 'only the refused folder is removed');
+    assert.equal(h.updater.skipBanner().banner, '');
+    assert.equal(readUpdateSettings(path.join(sandbox, 'updates.json')).skipped, '1.9.0', 'Skip this version skips the version the banner named');
+    const lookups = h.lookups();
+    h.advance(RETRY_INTERVAL_MS - CHECK_SLACK_MS - 1);
+    h.tick().fn();
+    await settle();
+    assert.equal(h.lookups(), lookups, 'not again within the hour');
+    h.advance(1);
+    h.tick().fn();
+    await until(() => h.lookups() === lookups + 1, 'the retry');
+    await until(() => !h.updater.state().progress && !fs.existsSync(pending('1.9.1')), 'the second refusal');
+    await settle();
+    await installs190(h);
+  });
+
+  it('a newer installer Authenticode does not accept leaves 1.9.0 ready and installable', async () => {
+    const h = await readyWindows({
+      publisher: PUBLISHER,
+      signature: (file) => (file.includes('1.9.1') ? { status: 'Valid', publisher: 'Someone Else Ltd' } : { status: 'Valid', publisher: PUBLISHER }),
+    });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.signatures.some((f) => f.includes('1.9.1')) && !fs.existsSync(pending('1.9.1')), 'the refused signature');
+    await settle();
+    await stillOffers190(h, 'after the Authenticode refusal');
+    await installs190(h);
+  });
+
+  /** 1.9.1's installer request hangs until it is stopped. */
+  function hungNewer() {
+    let requested = false;
+    let aborted = false;
+    const override = { [storage(installer('1.9.1'))]: (_url, { signal }) => new Promise((_resolve, reject) => {
+      requested = true;
+      signal.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')); });
+    }) };
+    return { override, requested: () => requested, aborted: () => aborted };
+  }
+
+  it('Restart while the newer one downloads installs 1.9.0, stops the download, and a restart that does not go ahead resumes it at once', async () => {
+    const hung = hungNewer();
+    const h = await readyWindows({ github: { override: hung.override } });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(hung.requested, 'the newer download');
+    await stillOffers190(h, 'mid-download');
+    assert.equal(h.updater.snoozeBanner().banner, '', 'Remind me later puts off 1.9.0');
+    assert.equal(await h.updater.prepareInstall(), true);
+    await until(hung.aborted, 'the newer download to stop');
+    await until(() => !fs.existsSync(pending('1.9.1')), 'its folder to go');
+    assert.equal(h.updater.state().latestVersion, '1.9.0');
+
+    // Drafts would not save: the restart is off, and the download it stopped is due now, not in six hours.
+    h.updater.abandonInstall();
+    const lookups = h.lookups();
+    h.tick().fn();
+    await until(() => h.lookups() === lookups + 1, 'the resumed check');
+    await until(() => h.github.seen.filter((x) => x.url === storage(installer('1.9.1'))).length === 2, 'the newer download again');
+    await installs190(h);
+  });
+
+  it('turning automatic updates off mid-download stops it and keeps 1.9.0 ready', async () => {
+    const hung = hungNewer();
+    const h = await readyWindows({ github: { override: hung.override } });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(hung.requested, 'the newer download');
+    assert.equal(h.updater.setAuto(false).status, 'ready');
+    await until(hung.aborted, 'the download to stop');
+    await until(() => !fs.existsSync(pending('1.9.1')), 'its folder to go');
+    await stillOffers190(h, 'after turning updates off');
+    await installs190(h);
+  });
+
+  it('stop() mid-download stops it and leaves the ready update for the installer', async () => {
+    const hung = hungNewer();
+    const h = await readyWindows({ github: { override: hung.override } });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(hung.requested, 'the newer download');
+    assert.equal(await h.updater.prepareInstall(), true);
+    h.updater.stop();
+    await until(hung.aborted, 'the download to stop');
+    await until(() => !fs.existsSync(pending('1.9.1')), 'its folder to go');
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [pending('1.9.0', installer('1.9.0'))]);
+  });
+
+  it('a download of a version stopped mid-check is waited for, so its clean-up cannot delete the next download of it', async () => {
+    let release = null;
+    let calls = 0;
+    const h = await readyWindows({
+      publisher: PUBLISHER,
+      // The first check of 1.9.1's installer hangs until the test lets it go.
+      duringVerify: (file) => (file.includes('1.9.1') && ++calls === 1 ? new Promise((resolve) => { release = resolve; }) : undefined),
+    });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => release, 'the first Authenticode check');
+    h.updater.setAuto(false); // stops it; it unwinds only once Authenticode answers
+    h.updater.setAuto(true);
+    await h.updater.checkNow();
+    await settle();
+    release();
+    await until(() => h.updater.state().latestVersion === '1.9.1', 'the second download');
+    assert.ok(fs.existsSync(pending('1.9.1', installer('1.9.1'))), 'the new file survived the old clean-up');
+    assert.equal(await h.updater.prepareInstall(), true);
+  });
+
+  it('Check for updates with updates on shows the newer download it starts', async () => {
+    const h = await readyWindows();
+    publish(h.fx, fixture('1.9.1'));
+    const before = h.states.length;
+    await h.updater.checkNow();
+    await until(() => h.updater.state().latestVersion === '1.9.1', 'the download the check started');
+    assert.ok(h.states.slice(before).some((x) => x.status === 'ready' && x.newer?.version === '1.9.1' && Number.isFinite(x.progress)),
+      'someone pressed the button: the download is shown, beside the ready 1.9.0');
+  });
+
+  it('turning updates off stops a quiet newer download and offers it instead; turning them on takes the offer down while it downloads', async () => {
+    const hung = hungNewer();
+    const h = await readyWindows({ github: { override: hung.override } });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(hung.requested, 'the quiet download');
+    assert.equal(h.updater.state().newer, null, 'nothing offered while Zelos fetches it itself');
+    const off = h.updater.setAuto(false);
+    assert.equal(off.status, 'ready');
+    assert.deepEqual(off.newer, { version: '1.9.1', releaseUrl: `${REPOSITORY}/releases/tag/v1.9.1` }, 'offered at once, not after the next check');
+    await until(() => !fs.existsSync(pending('1.9.1')), 'the stopped download to clean up');
+
+    // Back on: the clock fetches it quietly, and the Download button that would do nothing goes.
+    h.updater.setAuto(true);
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => h.github.seen.filter((x) => x.url === storage(installer('1.9.1'))).length === 2, 'the quiet download again');
+    assert.equal(h.updater.state().newer, null);
+  });
+
+  it('stop() while a newer download is in its Authenticode check leaves the prepared update untouched for the installer', async () => {
+    let release = null;
+    const h = await readyWindows({
+      publisher: PUBLISHER,
+      duringVerify: (file) => (file.includes('1.9.1') ? new Promise((resolve) => { release = resolve; }) : undefined),
+    });
+    publish(h.fx, fixture('1.9.1'));
+    h.advance(CHECK_INTERVAL_MS);
+    h.tick().fn();
+    await until(() => release, 'the newer download\'s Authenticode check');
+    const before = fs.readdirSync(pending('1.9.0')).sort();
+    assert.equal(await h.updater.prepareInstall(), true);
+    h.updater.stop();
+    release();
+    await until(() => !fs.existsSync(pending('1.9.1')), 'the stopped download to clean up');
+    assert.deepEqual(fs.readdirSync(pending('1.9.0')).sort(), before, 'the ready folder is untouched');
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [pending('1.9.0', installer('1.9.0'))]);
+  });
+
+  it('a release pulled back to an older version drops the ready one before anything else is verified', async () => {
+    // Ready at 1.9.1; GitHub's latest becomes 1.9.0 again.
+    let now = 1_000_000;
+    const fx = fixture('1.9.1');
+    const h = windowsUpdater(fx, { deps: { now: () => now } });
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    publish(fx, fixture('1.9.0'));
+    now += CHECK_INTERVAL_MS;
+    h.timers.timers.find((t) => !t.cleared && t.ms !== FIRST_CHECK_DELAY_MS && t.ms > 30_000).fn();
+    await until(() => !fs.existsSync(pending('1.9.1')), '1.9.1 to be dropped');
+    await until(() => h.updater.state().status === 'ready' && h.updater.state().latestVersion === '1.9.0', '1.9.0 instead');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.0']);
+  });
+});
+
+describe('a newer release beside a ready update, offered or retried', () => {
+  /* Automatic updates off: a newer release is offered beside the ready one,
+     never in its place, and the person's download of it shows progress.
+     Automatic updates on: a newer release that keeps failing is said, not
+     retried in silence (QA, 2026-10-10, TT-3485). */
+  const pending = (...parts) => path.join(sandbox, PENDING_DIR, ...parts);
+  const installer = (version) => updateAssetName(version, 'win32', 'x64');
+  function publish(fx, next) {
+    fx.release = next.release;
+    fx.files = next.files;
+    fx.version = next.version;
+  }
+
+  async function readyWithAutoOff(overrides) {
+    const fx = fixture('1.9.0');
+    const h = windowsUpdater(fx, overrides);
+    await h.updater.start();
+    h.updater.setAuto(false);
+    await h.updater.checkNow();
+    await h.updater.download();
+    await until(() => h.updater.state().status === 'ready', 'the chosen download');
+    return { ...h, fx };
+  }
+
+  it('with automatic updates off, a check offers the newer release beside the ready one, and Download fetches it with progress', async () => {
+    const h = await readyWithAutoOff();
+    publish(h.fx, fixture('1.9.1'));
+    const state = await h.updater.checkNow();
+    assert.equal(state.status, 'ready', 'Restart for 1.9.0 is still offered');
+    assert.equal(state.latestVersion, '1.9.0');
+    assert.equal(state.banner, '1.9.0');
+    assert.deepEqual(state.newer, { version: '1.9.1', releaseUrl: `${REPOSITORY}/releases/tag/v1.9.1` });
+    assert.ok(!h.github.seen.some((x) => x.url.includes('/v1.9.1/')), 'nothing of 1.9.1 is fetched until asked');
+
+    const before = h.states.length;
+    await h.updater.download();
+    await until(() => h.updater.state().latestVersion === '1.9.1', 'the chosen newer download');
+    const during = h.states.slice(before);
+    assert.ok(during.some((x) => x.status === 'ready' && x.latestVersion === '1.9.0' && x.newer?.version === '1.9.1' && x.progress === 1),
+      'its progress is shown while 1.9.0 stays ready');
+    assert.ok(during.every((x) => x.status === 'ready'), 'never anything but ready meanwhile');
+    const after = h.updater.state();
+    assert.equal(after.newer, null);
+    assert.equal(after.progress, null);
+    assert.equal(after.banner, '1.9.1');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.1']);
+  });
+
+  it('Restart during the person\'s own Download stops it quietly, and Download is offered again', async () => {
+    let requests = 0;
+    const h = await readyWithAutoOff({ github: { override: { [storage(installer('1.9.1'))]: (_url, { signal }) => new Promise((_resolve, reject) => {
+      requests += 1;
+      signal.addEventListener('abort', () => reject(new Error('aborted')));
+    }) } } });
+    publish(h.fx, fixture('1.9.1'));
+    await h.updater.checkNow();
+    await h.updater.download();
+    await until(() => requests === 1, 'the chosen download');
+    assert.equal(await h.updater.prepareInstall(), true);
+    await until(() => !fs.existsSync(pending('1.9.1')), 'the stopped download to clean up');
+    const state = h.updater.state();
+    assert.equal(state.error, '', 'stopped for the restart, not failed');
+    assert.equal(state.progress, null);
+    assert.equal(state.newer?.version, '1.9.1');
+    h.updater.abandonInstall(); // drafts would not save
+    await h.updater.download();
+    await until(() => requests === 2, 'Download again');
+  });
+
+  it('a release pulled back below the ready one also clears what was said about a newer one', async () => {
+    const tampered = Buffer.from(fixture('1.9.1').payload);
+    const h = await readyWithAutoOff({ github: { override: { [storage(installer('1.9.1'))]: async () => new Response(tampered) } } });
+    publish(h.fx, fixture('1.9.1'));
+    await h.updater.checkNow();
+    await h.updater.download();
+    await until(() => h.updater.state().error, 'the failed download');
+    publish(h.fx, fixture('1.8.5'));
+    const state = await h.updater.checkNow();
+    assert.equal(state.status, 'available');
+    assert.equal(state.latestVersion, '1.8.5');
+    assert.equal(state.error, '');
+  });
+
+  it('a newer download the person asked for that fails says so, and leaves 1.9.0 ready and installable', async () => {
+    const tampered = Buffer.from(fixture('1.9.1').payload);
+    const h = await readyWithAutoOff({ github: { override: { [storage(installer('1.9.1'))]: async () => new Response(tampered) } } });
+    publish(h.fx, fixture('1.9.1'));
+    await h.updater.checkNow();
+    await h.updater.download();
+    await until(() => h.updater.state().error, 'the refusal');
+    const state = h.updater.state();
+    assert.equal(state.status, 'ready');
+    assert.equal(state.latestVersion, '1.9.0');
+    assert.match(state.error, /Zelos 1\.9\.1 could not be downloaded\. The downloaded update does not match the signed release/);
+    assert.equal(state.progress, null);
+    assert.equal(state.newer?.version, '1.9.1', 'still offered, to try again');
+    await until(() => !fs.existsSync(pending('1.9.1')), 'the refused folder to go');
+    assert.equal(await h.updater.prepareInstall(), true);
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [pending('1.9.0', installer('1.9.0'))]);
+  });
+
+  it('with automatic updates on, a newer release that keeps failing is said after a few tries in a row, and the message goes once it lands', async () => {
+    let broken = true;
+    const tampered = Buffer.from(fixture('1.9.1').payload);
+    let now = 1_000_000;
+    const fx = fixture('1.9.0');
+    const h = windowsUpdater(fx, {
+      deps: { now: () => now },
+      github: { override: { [storage(installer('1.9.1'))]: async () => new Response(broken ? tampered : fx.files.get(installer('1.9.1'))) } },
+    });
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    publish(fx, fixture('1.9.1'));
+    const tick = () => h.timers.timers.find((t) => !t.cleared && t.ms !== FIRST_CHECK_DELAY_MS && t.ms > 30_000);
+    let requests = 0;
+    const attempts = () => h.github.seen.filter((x) => x.url === storage(installer('1.9.1'))).length;
+    for (let attempt = 1; attempt <= QUIET_FAILURES_SHOWN; attempt++) {
+      now += CHECK_INTERVAL_MS;
+      tick().fn();
+      await until(() => attempts() === requests + 1 && !fs.existsSync(pending('1.9.1')), `failure ${attempt}`);
+      requests = attempts();
+      await settle();
+      const state = h.updater.state();
+      assert.equal(state.status, 'ready');
+      assert.equal(state.latestVersion, '1.9.0');
+      if (attempt < QUIET_FAILURES_SHOWN) assert.equal(state.error, '', `quiet after ${attempt}`);
+    }
+    assert.match(h.updater.state().error, /Zelos 1\.9\.1 has failed to download 3 times in a row, so Zelos 1\.9\.0 is still the update ready to install/);
+    assert.equal(h.updater.state().banner, '1.9.0');
+
+    broken = false;
+    now += RETRY_INTERVAL_MS;
+    tick().fn();
+    await until(() => h.updater.state().latestVersion === '1.9.1', 'the fixed release');
+    assert.equal(h.updater.state().error, '');
+  });
+});
+
+describe('the update folder at launch', () => {
+  const pending = (...parts) => path.join(sandbox, PENDING_DIR, ...parts);
+
+  /** Leave 1.9.0 and 1.9.1 both complete in the folder, as a crash mid-replacement would. */
+  async function bothFolders() {
+    const fx = fixture('1.9.0');
+    const first = windowsUpdater(fx);
+    await first.updater.start();
+    await first.updater.checkNow();
+    await until(() => first.updater.state().status === 'ready', '1.9.0');
+    first.updater.stop();
+    const aside = path.join(sandbox, 'aside-1.9.0');
+    fs.cpSync(pending('1.9.0'), aside, { recursive: true });
+    const newer = fixture('1.9.1');
+    const second = windowsUpdater(newer);
+    await second.updater.start();
+    await second.updater.checkNow();
+    await until(() => second.updater.state().latestVersion === '1.9.1', '1.9.1');
+    second.updater.stop();
+    fs.cpSync(aside, pending('1.9.0'), { recursive: true });
+    return { fx, newer };
+  }
+
+  it('after a crash with both versions complete, the higher one is ready and the other removed', async () => {
+    const { newer } = await bothFolders();
+    const h = windowsUpdater(newer);
+    assert.equal((await h.updater.start()).latestVersion, '1.9.1');
+    await until(() => fs.readdirSync(pending()).join() === '1.9.1', '1.9.0 to be removed');
+    assert.equal(h.github.seen.length, 0);
+  });
+
+  it('after a crash mid-download, the half-written higher folder loses to the complete one', async () => {
+    const { newer } = await bothFolders();
+    fs.rmSync(pending('1.9.1', 'release.json'));
+    fs.writeFileSync(pending('1.9.1', 'Zelos-1.9.1-setup-x64.exe.partial'), 'half');
+    const h = windowsUpdater(newer);
+    assert.equal((await h.updater.start()).latestVersion, '1.9.0');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.0']);
+  });
+
+  it('a folder named as a higher version but holding another version\'s signed files is refused', async () => {
+    const { newer } = await bothFolders();
+    // A manifest signed with the real key, naming version 1.9.1 but listing
+    // a 1.9.5 installer at its true size and hash, in a folder named 1.9.5:
+    // everything matches except the version, so only that check can refuse it.
+    fs.renameSync(pending('1.9.1'), pending('1.9.5'));
+    fs.renameSync(pending('1.9.5', 'Zelos-1.9.1-setup-x64.exe'), pending('1.9.5', 'Zelos-1.9.5-setup-x64.exe'));
+    const manifest = Buffer.from(JSON.stringify({ version: '1.9.1', assets: [{ name: 'Zelos-1.9.5-setup-x64.exe', size: newer.payload.length, sha256: newer.sha }] }));
+    fs.writeFileSync(pending('1.9.5', 'release.json'), manifest);
+    fs.writeFileSync(pending('1.9.5', 'release.json.sig'), signManifest(manifest, KEY.privateKey));
+    const h = windowsUpdater(newer);
+    assert.equal((await h.updater.start()).latestVersion, '1.9.0');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.0']);
+  });
+
+  /** 1.9.0 and 1.9.1 both complete, and Authenticode unable to answer for 1.9.1 the first time it is asked. */
+  async function heldAtLaunch(release) {
+    await bothFolders();
+    let refusedOnce = false;
+    const h = windowsUpdater(release, {
+      publisher: PUBLISHER,
+      duringVerify: (file) => {
+        if (file.includes('1.9.1') && !refusedOnce) { refusedOnce = true; throw new Error('PowerShell did not answer'); }
+      },
+    });
+    assert.equal((await h.updater.start()).latestVersion, '1.9.0', 'the one that could be checked is ready');
+    assert.ok(fs.existsSync(pending('1.9.1', 'release.json')), 'the one that could not is left in place');
+    return h;
+  }
+
+  it('a folder the launch could not check is checked again, not downloaded again, when that version is next wanted', async () => {
+    const newer = fixture('1.9.1');
+    const h = await heldAtLaunch(newer);
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => h.updater.state().latestVersion === '1.9.1', '1.9.1 to be adopted');
+    assert.ok(!h.github.seen.some((x) => x.url === download('1.9.1', 'Zelos-1.9.1-setup-x64.exe')), 'its installer is not fetched again');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.1']);
+    assert.equal(await h.updater.prepareInstall(), true);
+  });
+
+  it('a folder that still cannot be checked is replaced by a fresh download, not left to block that version', async () => {
+    const newer = fixture('1.9.1');
+    await bothFolders();
+    // Authenticode cannot answer for the kept 1.9.1 at launch nor when it is
+    // next wanted; only the freshly downloaded file gets an answer.
+    let unanswered = 2;
+    const h = windowsUpdater(newer, {
+      publisher: PUBLISHER,
+      duringVerify: (file) => {
+        if (file.includes('1.9.1') && unanswered > 0) { unanswered -= 1; throw new Error('PowerShell did not answer'); }
+      },
+    });
+    assert.equal((await h.updater.start()).latestVersion, '1.9.0');
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => h.updater.state().latestVersion === '1.9.1', '1.9.1 to be downloaded afresh');
+    assert.ok(h.github.seen.some((x) => x.url === download('1.9.1', 'Zelos-1.9.1-setup-x64.exe')), 'its installer is fetched again');
+    assert.equal(h.updater.state().error, '');
+    assert.deepEqual(fs.readdirSync(pending()), ['1.9.1']);
+    assert.equal(await h.updater.prepareInstall(), true);
+  });
+
+  it('a folder the launch could not check survives the tidying that follows a failed download', async () => {
+    const latest = fixture('1.9.2');
+    const tampered = Buffer.from(latest.payload);
+    tampered[0] ^= 0xff;
+    const release = fixture('1.9.1');
+    const h = await heldAtLaunch(release);
+    // GitHub's latest is 1.9.2, and its installer is not the signed one.
+    Object.assign(release, { release: latest.release, files: new Map([...latest.files, ['Zelos-1.9.2-setup-x64.exe', tampered]]), version: '1.9.2' });
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => h.github.seen.some((x) => x.url === storage('Zelos-1.9.2-setup-x64.exe')) && !fs.existsSync(pending('1.9.2')), 'the refused 1.9.2');
+    await settle();
+    assert.equal(h.updater.state().latestVersion, '1.9.0');
+    assert.ok(fs.existsSync(pending('1.9.1', 'release.json')), 'the held 1.9.1 is still there');
+  });
+
+  it('removes, without following, anything that is not a plain version folder newer than this app', { skip: process.platform === 'win32' }, async () => {
+    const { newer } = await bothFolders();
+    fs.rmSync(pending('1.9.0'), { recursive: true });
+    // The valid 1.9.1 moves outside; only a symlink to it stays in the folder.
+    const outside = path.join(sandbox, 'outside-1.9.1');
+    fs.renameSync(pending('1.9.1'), outside);
+    fs.symlinkSync(outside, pending('1.9.1'));
+    fs.symlinkSync(outside, pending('1.9.2'));
+    fs.writeFileSync(pending('notes.txt'), 'x');
+    fs.mkdirSync(pending('1.9'));
+    fs.mkdirSync(pending('../escape'), { recursive: true });
+    fs.mkdirSync(pending('1.8.0'));
+    fs.writeFileSync(pending('1.9.3'), 'a file, not a folder');
+    const h = windowsUpdater(newer);
+    const state = await h.updater.start();
+    assert.equal(state.status, 'idle', 'a linked folder is never offered');
+    await until(() => !fs.existsSync(pending()), 'everything in the folder to go');
+    assert.ok(fs.existsSync(path.join(outside, 'Zelos-1.9.1-setup-x64.exe')), 'the link was removed, not followed');
+    assert.ok(fs.existsSync(path.join(sandbox, 'escape')), 'nothing outside the folder is touched');
+  });
+
+  it('deletes the old one-update-at-a-time layout instead of offering it', async () => {
+    const fx = fixture('1.9.0');
+    const h = windowsUpdater(fx);
+    await h.updater.start();
+    await h.updater.checkNow();
+    await until(() => h.updater.state().status === 'ready', 'the download');
+    h.updater.stop();
+    // Laid out as earlier versions of Zelos left it: everything at the top.
+    for (const name of fs.readdirSync(pending('1.9.0'))) fs.renameSync(pending('1.9.0', name), pending(name));
+    fs.rmdirSync(pending('1.9.0'));
+    fs.mkdirSync(pending('staged'));
+    fs.writeFileSync(path.join(sandbox, ATTEMPT_FILE + '.keep'), 'beside the folder');
+    const again = windowsUpdater(fx);
+    assert.equal((await again.updater.start()).status, 'idle', 'the launch check downloads it again a minute later');
+    await until(() => !fs.existsSync(pending()), 'the old layout to be deleted');
+    assert.ok(fs.existsSync(path.join(sandbox, ATTEMPT_FILE + '.keep')), 'files beside the folder are not touched');
+  });
+});
+
+describe('what the tidying could not remove', () => {
+  const pending = (...parts) => path.join(sandbox, PENDING_DIR, ...parts);
+  // A folder this account cannot change stands in for a file Windows still
+  // holds open: the removal fails until it is let go. Root ignores that, and
+  // Windows folder permissions do not work this way.
+  const canLock = process.platform !== 'win32' && process.getuid?.() !== 0;
+  const unlocks = [];
+  /** Make `dir` (with a file inside) impossible to remove until the returned function runs. */
+  function lock(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Zelos-1.8.1-setup-x64.exe'), 'held by the installer');
+    fs.chmodSync(dir, 0o500);
+    const unlock = () => fs.chmodSync(dir, 0o700);
+    unlocks.push(unlock);
+    return unlock;
+  }
+  afterEach(() => { for (const unlock of unlocks.splice(0)) try { unlock(); } catch { /* already gone */ } });
+
+  /** A Windows updater with automatic updates off and a logger the test can read. */
+  function quietUpdater(fx, overrides = {}) {
+    writeUpdateSettings(path.join(sandbox, 'updates.json'), { auto: false });
+    const logged = [];
+    const logger = { info: (m) => logged.push(['info', m]), warn: (m) => logged.push(['warn', m]), error: (m) => logged.push(['error', m]) };
+    const h = windowsUpdater(fx, { ...overrides, deps: { logger, ...overrides.deps } });
+    const said = (level, text) => logged.filter(([l, m]) => l === level && m.includes(text)).length;
+    return { ...h, logged, said };
+  }
+  const LEFT = 'could not remove an old update download';
+  const tick = (h) => h.timers.fire(TICK_MS);
+
+  it('start() returns before the launch\'s tidying has finished, which then removes what is left', async () => {
+    fs.mkdirSync(pending('1.7.0'), { recursive: true });
+    fs.writeFileSync(pending('1.7.0', 'Zelos-1.7.0-setup-x64.exe'), 'an old installer');
+    const h = windowsUpdater(fixture());
+    await h.updater.start();
+    assert.ok(fs.existsSync(pending('1.7.0')), 'nothing is removed on the way to opening the window');
+    await until(() => !fs.existsSync(pending()), 'the folder to be tidied');
+  });
+
+  it('an installer still held after the restart it relaunched is removed by the launch timer once let go', { skip: !canLock }, async () => {
+    // The update landed: 1.8.1 is running, and its installer is still exiting.
+    fs.writeFileSync(path.join(sandbox, ATTEMPT_FILE), '1.8.1\n');
+    const unlock = lock(pending('1.8.1'));
+    fs.writeFileSync(pending('release.json'), 'a small file that goes at once');
+    const h = quietUpdater(fixture());
+    assert.equal((await h.updater.start()).installProblem, '');
+    await until(() => h.said('warn', LEFT) === 1, 'the leftover to be noted');
+    assert.equal(fs.existsSync(pending('release.json')), false, 'what could go, went');
+    assert.ok(fs.existsSync(pending('1.8.1')));
+    unlock();
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    await until(() => !fs.existsSync(pending()) && h.said('info', 'were removed') === 1, 'the installer to be removed a minute after launch');
+    assert.equal(h.github.seen.length, 0, 'with updates off the launch timer only tidies');
+  });
+
+  it('the old one-update layout\'s files that could not be removed are tried again on later ticks, with updates off, and said once', { skip: !canLock }, async () => {
+    // As earlier versions left it: the installer and its files at the top.
+    fs.mkdirSync(pending(), { recursive: true });
+    fs.writeFileSync(pending('release.json'), '{}');
+    fs.writeFileSync(pending('release-notes.json'), '{}');
+    const unlock = lock(pending('staged'));
+    const h = quietUpdater(fixture());
+    await h.updater.start();
+    await until(() => h.said('warn', LEFT) === 1, 'the leftover to be noted');
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    for (let i = 0; i < 3; i++) {
+      tick(h);
+      await until(() => h.timers.timers.some((t) => !t.cleared && t.ms === TICK_MS), 'the next tick');
+      for (let n = 0; n < 20; n++) await settle();
+    }
+    assert.ok(fs.existsSync(pending('staged')), 'still held');
+    assert.equal(h.said('warn', LEFT), 1, 'said once, not on every tick');
+    unlock();
+    // A pass that began before the unlock may still be running, and a tick
+    // then joins it; the next tick starts afresh, as it would in the app.
+    for (let i = 0; i < 50 && fs.existsSync(pending()); i++) {
+      tick(h);
+      for (let n = 0; n < 20; n++) await settle();
+    }
+    await until(() => !fs.existsSync(pending()), 'the leftover to be removed on a tick');
+    assert.equal(h.github.seen.length, 0, 'and nothing was checked: updates are off');
+  });
+
+  it('a clean folder is not touched by the ticks', async () => {
+    // Something for the launch's tidying to remove, so that waiting for the
+    // folder to go waits for that pass, not for a folder that was never there.
+    fs.mkdirSync(pending('1.7.0'), { recursive: true });
+    const h = windowsUpdater(fixture());
+    await h.updater.start();
+    await until(() => !fs.existsSync(pending()), 'the launch tidy');
+    for (let n = 0; n < 20; n++) await settle();
+    // Something tidying would remove, put there after the launch; only a
+    // leftover the tidying itself failed on sends the ticks looking.
+    fs.mkdirSync(pending(), { recursive: true });
+    fs.writeFileSync(pending('stray.txt'), 'x');
+    h.updater.setAuto(false);
+    for (let i = 0; i < 3; i++) {
+      h.timers.fire(FIRST_CHECK_DELAY_MS);
+      tick(h);
+      for (let n = 0; n < 20; n++) await settle();
+    }
+    assert.ok(fs.existsSync(pending('stray.txt')));
+  });
+
+  it('nothing is tidied once a Restart to update has been committed', { skip: !canLock }, async () => {
+    const fx = fixture();
+    const first = windowsUpdater(fx);
+    await first.updater.start();
+    await first.updater.checkNow();
+    await until(() => first.updater.state().status === 'ready', 'the download');
+    first.updater.stop();
+    const unlock = lock(pending('1.8.0'));
+    const h = quietUpdater(fx);
+    assert.equal((await h.updater.start()).status, 'ready');
+    await until(() => h.said('warn', LEFT) === 1, 'the leftover to be noted');
+    assert.equal(await h.updater.prepareInstall(), true);
+    unlock();
+    h.timers.fire(FIRST_CHECK_DELAY_MS);
+    tick(h);
+    for (let n = 0; n < 50; n++) await settle();
+    assert.ok(fs.existsSync(pending('1.8.0')), 'the folder is the installer\'s now');
+    assert.equal(h.updater.install(), true);
+    assert.deepEqual(h.launched, [pending('1.9.0', fx.name)]);
+  });
+});
+
 describe('the Mac updater', () => {
   const macFixture = (apps = { 'Zelos.app': { id: 'app.zelos.desktop', version: '1.9.0' } }) =>
     fixture('1.9.0', { platform: 'darwin', arch: 'arm64', payload: macZip(apps) });
@@ -810,6 +1712,7 @@ describe('the Mac updater', () => {
     assert.equal(fs.existsSync(path.join(sandbox, 'userData', PENDING_DIR, 'staged')), false, 'nothing is unpacked until the restart');
 
     assert.equal(await h.updater.prepareInstall(), true);
+    assert.deepEqual(h.extracted, [path.join(sandbox, 'userData', PENDING_DIR, '1.9.0', 'staged')], 'unpacked inside the ready version\'s own folder');
     const beside = `${h.bundlePath}${MAC_NEW_SUFFIX}`;
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(beside, 'info.json'), 'utf8')), { id: 'app.zelos.desktop', version: '1.9.0' },
       'the new app is copied beside the old one before Zelos quits');
@@ -861,7 +1764,7 @@ describe('the Mac updater', () => {
     const h = macUpdater(macFixture());
     fs.mkdirSync(`${h.bundlePath}${MAC_NEW_SUFFIX}`);
     await h.updater.start();
-    assert.equal(fs.existsSync(`${h.bundlePath}${MAC_NEW_SUFFIX}`), false);
+    await until(() => !fs.existsSync(`${h.bundlePath}${MAC_NEW_SUFFIX}`), 'the copy to be removed');
   });
 
   for (const [what, apps] of [
@@ -895,7 +1798,7 @@ describe('the Mac updater', () => {
     assert.match(state.installProblem, /App Management/);
     for (const left of [path.join(sandbox, 'userData', RESULT_FILE), path.join(sandbox, 'userData', ATTEMPT_FILE),
       path.join(sandbox, 'userData', PENDING_DIR), `${h.bundlePath}${MAC_NEW_SUFFIX}`]) {
-      assert.equal(fs.existsSync(left), false, left);
+      await until(() => !fs.existsSync(left), left);
     }
 
     // "ok" from the script is not taken on trust: the running version decides.
