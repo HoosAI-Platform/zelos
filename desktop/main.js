@@ -567,8 +567,12 @@ export const RESTORE_BACKUP_CHANNEL = 'zelos:restore-backup';
  * dependency boundary also lets tests exercise cancellation and failure without
  * opening an OS dialog or loading any real user data.
  */
-export function backupHandlers({ isBoard, getCore, getWindow, dialogs, flush, appVersion, restart, setBusy = () => {} }) {
+export function backupHandlers({ isBoard, getCore, getWindow, dialogs, flush, appVersion, restart, setBusy = () => {}, now = () => new Date() }) {
   let busy = false;
+  // The date a person reads on their own calendar. toISOString() named the file
+  // by UTC, so an evening backup in the Americas offered tomorrow's date
+  // (QA, 2026-10-10, TT-3505).
+  const localDate = (at) => `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`;
   const safeError = (err) => {
     if (err?.code === 'ZELOS_DATA_BUSY' || err?.code === 'ZELOS_RESTORE_PENDING' || err?.message?.startsWith('Backup: ')) return err.message;
     return 'Zelos could not finish this operation. Check that other Zelos and AI clients are closed, finish any active request, and try again. Your recovery copies are kept in the data folder’s backups folder.';
@@ -588,7 +592,7 @@ export function backupHandlers({ isBoard, getCore, getWindow, dialogs, flush, ap
     try {
       const selected = restore
         ? await dialogs.showOpenDialog(win, { title: 'Restore a Zelos backup', properties: ['openFile'], filters: [{ name: 'Zelos backup', extensions: ['zelos-backup'] }] })
-        : await dialogs.showSaveDialog(win, { title: 'Create a Zelos backup', defaultPath: `Zelos-${new Date().toISOString().slice(0, 10)}.zelos-backup`, filters: [{ name: 'Zelos backup', extensions: ['zelos-backup'] }], message: 'This file contains private archive data and may include credentials. Keep it in a safe location.' });
+        : await dialogs.showSaveDialog(win, { title: 'Create a Zelos backup', defaultPath: `Zelos-${localDate(now())}.zelos-backup`, filters: [{ name: 'Zelos backup', extensions: ['zelos-backup'] }], message: 'This file contains private archive data and may include credentials. Keep it in a safe location.' });
       const selectedPath = restore ? selected.filePaths?.[0] : selected.filePath;
       if (selected.canceled || !selectedPath) return { ok: false, cancelled: true };
       win.setEnabled?.(false);

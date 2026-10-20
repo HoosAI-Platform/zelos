@@ -1190,6 +1190,24 @@ describe('the shell, booted against a stub Electron', () => {
     finish({ canceled: true }); assert.equal((await first).cancelled, true);
   });
 
+  it('suggests a backup file named for the local date, not the UTC one (TT-3505)', async () => {
+    const offered = [];
+    const handlers = main.backupHandlers({
+      isBoard: () => true, getCore: () => ({ paths: { home } }), getWindow: () => ({ isDestroyed: () => false }), appVersion: '1.8.0', flush: async () => {}, restart: async () => {},
+      // 22:00 on 14 March in New York, which is already the 15th in UTC.
+      now: () => new Date('2025-03-15T02:00:00Z'),
+      dialogs: { showSaveDialog: async (_win, options) => { offered.push(options.defaultPath); return { canceled: true }; } },
+    });
+    const tz = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      assert.equal((await handlers.createBackup({})).cancelled, true);
+    } finally {
+      if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
+    }
+    assert.deepEqual(offered, ['Zelos-2025-03-14.zelos-backup']);
+  });
+
   it('serves the board and refuses the API without the token', async () => {
     const base = booted.zelos.url;
 
