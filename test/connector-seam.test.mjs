@@ -354,7 +354,11 @@ test('the calendar kind picker is the registry too, and a kindless connector is 
     { manifests: overTheWire(), onSaved() {}, onCancel() {} },
   );
 
-  const picker = optionsIn(form);
+  // The kind picker's own options: the form has a second select now — the
+  // password picker in the sign-in block (TT-3425) — whose three choices are
+  // not calendar kinds. Found by what it offers, not by where it sits.
+  const picker = optionsIn(walk(form).find((n) => n.tag === 'select'
+    && optionsIn(n).some((o) => o.value === 'caldav')));
   assert.deepEqual(
     picker.map((o) => o.value),
     ['ics', 'caldav', 'file', CALENDAR_KIND],

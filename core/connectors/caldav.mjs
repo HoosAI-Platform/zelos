@@ -24,6 +24,9 @@ export default calendarConnector({
       url: source.url,
       user: source.user,
       pass,
+      // Forwarded with `??`, as core/connectors/imap.mjs forwards mail's: the
+      // setting is three-valued and `false` is a real answer. (TT-3425)
+      requireTls: source.requireTls ?? null,
       from: window.from,
       to: window.to,
       signal,
@@ -74,9 +77,24 @@ export default calendarConnector({
       url: source.url,
       user: source.user || '',
       pass,
+      // The rule the sweep reads, or this is a more permissive client than the
+      // one that runs at seven — and it would call a calendar healthy on the
+      // morning it stops syncing. core/doctor.mjs makes the same point for mail.
+      requireTls: source.requireTls ?? null,
       timeoutMs: ctx.timeoutMs,
       signal: ctx.signal,
     });
+    /* Before the sign-in advice below, and on the flag rather than the wording
+       (QA, 2026-10-10, TT-3425). The refusal mentions the password, and "check
+       the username and the password" is exactly wrong for it: nothing was
+       rejected, because nothing was sent. The fix is an address or a setting. */
+    if (result?.cleartextRefused) {
+      return {
+        status: 'fail',
+        detail: `${source.url}: ${result.error}`,
+        action: 'Change the address in Settings → Calendars to its https:// form. If this server is on your own network and really has no https, set “Sending the password” to “Let this one server take it unencrypted” for this calendar instead.',
+      };
+    }
     if (result?.refused) {
       // A 403 is the server saying no to this *address* (QA, 2026-10-10,
       // TT-3455). Sending the reader off to make an app-specific password is

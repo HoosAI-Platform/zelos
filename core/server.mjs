@@ -87,6 +87,7 @@ import {
   saveOAuthTokens,
   MS_LOGIN_ORIGIN,
 } from './sources/imap.mjs';
+import { assertCleartextAllowed } from './net.mjs';
 /* "Sign in with Google": the PKCE material and the token exchange come from
    the one provider table, and the grant is filed by core/sources/imap.mjs
    above in the exact shape the Microsoft flow files its own. */
@@ -2275,10 +2276,17 @@ async function handleCalendarTest(ctx) {
   if (!kinds.includes(kind)) throw new HttpError(400, `kind must be ${orList(kinds)}`);
   if (!refBelongsTo('calendar', body.keyRef, ctx.config())) throw new HttpError(400, 'keyRef must name a calendar, like calendar.c_9f3a1c');
 
+  /* The form's own choice, read strictly — the same reader the mail test uses,
+     so a string 'false' out of a form field is a 400 rather than a downgrade.
+     Sent with Test as well as Save so "Test it" connects under the rule the
+     sweep will, and a calendar the Test passes is one the sweep reads.
+     (QA, 2026-10-10, TT-3425) */
+  const requireTls = requireTlsFrom(body);
+
   if (kind === 'caldav') {
     const url = requireString(body, 'url', { max: 2_048 });
     const pass = await secretFor(body.keyRef);
-    sendJSON(ctx.res, 200, await testCalDavConnection({ url, user: body.user || '', pass, timeoutMs: 30_000 }));
+    sendJSON(ctx.res, 200, await testCalDavConnection({ url, user: body.user || '', pass, requireTls, timeoutMs: 30_000 }));
     return;
   }
 
@@ -2310,6 +2318,21 @@ async function handleCalendarTest(ctx) {
   const raw = requireString(body, 'url', { max: 2_048 }).replace(/^webcal:/i, 'https:');
   const url = safeUrl(raw);
   if (!url || !/^https?:/.test(url)) throw new HttpError(400, 'url must be an http, https or webcal address');
+
+  /* Refused before the password is read or a socket opened, under the sweep's
+     rule — `fetchIcsText` runs the same check on the same webcal-rewritten URL.
+     "A username is set" is the trigger, not "a username and a stored password":
+     the header below needs both, but the sweep sends `user:` with an empty
+     password, and a Test that passed where the sweep refuses would be telling
+     the user a calendar works on the strength of a request the sweep will never
+     make. */
+  try {
+    assertCleartextAllowed(url, { user: body.user || '', requireTls });
+  } catch (err) {
+    if (!err?.cleartextRefused) throw err;
+    sendJSON(ctx.res, 200, { ok: false, calendars: [], error: err.message, cleartextRefused: true });
+    return;
+  }
 
   const headers = { Accept: 'text/calendar, text/plain;q=0.5' };
   const pass = await secretFor(body.keyRef);

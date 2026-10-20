@@ -10,7 +10,7 @@ process.env.ZELOS_LOG_LEVEL = 'silent';
 const HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-config-'));
 process.env.ZELOS_HOME = path.join(HOME_ROOT, 'home');
 
-const { DEFAULTS, MAIL_ACCOUNT_DEFAULTS, paths, loadConfig, saveConfig, validateConfig, privacyLimits, newId, isValidRef } =
+const { DEFAULTS, MAIL_ACCOUNT_DEFAULTS, CALENDAR_DEFAULTS, paths, loadConfig, saveConfig, validateConfig, privacyLimits, newId, isValidRef } =
   await import('../core/config.mjs');
 const { modelKeyRef } = await import('../core/model-key.mjs');
 
@@ -545,6 +545,46 @@ test('requireTls accepts only true, false and null', () => {
     const result = validateConfig(cfg);
     assert.equal(result.ok, false, JSON.stringify(junk));
     assert.ok(result.errors.some((e) => e.path === 'mail[0].requireTls'), JSON.stringify(junk));
+  }
+});
+
+/**
+ * QA, 2026-10-10, TT-3425. Calendars had no `requireTls` at all, so a CalDAV
+ * account or a protected .ics link typed as http:// sent its password in the
+ * clear. They get mail's three values, mail's default, and mail's rule that
+ * the default is stored as null rather than resolved on the way in.
+ */
+test('a calendar’s requireTls defaults to "decide from the host", fills in for old calendars, and round-trips', () => {
+  const home = freshHome('calendar-require-tls');
+  assert.equal(CALENDAR_DEFAULTS.requireTls, null);
+
+  // A calendar written before the field existed: no key at all.
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+    calendars: [{ id: 'c_old', enabled: true, label: 'Old', kind: 'caldav', url: 'https://dav.example.test/', user: 'nemo', keyRef: 'calendar.c_old' }],
+  }));
+  const loaded = loadConfig();
+  assert.equal(loaded.calendars[0].requireTls, null, 'normalizeAccounts has to give an old calendar the full shape');
+  assert.equal(validateConfig(loaded).ok, true, JSON.stringify(validateConfig(loaded).errors));
+
+  for (const value of [false, true, null]) {
+    const saved = saveConfig({ calendars: [{ ...loaded.calendars[0], requireTls: value }] });
+    assert.equal(saved.calendars[0].requireTls, value, `${value} did not survive a save`);
+    assert.equal(loadConfig().calendars[0].requireTls, value, `${value} did not survive a reload`);
+    assert.equal(validateConfig(saved).ok, true);
+  }
+});
+
+test('a calendar’s requireTls accepts only true, false and null', () => {
+  freshHome('calendar-require-tls-validate');
+  const base = saveConfig({ calendars: [{ id: 'c_1', kind: 'ics', url: 'https://cal.example.test/feed.ics' }] });
+  assert.equal(validateConfig(base).ok, true, JSON.stringify(validateConfig(base).errors));
+  for (const junk of ['yes', 'false', 0, 1, {}, []]) {
+    const cfg = structuredClone(base);
+    cfg.calendars[0].requireTls = junk;
+    const result = validateConfig(cfg);
+    assert.equal(result.ok, false, JSON.stringify(junk));
+    assert.ok(result.errors.some((e) => e.path === 'calendars[0].requireTls'), JSON.stringify(junk));
   }
 });
 

@@ -2634,6 +2634,76 @@ test('/api/calendar/test reads an ics feed and refuses a dangerous url', async (
 });
 
 /**
+ * QA, 2026-10-10, TT-3425. "Test it" on a calendar with a username and an
+ * http:// address sent the password readable, exactly as the sweep did. The
+ * route now applies the sweep's rule — the form's own `requireTls`, read
+ * strictly — on both the CalDAV and the .ics branch, before anything is
+ * fetched, and says so with a flag as well as a sentence. `.test` hosts, and a
+ * `fetch` that records them and refuses, so nothing leaves the machine.
+ */
+test('/api/calendar/test refuses a calendar password on plain http:// before any request, for both kinds', async (t) => {
+  const upstream = await startMockUpstream(t);
+  const ctx = await startServer(t);
+
+  // `call()` reaches the server under test through this same global, so only
+  // the `.test` hosts are intercepted.
+  const realFetch = globalThis.fetch;
+  const hits = [];
+  globalThis.fetch = (input, init) => {
+    const href = typeof input === 'string' ? input : String(input?.url ?? input);
+    if (new URL(href).hostname.endsWith('.test')) {
+      hits.push(href);
+      return Promise.reject(new Error('stubbed: no network in this test'));
+    }
+    return realFetch(input, init);
+  };
+  t.after(() => { globalThis.fetch = realFetch; });
+
+  for (const kind of ['ics', 'caldav']) {
+    const url = kind === 'ics' ? 'http://cal.example.test/feed.ics' : 'http://cal.example.test/dav/';
+
+    // No keyRef, so no stored password: a username alone is enough, because
+    // the sweep sends `Basic nemo:` for it and Test has to agree with the sweep.
+    const refused = await call(ctx, 'POST', '/api/calendar/test', { body: { kind, url, user: 'nemo' } });
+    assert.equal(refused.status, 200, kind);
+    assert.equal(refused.json.ok, false, kind);
+    assert.equal(refused.json.cleartextRefused, true, `${kind}: the flag is how the form tells this from a wrong password`);
+    assert.match(refused.json.error, /^Zelos stopped before your calendar password left this machine: cal\.example\.test is a plain http:\/\/ address\./, kind);
+    assert.deepEqual(hits, [], `${kind}: a request went out before the refusal`);
+
+    // The form's "Let this one server take it unencrypted" is forwarded.
+    const excused = await call(ctx, 'POST', '/api/calendar/test', { body: { kind, url, user: 'nemo', requireTls: false } });
+    assert.equal(excused.json.ok, false, kind);
+    assert.equal(excused.json.cleartextRefused, undefined, `${kind}: requireTls: false did not reach the reader`);
+    // (CalDAV discovery tries more than one root, so "at least one".)
+    assert.ok(hits.length >= 1, `${kind}: the excused server was never asked`);
+    hits.length = 0;
+
+    // Read strictly, as the mail route reads it: a form string is a 400, never a downgrade.
+    const junk = await call(ctx, 'POST', '/api/calendar/test', { body: { kind, url, user: 'nemo', requireTls: 'false' } });
+    assert.equal(junk.status, 400, kind);
+    assert.deepEqual(hits, []);
+  }
+
+  // `true` is forwarded too: it refuses even a server on this machine, which
+  // the default would have allowed.
+  const strict = await call(ctx, 'POST', '/api/calendar/test', {
+    body: { kind: 'ics', url: `${upstream.baseUrl}/calendar.ics`, user: 'nemo', requireTls: true },
+  });
+  assert.equal(strict.json.cleartextRefused, true);
+  const loopback = await call(ctx, 'POST', '/api/calendar/test', {
+    body: { kind: 'ics', url: `${upstream.baseUrl}/calendar.ics`, user: 'nemo' },
+  });
+  assert.equal(loopback.json.ok, true, `loopback is allowed by default: ${loopback.json.error}`);
+
+  // The rewrite decides the scheme: a webcal link is fetched over https, so a
+  // username on it is no reason to refuse.
+  const webcal = await call(ctx, 'POST', '/api/calendar/test', { body: { kind: 'ics', url: 'webcal://cal.example.test/feed.ics', user: 'nemo' } });
+  assert.equal(webcal.json.cleartextRefused, undefined);
+  assert.deepEqual(hits, ['https://cal.example.test/feed.ics']);
+});
+
+/**
  * A calendar host that redirects, and counts who was asked.
  *
  * Each one is a separate listener on its own port, which makes each a separate
