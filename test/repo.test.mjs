@@ -1582,6 +1582,31 @@ test('docs/INSTALL.md recommends only the Windows installers a release publishes
   }
 });
 
+test('the controls docs/README.md and SOURCES.md send you to are buttons the app has', () => {
+  /* QA, 2026-10-10 (TT-3524): docs/README.md promised a "Forget" control beside
+     every stored password and a "Connect again" for an expired sign-in, and
+     SOURCES.md a Test for every source. None of those buttons exists. Every
+     bold control the two passages name now has to be a real button label. */
+  const ui = ['ui/views/settings.js', 'ui/views/ai-access.js', 'ui/lib/source-status.js']
+    .map((file) => fs.readFileSync(path.join(ROOT, file), 'utf8')).join('\n');
+  const labels = new Set([...ui.matchAll(/button\(\s*(?:[^'`(),]+\?\s*)?'([^']+)'/g)].map((m) => m[1]));
+  assert.ok(labels.has('Remove') && labels.has('Edit'), 'the button scan found nothing — it must be broken');
+  const readme = fs.readFileSync(path.join(ROOT, 'docs', 'README.md'), 'utf8');
+  const sources = fs.readFileSync(path.join(ROOT, 'docs', 'SOURCES.md'), 'utf8');
+  const passages = [
+    readme.slice(readme.indexOf('If Zelos is still running, you can do'), readme.indexOf('Nothing is left anywhere else.')).replace(/\s+/g, ' '),
+    readme.slice(readme.indexOf('**Mail sign-in fails.**') + 24, readme.indexOf('**The model test fails.**')).replace(/\s+/g, ' '),
+    sources.slice(sources.indexOf('You add them in'), sources.indexOf('\n---')).replace(/\s+/g, ' '),
+  ];
+  for (const passage of passages) {
+    for (const [, control] of passage.matchAll(/\*\*([^*]+)\*\*/g)) {
+      if (/^Settings →/.test(control)) continue;              // a place, not a button
+      assert.ok(labels.has(control), `the docs send you to a "${control}" button the app does not have: ${passage.slice(0, 120)}`);
+    }
+  }
+  assert.doesNotMatch(sources.slice(0, sources.indexOf('\n---')), /each has a \*\*Test\*\*/);
+});
+
 test('docs/INSTALL.md leads each first-open warning with what to click, in plain words', () => {
   const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
 

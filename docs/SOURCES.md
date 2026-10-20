@@ -4,9 +4,12 @@
 section per source: what it reads, where you mint the credential, what it costs,
 what it deliberately does not do, and where it stops.**
 
-You add them in **Settings → Sources**. Each one asks for the credential in its
-own words, with a link to the page where you mint it, and each has a **Test**
-that says what it found rather than "OK".
+You add them in **Settings → Other things it can read**. Each one asks for the
+credential in its own words, with a link to the page where you mint it. There is
+no Test button there: each source's card shows what its last read found, and
+when a warning on the board brings you to a source, **Check all connections**
+reads everything again. `zelos doctor` checks each source it can and says what it
+found rather than "OK" (see below).
 
 ---
 
