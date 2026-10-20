@@ -1647,6 +1647,14 @@ test('the sweep line and the toast can actually be heard', () => {
   assert.match(paintToast[0], /announce\(built\.text, state\.toast\.message\)/);
 });
 
+test('on a phone the sweep line keeps two lines, so the sticky topbar does not jump at every check (TT-3492)', () => {
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
+  // Idle, the line wraps to two lines on a phone; running, it fits on one.
+  // The topbar is sticky, so each change moved the whole page by a line.
+  const phone = [...css.matchAll(/@media \(max-width: 34rem\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('\n');
+  assert.match(phone, /\.sweepline-text \{[^}]*min-height: 2lh;/, 'the sweep line is free to change height on a phone');
+});
+
 test('the page declares the one theme it actually has', () => {
   const html = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
   // "light dark" on an app with a single black theme makes a light-mode OS draw

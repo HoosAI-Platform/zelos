@@ -391,6 +391,15 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   overflow-wrap: anywhere;
 }
 .sweepline.is-bad .sweepline-text { color: var(--accent-text); }
+/* On a phone the idle line ("Last checked … · next check at …") wraps to two
+   lines and a running check's fits on one, so the sticky topbar grew and
+   shrank by a line at every check and the page jumped 18 px each way (QA,
+   2026-10-10, TT-3492). Two lines are kept either way. */
+@media (max-width: 34rem) {
+  /* The em line is for a browser without lh (Safari before 16.4): two lines
+     at the line-height of 1.5 it inherits. */
+  .sweepline-text { min-height: 3em; min-height: 2lh; }
+}
 
 /* The day's token spend. Quieter than the sweep text beside it by size alone —
    an opacity here took the dim ink under 4.5:1. When the database has
