@@ -36,9 +36,19 @@
   --ground-3: rgba(255, 255, 255, 0.095);
   --paper: rgba(255, 255, 255, 0.045);
 
-  --ink: #ededf0;    /* 19.8:1 on black */
-  --ink-2: #a6a9b4;  /*  8.9:1 */
-  --ink-3: #7c808c;  /*  5.3:1 — still AA at body size */
+  --ink: #ededf0;    /* 18.0:1 on black */
+  --ink-2: #a6a9b4;  /*  9.0:1 */
+  /* Dim, but measured where it is read: under the ambient glow where its layers
+     overlap most (18% accent on a 320px phone), on a glass pane and on a
+     --ground-2 box inside one, for every preset accent. On plain black the old
+     #7c808c was 5.3:1; under the glow it measured 4.14:1 (TT-3509).
+     test/contrast.test.mjs does the sums. */
+  --ink-3: #9da0a9;  /*  8.0:1 on black, >= 4.5:1 under the glow */
+  /* Small dim text on an event's accent wash (agenda and calendar places). The
+     wash adds another 15% of accent on top of the glow, and no dim grey clears
+     4.5:1 there for the brighter presets, so this is --ink-3's hue lifted until
+     it does. */
+  --ink-on-wash: #aaadb4;  /*  9.4:1 on black */
 
   /*
      The accent as *type*. A user is free to pick something dark, and a dark hex
@@ -110,6 +120,17 @@ body {
 [hidden] { display: none !important; }
 
 h1, h2, h3, h4 { margin: 0; font-weight: 600; line-height: 1.2; }
+
+/* Read by a screen reader, not shown: a view's h1 (TT-3530). */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 p { margin: 0; }
 ul, ol { margin: 0; padding: 0; list-style: none; }
 a { color: inherit; text-decoration: none; }
@@ -257,7 +278,16 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
 }
-.input:read-only { color: var(--ink-3); background: var(--ground-2); }
+/* Read-only fields (the timezone, the Zelos folder, the message to paste) keep
+   the dark field fill and say "locked" with a dashed edge and the dim ink. The
+   old --ground-2 fill swapped that for a lighter box inside the form's own box
+   and took the dim ink under 4.5:1 (test/contrast.test.mjs).
+
+   An enabled <select> is never read-write either, so it matches :read-only and
+   every picker was drawn as a locked field (TT-3470); a disabled one still gets
+   the locked look, like any disabled field. :where() keeps the specificity at
+   .input:read-only's, so .input:focus still wins where it did. */
+.input:read-only:not(:where(select:enabled)) { color: var(--ink-3); border-style: dashed; border-color: var(--line-strong); }
 
 textarea.input, .draft-body, .ask-field, .capture-field {
   width: 100%;
@@ -358,14 +388,13 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 .sweepline.is-bad .sweepline-text { color: var(--accent-text); }
 
-/* The day's token spend. Dimmer than the sweep text beside it — it is a thing
-   to notice when you go looking, not a thing to be told. When the database has
+/* The day's token spend. Quieter than the sweep text beside it by size alone —
+   an opacity here took the dim ink under 4.5:1. When the database has
    no counter the node is empty, and an empty node must take no room at all
    rather than push the sweep bar down a line. */
 .sweepline-tokens {
   font-size: 0.6875rem;
   color: var(--ink-3);
-  opacity: 0.75;
 }
 .sweepline-tokens:empty { display: none; }
 
@@ -647,7 +676,21 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 .row.sev-2 { border-left-color: var(--olive); }
 .row.sev-3 { border-left-color: var(--accent); }
-.row.is-snoozed { opacity: 0.6; }
+/* A snoozed row, and every row in Finished recently (section 8), is drawn as
+   set aside rather than faded: no glass fill and no sheen, a dashed edge, and
+   the headline in --ink-2. Opacity 0.6 took its reason, its "until" and the
+   Reopen button to about 3.4:1 (TT-3510). */
+.row.is-snoozed,
+.worth.is-finished .row {
+  background: none;
+  border-style: dashed;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.row.is-snoozed::after,
+.worth.is-finished .row::after { content: none; }
+.row.is-snoozed .headline,
+.worth.is-finished .row .headline { color: var(--ink-2); }
 
 .row-main { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.55rem 0.6rem; }
 
@@ -886,8 +929,14 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 .agenda-time { flex: none; font-size: 0.75rem; color: var(--lapis); }
 .agenda-title { font-size: 0.9375rem; }
-.agenda-where { font-size: 0.75rem; color: var(--ink-3); }
-.agenda-item.is-past { opacity: 0.5; }
+.agenda-where { font-size: 0.75rem; color: var(--ink-on-wash); }
+/* An appointment that has ended is an outline: no wash, a grey stripe, quieter
+   ink, and "Ended:" for screen readers. It used to be opacity 0.5, which took
+   its time and place to 2.75 and 1.9:1 (TT-3469). */
+.agenda-item.is-past { border-left-color: var(--line-strong); background: none; }
+.agenda-item.is-past .agenda-time,
+.agenda-item.is-past .agenda-where { color: var(--ink-3); }
+.agenda-item.is-past .agenda-title { color: var(--ink-2); }
 .agenda-item.is-live { border-left-color: var(--accent); background: var(--accent-wash); }
 
 /* ------------------------------------------------------------- 7. calendar */
@@ -1075,7 +1124,11 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 .chip-ev.is-short .chip-time { flex: none; }
 .chip-ev.is-short .chip-title { display: block; white-space: nowrap; }
 .chip-ev.is-packed { border-right: 1px solid var(--paper); }
-.chip-ev.is-past { opacity: 0.5; }
+/* Ended, drawn the way the agenda draws it (TT-3469). */
+.chip-ev.is-past { border-left-color: var(--line-strong); background: none; }
+.chip-ev.is-past .chip-time,
+.chip-ev.is-past .chip-where { color: var(--ink-3); }
+.chip-ev.is-past .chip-title { color: var(--ink-2); }
 .chip-ev.is-live { border-left-color: var(--accent); background: var(--accent-wash); }
 .chip-time { font-size: 0.625rem; color: var(--lapis); }
 .chip-ev.is-live .chip-time { color: var(--accent-text); }
@@ -1099,7 +1152,7 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: var(--chip-lines, 20);
 }
-.chip-where { font-size: 0.625rem; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-where { font-size: 0.625rem; color: var(--ink-on-wash); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .now-line {
   position: absolute;
@@ -1215,7 +1268,9 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   font-size: 0.625rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  /* --ink-2, not --ink-3: the label sits in the card's top-left corner, under
+     the brightest of the glass sheen (TT-3510). */
+  color: var(--ink-2);
 }
 .draft-addr { font-size: 0.875rem; overflow-wrap: anywhere; }
 .draft-status { margin-left: auto; font-size: 0.6875rem; color: var(--ink-3); }
@@ -1385,6 +1440,16 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   background: var(--ground-2);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+}
+/* "Server settings (for experts)" opens the full form inside the simple form's
+   own box. A second fill there put the 12px hints on two layers of --ground-2,
+   under 4.5:1 (TT-3471), so the inner form is just a section of the outer. */
+.account-form .account-form {
+  padding: 0.75rem 0 0;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
 }
 .editor:empty { display: none; }
 
@@ -1587,6 +1652,18 @@ body::before {
     rgba(255, 255, 255, 0.015) 24%,
     transparent 48%);
 }
+
+/* Glass inside a form box is not glass. The simple mail form holds the chosen
+   provider's .chosen card inside its own --ground-2 box; a --paper fill and the
+   sheen on top of that took the card's --ink-3 lines under 4.5:1. Inside a
+   form it is an outline, not a pane. */
+.account-form .chosen {
+  background: none;
+  border-color: var(--line-strong);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.account-form .chosen::after { content: none; }
 
 /* The topbar and rail float over content, so they get a heavier frost and an
    actual tint — at 4.5% white they would let text scroll through and read. */
@@ -1808,7 +1885,8 @@ textarea.input:focus,
   font-weight: 700;
 }
 
-.scope-state { font-size: 0.8125rem; color: var(--ink-3); }
+/* Always inside .scope-exposing, on the accent wash. */
+.scope-state { font-size: 0.8125rem; color: var(--ink-on-wash); }
 .scope-state.is-on { color: var(--accent-text); font-weight: 600; }
 
 .scope-confirm {
@@ -1986,10 +2064,9 @@ textarea.input:focus,
 .hit-tools { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.55rem; }
 
 /* --- Finished recently (Now) ---------------------------------------------
-   The fold holds rows that are off the board — done and dismissed — so the
-   whole list dims the way a snoozed row does (.row.is-snoozed above), and the
-   ticks inside stay live: the tick on a done row is the reopen. */
-.worth.is-finished .row { opacity: 0.6; }
+   The fold holds rows that are off the board — done and dismissed — so they
+   are drawn set aside the way a snoozed row is (.row.is-snoozed, section 6),
+   and the ticks inside stay live: the tick on a done row is the reopen. */
 
 /* The Your data stats: quiet lines above the folder field, with room of their own. */
 .data-stats { display: grid; gap: 0.35rem; margin-bottom: 1rem; }
@@ -2026,6 +2103,7 @@ textarea.input:focus,
 .setup-status-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding: 0.4rem 0; color: var(--ink-2); }
 .setup-status-list li span { flex: 1 1 15rem; overflow-wrap: anywhere; }
 .account.is-connection-target { border-color: var(--accent-edge); background: var(--accent-wash); }
+.account.is-connection-target .account-host { color: var(--ink-on-wash); }
 .connection-recovery { margin: 0.75rem 0; }
 .connection-recovery .quiet-note { overflow-wrap: anywhere; }
 

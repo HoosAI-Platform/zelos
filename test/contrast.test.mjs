@@ -1,0 +1,463 @@
+/**
+ * test/contrast.test.mjs — text contrast measured the way the screen draws it.
+ *
+ * axe sums contrast against the element's own background and stops there, so
+ * it never sees the ambient glow (`body::before` in ui/app.css) that lights the
+ * black ground from behind. Under that glow the old dim ink measured 4.14:1
+ * on screen while axe passed it (TT-3509).
+ *
+ * This suite reads the tokens, the glow and the accent presets straight from
+ * the shipped source, composites the surfaces text actually sits on over the
+ * glow at its brightest, and asserts WCAG 1.4.3's 4.5:1 for every text ink.
+ * Nothing here is a pinned colour: change a token and the sums follow it.
+ *
+ * The maths is WCAG 2.x relative luminance, with translucent layers composited
+ * in sRGB the way browsers paint them. The glow's peak is not a single layer's
+ * centre: on small screens the middle layer overlaps a corner one, so the
+ * gradient field is evaluated across a set of real viewport sizes.
+ *
+ * Out of scope: a custom accent from the colour input (`<input type=color>` in
+ * Settings > Colour). A user can pick a near-white accent whose glow no dim
+ * grey can clear; the guarantee here covers the default and the presets.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+// Comments are dropped first, so a token or gradient quoted in prose is never read.
+const CSS = fs.readFileSync(new URL('../ui/app.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+const SETTINGS = fs.readFileSync(new URL('../ui/views/settings.js', import.meta.url), 'utf8');
+
+const AA = 4.5;
+
+/* ------------------------------------------------------------ colour maths */
+
+/** '#rgb' | '#rrggbb' | 'rgb(...)' | 'rgba(...)' -> { rgb: [0..1]x3, a } */
+function parseColour(text) {
+  const s = text.trim();
+  let m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+  if (m) {
+    const h = m[1].length === 3 ? [...m[1]].map((c) => c + c).join('') : m[1];
+    return { rgb: [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255), a: 1 };
+  }
+  m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(s);
+  if (m) return { rgb: [m[1], m[2], m[3]].map((v) => Number(v) / 255), a: m[4] === undefined ? 1 : Number(m[4]) };
+  throw new Error(`contrast test cannot read the colour ${JSON.stringify(text)}`);
+}
+
+/** Paint `top` (with its alpha) over an opaque `under`. */
+const over = (top, under) => top.rgb.map((c, i) => c * top.a + under[i] * (1 - top.a));
+
+const linear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const luminance = ([r, g, b]) => 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+function ratio(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/* ------------------------------------------------------------- the source */
+
+/** Every custom property set in a `:root` rule, later rules winning. */
+function rootTokens(css) {
+  const tokens = {};
+  for (const [, body] of css.matchAll(/:root\s*\{([^}]*)\}/g)) {
+    for (const [, name, value] of body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) tokens[name] = value.trim();
+  }
+  return tokens;
+}
+
+const TOKENS = rootTokens(CSS);
+
+function token(name) {
+  const value = TOKENS[name];
+  assert.ok(value, `ui/app.css :root no longer defines ${name}`);
+  return value;
+}
+
+/**
+ * The alpha of the accent in a glow colour stop. The glow is written as
+ * `var(--accent-wash)` or `color-mix(in srgb, var(--accent) N%, transparent)`,
+ * and --accent-wash is itself the second form.
+ */
+function accentAlpha(stop) {
+  const s = stop.trim();
+  const ref = /^var\((--[\w-]+)\)$/.exec(s);
+  if (ref) return accentAlpha(token(ref[1]));
+  const mix = /^color-mix\(\s*in srgb\s*,\s*var\(--accent\)\s+([\d.]+)%\s*,\s*transparent\s*\)$/.exec(s);
+  if (mix) return Number(mix[1]) / 100;
+  throw new Error(`contrast test cannot read the glow stop ${JSON.stringify(stop)}`);
+}
+
+/**
+ * The glow's layers, read from body::before. Each is
+ * `radial-gradient(RXrem RYrem at CX% CY%, <accent stop>, transparent END%)`:
+ * the accent at `alpha` in the centre, fading linearly to nothing at END% of
+ * the ellipse. A layer written any other way fails the count check below
+ * rather than being skipped.
+ */
+function glowLayers(css) {
+  const rule = /body::before\s*\{([^}]*)\}/.exec(css);
+  assert.ok(rule, 'ui/app.css no longer has a body::before glow rule');
+  const body = rule[1];
+  const gradients = [...body.matchAll(/[\w-]*gradient\(/g)].map((m) => m[0]);
+  assert.ok(gradients.length > 0, 'the glow on body::before has no gradients');
+  assert.deepEqual(gradients.filter((g) => g !== 'radial-gradient('), [],
+    'the glow uses a gradient form this test does not model');
+  const STOP = String.raw`(var\(--[\w-]+\)|color-mix\([^()]*\([^()]*\)[^()]*\))`;
+  const LAYER = new RegExp(String.raw`radial-gradient\(\s*([\d.]+)rem\s+([\d.]+)rem\s+at\s+([\d.]+)%\s+([\d.]+)%\s*,\s*` +
+    STOP + String.raw`\s*,\s*transparent\s+([\d.]+)%\s*\)`, 'g');
+  const layers = [...body.matchAll(LAYER)].map((m) => ({
+    rx: Number(m[1]), ry: Number(m[2]), cx: Number(m[3]) / 100, cy: Number(m[4]) / 100,
+    alpha: accentAlpha(m[5]), end: Number(m[6]) / 100,
+  }));
+  assert.equal(layers.length, gradients.length,
+    'every radial-gradient in the glow must be one this test can read');
+  return layers;
+}
+
+/*
+ * Viewports in CSS px, phones to a large desktop, both orientations. The layers
+ * are sized in rem but placed in %, so they crowd together on small screens.
+ */
+const VIEWPORTS = [[320, 568], [375, 667], [390, 844], [844, 390], [600, 400], [1024, 768], [1280, 800], [1440, 900], [1920, 1080]];
+const REM = 16;
+const STEPS = 200;
+
+/** The most accent the glow puts on any pixel of a viewport, layers combined as 1 - Π(1 - a). */
+function peakGlow(layers, [w, h]) {
+  const W = w / REM;
+  const H = h / REM;
+  let peak = 0;
+  for (let i = 0; i <= STEPS; i++) {
+    for (let j = 0; j <= STEPS; j++) {
+      const x = (W * i) / STEPS;
+      const y = (H * j) / STEPS;
+      let clear = 1;
+      for (const g of layers) {
+        const t = Math.hypot((x - g.cx * W) / g.rx, (y - g.cy * H) / g.ry);
+        clear *= 1 - (t < g.end ? g.alpha * (1 - t / g.end) : 0);
+      }
+      peak = Math.max(peak, 1 - clear);
+    }
+  }
+  return peak;
+}
+
+function accentPresets(source) {
+  const block = /const ACCENT_PRESETS = \[([\s\S]*?)\];/.exec(source);
+  assert.ok(block, 'ui/views/settings.js no longer has ACCENT_PRESETS');
+  const hexes = [...block[1].matchAll(/hex:\s*'(#[0-9a-f]{6})'/gi)].map((m) => m[1].toLowerCase());
+  assert.ok(hexes.length > 0, 'ACCENT_PRESETS has no hex values this test can read');
+  return hexes;
+}
+
+/* ------------------------------------------------------------- the sums */
+
+const LAYERS = glowLayers(CSS);
+const PEAK_GLOW = Math.max(...VIEWPORTS.map((v) => peakGlow(LAYERS, v)));
+const ACCENTS = [...new Set([token('--accent').toLowerCase(), ...accentPresets(SETTINGS)])];
+
+/*
+ * What text sits on, painted bottom-up over the glowing ground. Each entry is a
+ * list of translucent fills: a glass pane is --paper, a box inside a pane (a
+ * field, an outside-the-month cell) adds --ground-2, and an event (an agenda
+ * item, a calendar chip) adds the accent wash.
+ */
+const SURFACES = {
+  'the bare ground': [],
+  'a glass pane': ['--paper'],
+  'a --ground-2 box in a glass pane': ['--paper', '--ground-2'],
+  'an event wash in a glass pane': ['--paper', '--lapis-wash'],
+};
+const PLAIN = ['the bare ground', 'a glass pane', 'a --ground-2 box in a glass pane'];
+const WASH = 'an event wash in a glass pane';
+
+/**
+ * Every style rule as { selectors, body, nested }, where `nested` is true for a
+ * rule inside an at-rule block such as @media. Assumes flat CSS, as app.css
+ * is: native nesting (`&:hover {}`) or a statement at-rule (`@import …;`)
+ * before a rule would be misread.
+ */
+function styleRules(css) {
+  const rules = [];
+  const stack = [];
+  let start = 0;
+  for (let i = 0; i < css.length; i++) {
+    if (css[i] === '{') {
+      const prelude = css.slice(start, i).trim();
+      if (prelude.startsWith('@')) {
+        stack.push('@');
+      } else {
+        const close = css.indexOf('}', i);
+        rules.push({ selectors: prelude.split(',').map((s) => s.trim()), body: css.slice(i + 1, close), nested: stack.length > 0 });
+        i = close;
+      }
+      start = i + 1;
+    } else if (css[i] === '}') {
+      stack.pop();
+      start = i + 1;
+    }
+  }
+  return rules;
+}
+
+const RULES = styleRules(CSS);
+const backgroundOf = (body) => /(?:^|;)\s*background(?:-color)?:\s*([^;]+);/.exec(body)?.[1].trim();
+
+/*
+ * A form field's own fill: the last `background` set by a top-level rule whose
+ * selector list names `.input` on its own. Section 9 darkens fields inside
+ * glass, so this is not a token. A viewport- or preference-dependent override
+ * would make the sums below wrong for some screens, so one fails the suite.
+ */
+function fieldFill() {
+  let fill;
+  for (const rule of RULES) {
+    if (!rule.selectors.includes('.input')) continue;
+    const bg = backgroundOf(rule.body);
+    if (!bg) continue;
+    assert.ok(!rule.nested, `an @-rule block now sets .input's background (${bg}); model it here`);
+    fill = bg;
+  }
+  assert.ok(fill, 'ui/app.css no longer gives .input a background');
+  return fill;
+}
+
+/*
+ * A read-only field: the ink the read-only rule sets, on the fill it sets, or
+ * on the plain field fill when it sets none. It once set --ground-2, which
+ * replaced the dark field fill with a second box inside the form's own and
+ * took the dim ink under 4.5:1.
+ */
+function readOnlyField() {
+  const rule = RULES.find((r) => !r.nested && r.selectors.some((s) => s.startsWith('.input:read-only')));
+  assert.ok(rule, 'ui/app.css no longer styles .input:read-only');
+  const ink = /(?:^|;)\s*color:\s*var\((--[\w-]+)\)/.exec(rule.body)?.[1];
+  assert.ok(ink, '.input:read-only no longer sets its ink from a token');
+  const bg = backgroundOf(rule.body);
+  return { ink, fill: bg || FIELD };
+}
+
+const FIELD = fieldFill();
+const READ_ONLY = readOnlyField();
+SURFACES['a field in a glass pane'] = ['--paper', FIELD];
+SURFACES['a field in a --ground-2 box in a glass pane'] = ['--paper', '--ground-2', FIELD];
+SURFACES['a read-only field in a glass pane'] = ['--paper', READ_ONLY.fill];
+SURFACES['a read-only field in a --ground-2 box in a glass pane'] = ['--paper', '--ground-2', READ_ONLY.fill];
+const READ_ONLY_FIELDS = ['a read-only field in a glass pane', 'a read-only field in a --ground-2 box in a glass pane'];
+const ALL = Object.keys(SURFACES);
+
+/**
+ * A fill as a colour: a token name, or a literal colour. The accent wash
+ * resolves to the accent at its alpha.
+ */
+function fillColour(name, accent) {
+  const ref = /^var\((--[\w-]+)\)$/.exec(name);
+  if (ref) return fillColour(ref[1], accent);
+  const value = name.startsWith('--') ? token(name) : name;
+  if (/^(var|color-mix)\(/.test(value)) return { rgb: parseColour(accent).rgb, a: accentAlpha(value) };
+  return parseColour(value);
+}
+
+function background(accent, fills, glowAlpha) {
+  const ground = parseColour(token('--ground'));
+  assert.equal(ground.a, 1, '--ground is expected to be opaque');
+  let under = over({ rgb: parseColour(accent).rgb, a: glowAlpha }, ground.rgb);
+  for (const fill of fills) under = over(fillColour(fill, accent), under);
+  return under;
+}
+
+/* Each text ink and the surfaces it is drawn on. */
+const INKS = {
+  '--ink': ALL,
+  '--ink-2': PLAIN,
+  '--ink-3': PLAIN,
+  '--ink-on-wash': [...PLAIN, WASH],
+};
+// Whatever ink the read-only rule uses must also clear its own field.
+INKS[READ_ONLY.ink] = [...new Set([...(INKS[READ_ONLY.ink] || []), ...READ_ONLY_FIELDS])];
+
+test('the glow and the accent presets are readable from the source', () => {
+  assert.ok(PEAK_GLOW > 0 && PEAK_GLOW < 1, `peak glow alpha ${PEAK_GLOW}`);
+  assert.ok(ACCENTS.length >= 2, 'expected the default accent plus presets');
+  // The overlap is real: on a small phone the field outshines any single layer.
+  assert.ok(PEAK_GLOW > Math.max(...LAYERS.map((l) => l.alpha)), `peak glow ${PEAK_GLOW}`);
+});
+
+test('dim text on an event wash uses --ink-on-wash, not a plain dim ink', () => {
+  for (const selector of ['.agenda-where', '.chip-where', '.scope-state', '.account.is-connection-target .account-host']) {
+    // The rule that names the selector on its own, not a compound of it.
+    const rule = RULES.find((r) => !r.nested && r.selectors.includes(selector));
+    assert.ok(rule, `ui/app.css no longer styles ${selector}`);
+    assert.match(rule.body, /(^|;)\s*color:\s*var\(--ink-on-wash\)/, `${selector} sits on the accent wash`);
+  }
+});
+
+for (const [ink, surfaces] of Object.entries(INKS)) {
+  test(`${ink} stays at or above ${AA}:1 under the ambient glow, for every preset accent`, () => {
+    const fg = parseColour(token(ink));
+    assert.equal(fg.a, 1, `${ink} is expected to be opaque`);
+    const failures = [];
+    for (const accent of ACCENTS) {
+      for (const name of surfaces) {
+        const r = ratio(fg.rgb, background(accent, SURFACES[name], PEAK_GLOW));
+        if (r < AA) failures.push(`${name}, accent ${accent}: ${r.toFixed(2)}:1`);
+      }
+    }
+    assert.deepEqual(failures, [], `${ink} (${token(ink)}) under the glow at its peak (${(PEAK_GLOW * 100).toFixed(1)}% accent)`);
+  });
+}
+
+test('the glow is actually composited: it lowers the dim ink ratio', () => {
+  // Guard against the compositing silently doing nothing: the glow must lower
+  // the dim ink's ratio on a pane, or the suite above is not measuring it.
+  const fg = parseColour(token('--ink-3')).rgb;
+  const accent = token('--accent');
+  const lit = ratio(fg, background(accent, SURFACES['a glass pane'], PEAK_GLOW));
+  const dark = ratio(fg, background(accent, SURFACES['a glass pane'], 0));
+  assert.ok(lit < dark, `glow should lower contrast (${lit.toFixed(2)} vs ${dark.toFixed(2)})`);
+});
+
+/* ------------------------------------------------- ended appointments (TT-3469) */
+
+/** An ink as an opaque colour: a token, a literal, or the accent mixed toward a colour (--accent-text). */
+function inkColour(value, accent) {
+  const v = value.trim();
+  const ref = /^var\((--[\w-]+)\)$/.exec(v);
+  if (ref) return inkColour(token(ref[1]), accent);
+  const mix = /^color-mix\(\s*in srgb\s*,\s*var\(--accent\)\s+([\d.]+)%\s*,\s*(#[0-9a-f]{3,6})\s*\)$/i.exec(v);
+  if (mix) {
+    const p = Number(mix[1]) / 100;
+    const a = parseColour(accent).rgb;
+    const b = parseColour(mix[2]).rgb;
+    return a.map((c, i) => c * p + b[i] * (1 - p));
+  }
+  const c = parseColour(v);
+  assert.equal(c.a, 1, `the ink ${v} is expected to be opaque`);
+  return c.rgb;
+}
+
+const lastDecl = (selector, prop) => {
+  let value;
+  for (const r of RULES) {
+    if (r.nested || !r.selectors.includes(selector)) continue;
+    const m = new RegExp(String.raw`(?:^|;)\s*${prop}:\s*([^;]+);`).exec(r.body);
+    if (m) value = m[1].trim();
+  }
+  return value;
+};
+
+/*
+ * Past events are drawn only on today, so the chips sit in the calendar's pane
+ * on today's tinted column; the agenda sits on the plain surfaces.
+ */
+const TODAY_TINT = lastDecl('.cal-col.is-today', 'background(?:-color)?');
+assert.ok(TODAY_TINT, 'ui/app.css no longer tints today\'s column');
+SURFACES['today\'s column in the calendar pane'] = ['--paper', TODAY_TINT];
+const PAST_SURFACES = [...PLAIN, 'today\'s column in the calendar pane'];
+
+/*
+ * The glass sheen: `::after` on a pane, a white gradient that is brightest in
+ * the top-left corner, where a card's first line of text sits. Its peak is the
+ * strongest white stop in the rule.
+ */
+function sheenPeak(base) {
+  const rule = RULES.find((r) => !r.nested && r.selectors.includes(`${base}::after`) && /content:\s*""/.test(r.body));
+  if (!rule) return 0;
+  const stops = [...rule.body.matchAll(/rgba\(\s*255\s*,\s*255\s*,\s*255\s*,\s*([\d.]+)\s*\)/g)].map((m) => Number(m[1]));
+  assert.ok(stops.length > 0, `${base}::after paints a sheen this test cannot read`);
+  return Math.max(...stops);
+}
+
+/*
+ * Items drawn in a quieter state, and the text inside them. Each is checked
+ * with everything the state does to it: its own fill (or none), the sheen
+ * unless the state turns it off, and any opacity, which fades the item as a
+ * group, fill and text alike.
+ */
+const UI_SOURCE = ['views', 'lib'].flatMap((dir) => {
+  const url = new URL(`../ui/${dir}/`, import.meta.url);
+  return fs.readdirSync(url).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(new URL(f, url), 'utf8'));
+}).join('\n');
+const ROW_SURFACES = ['the bare ground', 'a glass pane'];
+const STATES = [
+  { name: 'an ended agenda item (TT-3469)', file: 'views/today.js', item: '.agenda-item.is-past', base: '.agenda-item',
+    parts: ['.agenda-time', '.agenda-title', '.agenda-where'], surfaces: PAST_SURFACES },
+  { name: 'an ended calendar chip (TT-3469)', file: 'views/calendar.js', item: '.chip-ev.is-past', base: '.chip-ev',
+    parts: ['.chip-time', '.chip-title', '.chip-where'], surfaces: PAST_SURFACES },
+  { name: 'a snoozed row (TT-3510)', file: 'lib/items.js', item: '.row.is-snoozed', base: '.row',
+    parts: ['.headline', '.why', '.meta', '.meta-carried', '.btn.quiet'], surfaces: ROW_SURFACES },
+  { name: 'a finished row (TT-3510)', file: 'lib/items.js', item: '.worth.is-finished .row', base: '.row',
+    parts: ['.headline', '.why', '.meta', '.meta-carried', '.btn.quiet'], surfaces: ROW_SURFACES },
+  // The draft card in its ordinary state: its "To" label sits under the sheen's peak.
+  { name: 'a draft card\'s "To" label (TT-3510)', file: 'views/owed.js', item: '.draft', base: '.draft',
+    parts: ['.draft-label'], surfaces: ['the bare ground'] },
+];
+
+for (const { name, file, item, base, parts, surfaces } of STATES) {
+  test(`${name} keeps its text at ${AA}:1 (fill, sheen and opacity modelled)`, () => {
+    // The classes are still drawn somewhere in the UI, or this checks nothing.
+    const view = UI_SOURCE;
+    assert.ok(fs.existsSync(new URL(`../ui/${file}`, import.meta.url)), `ui/${file} is gone`);
+    for (const cls of [...item.split(/[\s.]+/), ...parts.flatMap((p) => p.split('.'))].filter(Boolean)) {
+      assert.match(view, new RegExp(`['\`\\s]${cls}\\b|${cls}['\`]`), `the UI no longer draws .${cls}`);
+    }
+    // The state's own rule wins over the base one on specificity, so read it first.
+    const own = (prop) => lastDecl(item, prop) ?? lastDecl(base, prop);
+    const fillValue = own('background(?:-color)?');
+    const fill = fillValue && !/^(none|transparent)$/.test(fillValue) ? fillValue : null;
+    const sheenOff = /^none$/.test(lastDecl(`${item}::after`, 'content') ?? '');
+    const sheen = sheenOff ? 0 : sheenPeak(base);
+    const opacity = Number(own('opacity') ?? 1);
+
+    const failures = [];
+    for (const accent of ACCENTS) {
+      for (const surface of surfaces) {
+        const under = background(accent, SURFACES[surface], PEAK_GLOW);
+        let box = under;
+        if (fill) box = over(fillColour(fill, accent), box);
+        if (sheen) box = over({ rgb: [1, 1, 1], a: sheen }, box);
+        // Opacity mixes the item's own pixels with what is behind it.
+        const bg = box.map((c, i) => c * opacity + under[i] * (1 - opacity));
+        for (const part of parts) {
+          const value = lastDecl(`${item} ${part}`, 'color') ?? lastDecl(part, 'color') ?? own('color') ?? 'var(--ink)';
+          const fg = over({ rgb: inkColour(value, accent), a: opacity }, under);
+          const r = ratio(fg, bg);
+          if (r < AA) failures.push(`${part} (${value}${opacity < 1 ? ` at opacity ${opacity}` : ''}${sheen ? `, sheen ${sheen}` : ''}) on ${surface}, accent ${accent}: ${r.toFixed(2)}:1`);
+        }
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
+}
+
+/*
+ * Opacity on text is how three of these tickets happened: it fades the ink
+ * under 4.5:1 without any token changing, and axe can only call it "needs
+ * review". So no rule may fade below 1 unless it is decoration with no text,
+ * or a disabled control (which WCAG exempts).
+ */
+const OPACITY_ALLOWED = new Set([
+  '.meander', '.tab-marker', '.nav-marker', '.section .meander', '.hero-rule', // ornaments, no text
+  '.btn[disabled]', // disabled controls are exempt from 1.4.3
+]);
+
+test('no text is faded with opacity, in the stylesheet or inline', () => {
+  const offenders = [];
+  for (const r of RULES) {
+    const m = /(?:^|;)\s*opacity:\s*([\d.]+)\s*;/.exec(r.body);
+    if (!m) continue;
+    const value = Number(m[1]);
+    if (value === 0 || value >= 1) continue;
+    for (const s of r.selectors) if (!OPACITY_ALLOWED.has(s)) offenders.push(`${s} { opacity: ${value} }`);
+  }
+  assert.deepEqual(offenders, [], 'fade with a quieter ink instead, and check it in this file');
+
+  // Inline styles in the views: the calendar's "not loaded" mark was one.
+  const dir = new URL('../ui/views/', import.meta.url);
+  for (const name of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+    const source = fs.readFileSync(new URL(name, dir), 'utf8');
+    assert.doesNotMatch(source, /['"]?opacity['"]?\s*:\s*['"]0?\.\d+['"]/, `ui/views/${name} fades something inline`);
+  }
+});

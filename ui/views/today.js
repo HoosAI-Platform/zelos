@@ -26,13 +26,18 @@ function agendaStrip() {
     .sort((a, b) => a.start - b.start);
   if (!today.length) return null;
 
-  return el('div', { class: 'agenda' }, today.map(({ event, start, end }) => el('div', {
-    class: `agenda-item${minutes !== null && minutes >= end ? ' is-past' : ''}${minutes !== null && minutes >= start && minutes < end ? ' is-live' : ''}`,
-  }, [
-    el('span', { class: 'agenda-time mono', text: eventTimeLabel(event) }),
-    el('span', { class: 'agenda-title', text: event.title || '(untitled)' }),
-    event.location ? el('span', { class: 'agenda-where', text: event.location }) : null,
-  ])));
+  return el('div', { class: 'agenda' }, today.map(({ event, start, end }) => {
+    const past = minutes !== null && minutes >= end;
+    return el('div', {
+      class: `agenda-item${past ? ' is-past' : ''}${minutes !== null && minutes >= start && minutes < end ? ' is-live' : ''}`,
+    }, [
+      // Ended is drawn as an outline in quieter ink; this says it in words.
+      past ? el('span', { class: 'visually-hidden', text: 'Ended: ' }) : null,
+      el('span', { class: 'agenda-time mono', text: eventTimeLabel(event) }),
+      el('span', { class: 'agenda-title', text: event.title || '(untitled)' }),
+      event.location ? el('span', { class: 'agenda-where', text: event.location }) : null,
+    ]);
+  }));
 }
 
 export function renderToday(ctx) {
