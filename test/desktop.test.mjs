@@ -1831,6 +1831,63 @@ describe('the lock on the data home', () => {
     held.release();
   });
 
+  it('still records the port when the first replaces are refused, as Windows does while a scanner holds the file', async (t) => {
+    // (QA, 2026-10-10, TT-3511) A refused replace was swallowed once and for
+    // all, so the lock kept `port: null` and the next warning named no board.
+    const home = freshHome('port-retry');
+    const held = acquireHomeLock({ home, kind: 'desktop' });
+    t.after(() => held.release());
+    const rename = fs.renameSync;
+    let refusals = 2;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (refusals > 0) {
+        refusals -= 1;
+        throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+      }
+      return rename(from, to);
+    });
+
+    held.setPort(51235);
+    const deadline = Date.now() + 3_000;
+    while (readHomeLock(home).port !== 51235 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(readHomeLock(home).port, 51235, 'two refused replaces left the lock without its port');
+    assert.equal(readHomeLock(home).pid, process.pid);
+  });
+
+  it('a retried port write never recreates a lock that was deleted, or overwrites another holder', async (t) => {
+    // (QA, 2026-10-10, TT-3511) The retry runs after the file may have changed
+    // hands, so it writes only while the record on disk is still this one.
+    const rename = fs.renameSync;
+    let refuse = true;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (refuse) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+      return rename(from, to);
+    });
+    const settle = () => new Promise((r) => setTimeout(r, 200));
+
+    const deletedHome = freshHome('port-retry-deleted');
+    const deleted = acquireHomeLock({ home: deletedHome, kind: 'desktop' });
+    t.after(() => deleted.release());
+    deleted.setPort(51236);
+    fs.unlinkSync(path.join(deletedHome, 'zelos.lock'));
+    refuse = false;
+    await settle();
+    assert.equal(readHomeLock(deletedHome), null, 'a retry recreated a lock somebody deleted');
+
+    refuse = true;
+    const takenHome = freshHome('port-retry-taken');
+    const taken = acquireHomeLock({ home: takenHome, kind: 'desktop' });
+    t.after(() => taken.release());
+    taken.setPort(51237);
+    const other = { pid: process.pid + 1, kind: 'cli', port: 7777, startedAt: new Date().toISOString(), uid: null };
+    fs.writeFileSync(path.join(takenHome, 'zelos.lock'), JSON.stringify(other));
+    refuse = false;
+    await settle();
+    assert.deepEqual(readHomeLock(takenHome), other, "a retry overwrote another instance's lock");
+  });
+
   it('reclaims a lock left behind by a crash rather than locking the user out', () => {
     const home = freshHome('stale');
     fs.mkdirSync(home, { recursive: true });
