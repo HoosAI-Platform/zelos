@@ -60,8 +60,8 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 ${consoleReport.toString()}
 process.stderr.write('relay console: ' + consoleReport() + '\\n');
-const [electron, app] = process.argv.slice(1);
-const child = spawn(electron, [app, 'mcp'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+const [electron, argsJson] = process.argv.slice(1);
+const child = spawn(electron, JSON.parse(argsJson), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 child.stdin.on('error', () => {});
 process.stdin.pipe(child.stdin);
 child.stdout.pipe(process.stdout);
@@ -71,15 +71,16 @@ child.on('close', (code) => { process.exitCode = code ?? 1; });
 `;
 
 /** One client session: spawn, send the requests, hang up once both answers are in. */
-function session({ relay = false } = {}) {
+function session({ relay = false, args = [path.join(ROOT, 'desktop'), 'mcp'], extraEnv = {} } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-mcp-check-'));
   const env = { ...process.env, ZELOS_HOME: home, ZELOS_SECRETS_BACKEND: 'encrypted-file' };
   // Set by VS Code's terminal, and it turns Electron into plain Node.
   delete env.ELECTRON_RUN_AS_NODE;
+  Object.assign(env, extraEnv);
   return new Promise((resolve) => {
     const child = relay
-      ? spawn(process.execPath, ['--input-type=module', '-e', RELAY, electron, path.join(ROOT, 'desktop')], { env, stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true })
-      : spawn(electron, [path.join(ROOT, 'desktop'), 'mcp'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      ? spawn(process.execPath, ['--input-type=module', '-e', RELAY, electron, JSON.stringify(args)], { env, stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true })
+      : spawn(electron, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks = [];
     let stderr = '';
     const stdoutText = () => Buffer.concat(chunks).toString('utf8');
@@ -163,4 +164,39 @@ for (const [label, options] of runs) {
     console.log(`OK: Zelos mcp answered ${replies.length} requests over stdio on ${process.platform}, ${label}, and exited when the client hung up.`);
   }
 }
+
+/*
+ * Round 2 of TT-3507: where the bytes come from. Measurement only. Each
+ * variant runs in the no-console relay, and only its stray bytes are reported;
+ * none of them changes the exit code.
+ *
+ *   1. ELECTRON_NO_ATTACH_CONSOLE=1 — does Electron's console handling write them?
+ *   2. A bare Electron app whose main script writes `{}\n` and exits — if the
+ *      bytes still come, Electron emits them before any app code runs.
+ *   3. ELECTRON_RUN_AS_NODE=1 on zelos.mjs mcp — Electron as plain Node. The
+ *      build sets no fuses (no electronFuses in desktop/package.json), so
+ *      RunAsNode keeps Electron's default, which is on.
+ *   4. Our own mcp entry with ZELOS_MCP_STDIO_MARKER=1, which makes
+ *      desktop/main.js write `#` (0x23) as its first statement: `23` before
+ *      `0d 0a` means the bytes come after our code starts, `0d 0a` first means
+ *      before.
+ */
+const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-bare-electron-'));
+fs.writeFileSync(path.join(bare, 'package.json'), JSON.stringify({ name: 'bare', main: 'main.cjs' }));
+fs.writeFileSync(path.join(bare, 'main.cjs'), "const { app } = require('electron');\nprocess.stdout.write('{}\\n', () => app.exit(0));\n");
+const variants = [
+  ['1. ELECTRON_NO_ATTACH_CONSOLE=1', { extraEnv: { ELECTRON_NO_ATTACH_CONSOLE: '1' } }],
+  ['2. a bare Electron app that writes {} and exits', { args: [bare] }],
+  ['3. ELECTRON_RUN_AS_NODE=1 on zelos.mjs mcp', { args: [path.join(ROOT, 'zelos.mjs'), 'mcp'], extraEnv: { ELECTRON_RUN_AS_NODE: '1' } }],
+  ['4. our mcp entry, marking its first statement with #', { extraEnv: { ZELOS_MCP_STDIO_MARKER: '1' } }],
+];
+for (const [label, options] of variants) {
+  const result = await session({ relay: true, ...options });
+  const { stray } = judge(result);
+  const head = hex(result.stdout.subarray(0, 16));
+  console.log(`variant ${label}: ${stray.length ? `stray bytes — ${stray.join('; ')}` : 'no stray bytes'} (first bytes: ${head || 'none'}; exit ${result.code})`);
+  if (!result.stdout.length) console.log(`  stderr: ${result.stderr.slice(-500)}`);
+}
+fs.rmSync(bare, { recursive: true, force: true });
+
 if (failed) process.exit(1);

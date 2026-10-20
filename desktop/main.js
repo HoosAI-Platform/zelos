@@ -38,6 +38,8 @@
  * on start would leave the user with no window and no message.
  */
 
+// First, so it runs before any other code of ours (TT-3507 measurement only).
+import './stdio-marker.js';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
