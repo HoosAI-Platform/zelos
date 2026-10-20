@@ -654,6 +654,17 @@ export async function main(argv = process.argv.slice(2)) {
   // Rule 1: the home directory has to be settled before any module resolves it.
   if (flags.home) process.env.ZELOS_HOME = path.resolve(flags.home);
 
+  /* A runtime that cannot run Zelos is refused before the next lines make the
+     home, its logs and cache, and the data-connection lease (TT-3467) — so
+     the refusal's "nothing in your Zelos home has been changed" is true on a
+     first run. Doctor is the exception: reporting this is its job — its
+     database line names the missing FTS5 before anything else about the
+     database. */
+  if (flags.command !== 'doctor') {
+    const { assertRuntimeSupported } = await import('./core/db.mjs');
+    assertRuntimeSupported();
+  }
+
   // Before loadConfig can repair a malformed file, and before doctor/MCP
   // can touch a credential store belonging to a restore in progress.
   const { assertNoMaintenance, registerDataConnection } = await import('./core/data-lease.mjs');

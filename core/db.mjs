@@ -85,6 +85,44 @@ export function hasFts5(db) {
   }
 }
 
+/**
+ * Whether THIS runtime's SQLite can build an FTS5 table, asked of a throwaway
+ * in-memory database rather than of the user's file. `hasFts5()` works by
+ * creating a virtual table, so it cannot be asked of a read-only handle; and
+ * the question is about the runtime, not the file — which is also why it can
+ * be asked before a single file exists (TT-3467).
+ */
+export function runtimeHasFts5() {
+  let probe = null;
+  try {
+    probe = new DatabaseSync(':memory:');
+    return hasFts5(probe);
+  } catch {
+    return false;
+  } finally {
+    try { probe?.close(); } catch { /* it was never usable */ }
+  }
+}
+
+/**
+ * Refuse a runtime without FTS5 BEFORE anything is written. `open()` used to
+ * create zelos.db and switch it to WAL first, and the launcher had already
+ * made the home, logs/, cache/ and .data-connections/ — so the refusal's
+ * "nothing in your Zelos home has been changed" was false on a first run
+ * (QA, 2026-10-10, TT-3467). A home that already holds data is still left
+ * untouched, as promised.
+ */
+export function assertRuntimeSupported() {
+  if (runtimeHasFts5()) return;
+  throw new UnsupportedRuntimeError(
+    `This copy of Node (${process.version}) was built without SQLite's FTS5 extension, `
+    + 'which Zelos uses for its search index — so it cannot open the database at all.\n\n'
+    + 'Node 22.16 or newer, or Node 24 or newer, has it. The whole Node 23 line does not, '
+    + 'whatever its version number suggests.\n\n'
+    + 'Install a newer Node and run Zelos again; nothing in your Zelos home has been changed.',
+  );
+}
+
 export class UnsupportedRuntimeError extends Error {
   constructor(message) {
     super(message);
@@ -93,7 +131,11 @@ export class UnsupportedRuntimeError extends Error {
   }
 }
 
-export function open(dbPath = paths().db) {
+export function open(path_ = undefined) {
+  // Before the lease, the directory and the file — and before `paths()`,
+  // which makes the home: see assertRuntimeSupported.
+  assertRuntimeSupported();
+  const dbPath = path_ ?? paths().db;
   const lease = registerDataConnection(dbPath);
   let db;
   try {
@@ -108,15 +150,6 @@ export function open(dbPath = paths().db) {
     // After the WAL pragma: that is what creates the sidecars.
     if (dbPath !== ':memory:') tightenDbFiles(dbPath);
 
-    if (!hasFts5(db)) {
-      throw new UnsupportedRuntimeError(
-        `This copy of Node (${process.version}) was built without SQLite's FTS5 extension, `
-        + 'which Zelos uses for its search index — so it cannot open the database at all.\n\n'
-        + 'Node 22.16 or newer, or Node 24 or newer, has it. The whole Node 23 line does not, '
-        + 'whatever its version number suggests.\n\n'
-        + 'Install a newer Node and run Zelos again; nothing in your Zelos home has been changed.',
-      );
-    }
     attachDataConnection(db, lease);
     return db;
   } catch (error) {
