@@ -117,6 +117,16 @@ function sweepTrouble() {
 }
 
 /**
+ * Whether the last run's failures include something that is neither an email
+ * account nor a calendar: a feed, a Slack channel, GitHub. Those were called
+ * "accounts or calendars" (QA, 2026-10-10, TT-3515). A run that does not list
+ * its sources keeps the old words.
+ */
+function failedOtherSources(last) {
+  return (last?.stats?.sources || []).some((s) => s && s.ok === false && s.kind !== 'mail' && s.kind !== 'calendar');
+}
+
+/**
  * The failed-sweep banner. Persistent, specific, and it names the source.
  *
  * Two failures, two tones, two sentences. "The last check failed" over a run
@@ -135,9 +145,12 @@ function failureBanner(trouble, navigate) {
   const failedSources = (last?.stats?.sources || []).filter((s) => s && s.ok === false);
   const counted = Math.max(failedSources.length, Number(last?.stats?.sourcesFailed) || 0);
   const whole = trouble === 'whole';
+  const notJustAccounts = failedOtherSources(last);
   const message = whole
     ? (missing === 'model' ? NO_AI_YET : (live || last?.error || NO_REASON))
-    : `${counted === 1 ? 'One account or calendar' : `${counted} accounts or calendars`} could not be read. Everything else on the board is from this check — whatever those hold is not.`;
+    : `${notJustAccounts
+      ? `${counted === 1 ? 'One source' : `${counted} sources`} could not be read.`
+      : `${counted === 1 ? 'One account or calendar' : `${counted} accounts or calendars`} could not be read.`} Everything else on the board is from this check — whatever those hold is not.`;
 
   return el('div', { class: `banner ${whole ? 'banner-bad' : 'banner-warn'}`, role: 'status' }, [
     el('h2', {
@@ -214,7 +227,7 @@ export function renderNow(ctx) {
         ? emptyState(trouble === 'partial'
           ? {
             title: 'Nothing on the board — and not everything was read',
-            detail: 'Nothing Zelos could read needs you. The accounts named above went unread, '
+            detail: `Nothing Zelos could read needs you. The ${failedOtherSources(state.board.runs?.last) ? 'sources' : 'accounts'} named above went unread, `
               + 'and whatever they hold is not on this board.',
           }
           : {
