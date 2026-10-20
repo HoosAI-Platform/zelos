@@ -18,7 +18,7 @@ const VERSION = /^\d+\.\d+\.\d+$/;
  * is remembered across launches. Outside the desktop app there is no updater,
  * and this returns a slot that stays empty.
  */
-export function updateBanner({ onError = () => {} } = {}) {
+export function updateBanner({ onError = () => {}, onChange = () => {} } = {}) {
   const slot = el('div', { class: 'update-banner-slot' });
   const bridge = typeof window !== 'undefined' ? window.zelos?.updates : null;
   if (!bridge || typeof bridge.state !== 'function' || typeof bridge.snooze !== 'function') return slot;
@@ -30,6 +30,9 @@ export function updateBanner({ onError = () => {} } = {}) {
   const show = (version) => {
     if (version === shown) return;
     shown = version;
+    // Told whenever the banner appears or goes, for a container that should
+    // not exist while it is empty.
+    onChange(Boolean(version));
     if (!version) {
       replace(slot, []);
       return;

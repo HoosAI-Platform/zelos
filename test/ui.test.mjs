@@ -890,6 +890,155 @@ test('a toast dismisses itself, and an action toast is given longer', async (t) 
   assert.equal(store.state.toast, null);
 });
 
+/**
+ * A failure outranks a success (TT-3493). notify() used to replace whatever
+ * was showing, so a success raised a moment later hid a failure before
+ * anyone could read it.
+ */
+test('a failure is not covered by a later success, and the Undo waits behind it', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  store.notify('Could not update that item: the server is not there', { tone: 'warn' });
+  const undo = () => {};
+  store.notify('Marked done: the invoice', { action: { label: 'Undo', run: undo } });
+  assert.equal(store.state.toast?.tone, 'warn', 'a success must not cover a showing failure');
+
+  // Dismissing the failure brings the waiting Undo forward, still able to undo.
+  store.dismissToast();
+  assert.equal(store.state.toast?.message, 'Marked done: the invoice');
+  assert.equal(store.state.toast?.action?.run, undo);
+
+  // A failure arriving over an Undo pushes it aside, not away.
+  store.notify('Could not save that draft: try again', { tone: 'warn' });
+  assert.equal(store.state.toast?.tone, 'warn');
+  store.dismissToast();
+  assert.equal(store.state.toast?.message, 'Marked done: the invoice', 'the displaced Undo comes back');
+
+  // notify(null) clears the waiting toast too.
+  store.notify('Could not update that item: again', { tone: 'warn' });
+  store.notify('Saved');
+  store.notify(null);
+  assert.equal(store.state.toast, null);
+  store.dismissToast();
+  assert.equal(store.state.toast, null, 'nothing was left waiting');
+});
+
+test('a failure is given longer than a success to be read', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  store.notify('Could not update that item: the server is not there', { tone: 'warn' });
+  t.mock.timers.tick(6_100);
+  assert.equal(store.state.toast?.tone, 'warn', 'a failure outlives the plain six seconds');
+  t.mock.timers.tick(5_800);
+  assert.ok(store.state.toast, 'still there just short of twelve seconds');
+  t.mock.timers.tick(200);
+  assert.equal(store.state.toast, null, 'gone at twelve seconds');
+
+  // A success waiting behind a failure shows when the failure times out.
+  store.notify('Could not update that item: again', { tone: 'warn' });
+  store.notify('Saved');
+  t.mock.timers.tick(12_000);
+  assert.equal(store.state.toast?.message, 'Saved');
+  t.mock.timers.tick(6_000);
+  assert.equal(store.state.toast, null, 'and gets its own fresh clock');
+});
+
+test('a toast left waiting longer than 30 seconds is dropped, not shown late', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  store.notify('Could not update that item: one', { tone: 'warn' });
+  store.notify('Saved');
+  assert.equal(store.state.toast?.message, 'Could not update that item: one', '"Saved" waits');
+  t.mock.timers.tick(10_000);
+  store.notify('Could not update that item: two', { tone: 'warn' });
+  t.mock.timers.tick(10_000);
+  store.notify('Could not update that item: three', { tone: 'warn' });
+  // The third failure ends at 32 s; "Saved" is old news by then.
+  t.mock.timers.tick(11_900);
+  assert.equal(store.state.toast?.message, 'Could not update that item: three');
+  t.mock.timers.tick(100);
+  assert.equal(store.state.toast, null, 'a stale success must not appear long after the fact');
+});
+
+test('a repeated toast keeps its identity only when it carries no action', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => store.notify(null));
+
+  // The same words again restart the clock without a new object, so the app
+  // neither rebuilds the toast nor reads it out a second time.
+  store.notify('Saved');
+  const first = store.state.toast;
+  t.mock.timers.tick(4_000);
+  store.notify('Saved');
+  assert.equal(store.state.toast, first, 'a repeat must keep the same object');
+  t.mock.timers.tick(4_000);
+  assert.equal(store.state.toast, first, 'and restart its clock');
+  t.mock.timers.tick(2_100);
+  assert.equal(store.state.toast, null);
+
+  // Two Undos under the same words undo different things.
+  const undoA = () => {};
+  const undoB = () => {};
+  store.notify('Marked done: the invoice', { action: { label: 'Undo', run: undoA } });
+  const a = store.state.toast;
+  store.notify('Marked done: the invoice', { action: { label: 'Undo', run: undoB } });
+  assert.notEqual(store.state.toast, a, 'a second Undo is a new toast');
+  assert.equal(store.state.toast.action.run, undoB, 'and offers the newer undo');
+});
+
+/**
+ * The race the ticket saw: two items acted on at once, the first request
+ * fails, the second succeeds and raises its Undo after its board refetch.
+ */
+test('two actions in flight: a failure is still showing after the other one succeeds', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const board = {
+    items: [
+      { id: 'a', bucket: 'now', state: 'open', headline: 'chase the survey invoice' },
+      { id: 'b', bucket: 'now', state: 'open', headline: 'book the site visit' },
+    ],
+    counts: {}, events: [], drafts: [], runs: { last: null }, notes: [], first: null, now: null,
+  };
+  const release = {};
+  globalThis.fetch = async (reqPath, init = {}) => {
+    if (init.method === 'POST') {
+      const id = reqPath.split('/')[3];
+      await new Promise((resolve) => { release[id] = resolve; });
+      if (id === 'a') return { ok: false, status: 503, text: async () => '{"error":"the server is not there"}' };
+      return { ok: true, status: 200, text: async () => '{}' };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(board) };
+  };
+  t.after(() => { delete globalThis.fetch; store.notify(null); });
+  store.state.board = { ...store.state.board, ...board };
+
+  const first = store.setItemState('a', 'done');
+  const second = store.setItemState('b', 'done');
+  await settle();
+  release.a();
+  await first;
+  assert.equal(store.state.toast?.tone, 'warn');
+  release.b();
+  await second;
+  assert.equal(store.state.toast?.tone, 'warn', 'the later success must not hide the failure');
+  assert.match(store.state.toast.message, /Could not update that item/);
+  store.dismissToast();
+  assert.equal(store.state.toast?.message, 'Marked done: book the site visit');
+  assert.equal(store.state.toast?.action?.label, 'Undo');
+});
+
 test('done raises an Undo that restores the exact prior state, deadline included', async (t) => {
   stubBrowserGlobals();
   const store = await import(fileUrl(UI, 'lib/store.js'));
@@ -1411,7 +1560,10 @@ test('the sweep line and the toast can actually be heard', () => {
   const toast = /function toastBar\(\)[\s\S]*?\n\}/m.exec(app);
   assert.ok(toast, 'toastBar is missing');
   assert.ok(!/text: state\.toast\.message/.test(toast[0]), 'the toast bakes its message in');
-  assert.match(paintChrome[0], /announce\(built\.text, state\.toast\.message\)/);
+  // The toast is painted in every skeleton, not only the chrome one.
+  const paintToast = /function paintToast\(\)[\s\S]*?\n\}/m.exec(app);
+  assert.ok(paintToast, 'paintToast is missing');
+  assert.match(paintToast[0], /announce\(built\.text, state\.toast\.message\)/);
 });
 
 test('the page declares the one theme it actually has', () => {
@@ -3468,6 +3620,25 @@ test('the skip link focuses the current view without changing its route', () => 
   ` });
 });
 
+test('a failure toast interrupts, and its Dismiss brings forward what waited behind it', () => {
+  runAppScenario({ scenario: `
+    const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+    const toastNode = () => plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('toast'));
+    store.notify('Could not update that item: the server is not there', { tone: 'warn' });
+    await settle();
+    assert.equal(toastNode().attributes.role, 'alert', 'a failure is announced at once');
+    store.notify('Saved');
+    await settle();
+    assert.match(textOf(root), /Could not update that item/);
+    assert.doesNotMatch(textOf(root), /Saved/);
+    findButton(toastNode(), 'Dismiss').fire('click');
+    await settle();
+    assert.match(textOf(toastNode()), /Saved/);
+    assert.equal(toastNode().attributes.role, 'status', 'anything else waits its turn to be read');
+    store.notify(null);
+  ` });
+});
+
 test('first-run setup stays on Email after saving the AI, and can finish even when storage refuses writes', () => {
   for (const [initiallyConfigured, storageUnavailable] of [[false, false], [false, true], [true, false]]) {
     runAppScenario({ initiallyConfigured, storageUnavailable, scenario: `
@@ -3528,6 +3699,240 @@ test('first-run sample data recovers from availability and loading failures with
     assert.equal(loads, 2);
     const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
     store.notify(null);
+  ` });
+});
+
+/**
+ * First-run setup has no chrome, and the toast used to live only in the
+ * chrome — so every notify() raised during setup was dropped, unseen and
+ * unheard (TT-3464).
+ */
+test('a toast raised during first-run setup is shown and can be heard', () => {
+  runAppScenario({ initiallyConfigured: false, scenario: `
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+    store.notify('hello from setup');
+    await settle();
+    assert.match(textOf(root), /hello from setup/);
+    const toast = plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('toast'));
+    assert.ok(toast, 'no toast in the setup skeleton');
+    assert.equal(toast.attributes.role, 'status');
+    const shell = plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('shell-bare'));
+    const slot = toast.parentNode;
+    assert.equal(slot.attributes.class, 'toast-slot');
+    assert.deepEqual(shell.children.map(n => n.attributes.id || n.attributes.class), ['toast-slot', 'main', 'setup-bar'],
+      'the slot sits before <main>, so an Undo is reached before the view');
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    store.notify('a second toast');
+    await settle();
+    assert.match(textOf(root), /a second toast/);
+    assert.equal(plainWalk(root).find(n => n.attributes.id === 'main'), main, 'setup keeps one skeleton across renders');
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is still showing');
+  ` });
+});
+
+test('clearing the made-up data during setup shows its toast', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: `
+    const sampleCalls = [];
+    globalThis.fetch = async (path, init = {}) => {
+      if (path === '/api/sweep/stream') return new Promise(() => {});
+      assert.equal(path, '/api/sample-data');
+      sampleCalls.push(init.method || 'GET');
+      const body = init.method === 'DELETE' ? {} : { installed: true, summary: 'A made-up week.' };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+  `, scenario: `
+    const clear = findButton(root, 'Clear the made-up data');
+    assert.ok(clear, 'installed sample data offers to clear it');
+    clear.fire('click');
+    await settle();
+    assert.ok(sampleCalls.includes('DELETE'));
+    assert.match(textOf(root), /The made-up data is gone\\. Nothing else was touched\\./);
+    const toast = plainWalk(root).find(n => (n.attributes.class || '').split(' ').includes('toast'));
+    assert.equal(toast.attributes.role, 'status');
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is still showing');
+  ` });
+});
+
+/**
+ * Loading the made-up week raises its toast during setup and then leaves for
+ * the board in the same breath. The toast must cross that handover as the
+ * same node, not be dropped with the setup skeleton or rebuilt and read twice.
+ */
+test('the toast raised while loading the made-up week survives the handover to the board', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: `
+    let loaded = false;
+    globalThis.fetch = async (path, init = {}) => {
+      if (path === '/api/sweep/stream') return new Promise(() => {});
+      assert.equal(path, '/api/sample-data');
+      if (init.method === 'POST') loaded = true;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ installed: loaded, summary: 'A made-up week.' }) };
+    };
+  `, scenario: `
+    const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+    const hasClass = (n, name) => (n.attributes.class || '').split(' ').includes(name);
+    // Subscribed after the app, so this sees each emit after it has rendered:
+    // the toast as setup showed it, before finish() moves to the board.
+    let toastInSetup = null;
+    store.subscribe(() => {
+      if (toastInSetup || !plainWalk(root).some(n => hasClass(n, 'shell-bare'))) return;
+      toastInSetup = plainWalk(root).find(n => hasClass(n, 'toast')) || null;
+    });
+    findButton(root, 'Look around with made-up data first').fire('click');
+    await settle();
+    assert.ok(toastInSetup, 'the toast was never shown during setup');
+    assert.ok(!plainWalk(root).some(n => hasClass(n, 'shell-bare')), 'setup handed over to the board');
+    const shell = plainWalk(root).find(n => hasClass(n, 'shell'));
+    assert.deepEqual(shell.children.map(n => n.attributes.id ? '#' + n.attributes.id : '.' + n.attributes.class),
+      ['.skip-link', '.chrome', '.toast-slot', '#main']);
+    assert.match(textOf(root), /The made-up week is loaded\\. Every row is marked, and one click removes it\\./);
+    const toast = plainWalk(root).find(n => hasClass(n, 'toast'));
+    assert.equal(toast, toastInSetup, 'the toast must be the same node on both sides of the handover');
+    assert.equal(toast.attributes.role, 'status');
+  ` });
+});
+
+/**
+ * The desktop app with an updater, for runAppScenario's beforeBoot. Unlike the
+ * plain harness, assigning the hash fires hashchange, as a browser does, and
+ * replaceState is recorded and does not: so a restore by assignment, which
+ * would re-render the step, shows up as a second route change.
+ */
+const desktopUpdater = (updaterState, { hash = '#/now', sampleData = true } = {}) => `
+  const replaced = [];
+  let currentHash = ${JSON.stringify(hash)};
+  window.location = {
+    href: 'http://127.0.0.1/?t=test', host: '127.0.0.1',
+    get hash() { return currentHash; },
+    set hash(value) { currentHash = value; windowEvents.hashchange?.(); },
+  };
+  window.history = { replaceState(_state, _title, url) { replaced.push(url); currentHash = url; } };
+  const ok = async () => ({ ok: true });
+  window.zelos = { desktop: true, updates: {
+    state: async () => ({ ok: true, state: ${JSON.stringify(updaterState)} }),
+    snooze: ok, restart: ok, skip: ok, check: ok, download: ok, setAuto: ok,
+  } };
+  ${sampleData ? '' : `
+  globalThis.fetch = async path => {
+    if (path === '/api/sweep/stream') return new Promise(() => {});
+    assert.equal(path, '/api/sample-data');
+    return { ok: false, status: 404, text: async () => JSON.stringify({ error: 'not found' }) };
+  };`}
+`;
+
+const DOWNLOADING = { supported: true, status: 'downloading', currentVersion: '1.9.4', latestVersion: '1.9.5', progress: 0.4, auto: true, banner: null };
+
+/**
+ * The desktop menu's "Check for updates" sends the window to #/settings/about.
+ * Setup used to swallow that: the check ran, and nothing on screen said so
+ * (TT-3481).
+ */
+test('"Check for updates" during setup shows the Updates panel without leaving the step', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING), scenario: `
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    const step = main.firstChild;
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    const aside = () => plainWalk(root).find(n => n.tag === 'aside');
+    assert.equal(aside().hidden, true, 'an empty bar is no landmark');
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.equal(aside().hidden, false);
+    assert.match(textOf(root), /Downloading Zelos 1\\.9\\.5… 40%/);
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is still showing');
+    assert.equal(plainWalk(root).find(n => n.attributes.id === 'main'), main);
+    assert.equal(main.firstChild, step, 'the step was not re-rendered, so nothing half typed is lost');
+    assert.doesNotMatch(textOf(main), /Downloading/, 'the panel sits beside the step, not in it');
+    const bar = plainWalk(root).find(n => n.tag === 'aside');
+    assert.equal(bar.attributes['aria-label'], 'Zelos updates');
+    assert.match(textOf(bar), /Downloading Zelos 1\\.9\\.5/);
+    assert.equal(window.location.hash, '#/now', 'the address is the step\\'s again');
+    assert.deepEqual(replaced, ['#/now'], 'put back with replaceState, not an assignment');
+    // A second menu click is a second route change, and is answered again,
+    // by the panel already open: rebuilding it would drop focus inside it.
+    const panel = plainWalk(bar).find(n => (n.attributes.class || '').includes('update-panel'));
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.deepEqual(replaced, ['#/now', '#/now']);
+    assert.equal(main.firstChild, step);
+    assert.equal(plainWalk(bar).find(n => (n.attributes.class || '').includes('update-panel')), panel);
+    findButton(root, 'Close').fire('click');
+    assert.equal(aside().hidden, true, 'closed and empty again');
+  ` });
+});
+
+test('an update ready to install is announced during setup, by the one banner', () => {
+  const ready = { ...DOWNLOADING, status: 'ready', progress: null, banner: '1.9.5' };
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(ready, { sampleData: false }), scenario: `
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    assert.match(textOf(root), /Zelos 1\\.9\\.5 is ready to install\\./);
+    assert.equal(plainWalk(root).find(n => n.tag === 'aside').hidden, false, 'the banner keeps its bar showing');
+    const banners = () => plainWalk(root).filter(n => n.attributes.class === 'update-banner-slot');
+    assert.equal(banners().length, 1);
+    const banner = banners()[0];
+    findButton(root, 'Look around first').fire('click');
+    await settle();
+    assert.ok(plainWalk(root).some(n => n.attributes.class === 'chrome'), 'setup handed over to the board');
+    assert.deepEqual(banners(), [banner], 'the same banner moves to the board; a second one would poll forever');
+    assert.equal(banner.parentNode.attributes.class, 'topbar');
+  ` });
+});
+
+test('closing the setup Updates panel puts focus back where it was', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING), scenario: `
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    const start = findButton(root, 'Set up Zelos');
+    start.focus();
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.equal(document.activeElement, start, 'opening the panel does not move focus');
+    findButton(root, 'Close').fire('click');
+    await settle();
+    assert.doesNotMatch(textOf(root), /Downloading/);
+    assert.equal(document.activeElement, start);
+
+    // The step moved on while the panel was open: the node that had focus is
+    // gone, so focus goes to the step's <main>.
+    findButton(root, 'Set up Zelos').focus();
+    window.location.hash = '#/settings/about';
+    await settle();
+    findButton(root, 'Set up Zelos').fire('click');
+    await settle();
+    assert.match(textOf(main), /Step 2 of 5/);
+    findButton(root, 'Close').fire('click');
+    await settle();
+    assert.equal(document.activeElement, main);
+  ` });
+});
+
+test('About is turned away only while setup is showing', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING, { sampleData: false }), scenario: `
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.deepEqual(replaced, ['#/now'], 'setup keeps its address');
+    findButton(root, 'Look around first').fire('click');
+    await settle();
+    assert.ok(plainWalk(root).some(n => n.attributes.class === 'chrome'), 'setup is finished');
+    window.location.hash = '#/settings/about';
+    await settle();
+    assert.equal(window.location.hash, '#/settings/about');
+    assert.deepEqual(replaced, ['#/now'], 'nothing turned away once setup is done');
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    assert.match(textOf(main), /Downloading Zelos 1\\.9\\.5/, 'Settings → About shows its own panel');
+    assert.ok(!plainWalk(root).some(n => n.tag === 'aside'), 'setup\\'s bar went with setup');
+  ` });
+});
+
+test('a reload at #/settings/about during setup comes back at setup\'s own address, with the panel open', () => {
+  runAppScenario({ initiallyConfigured: false, beforeBoot: desktopUpdater(DOWNLOADING, { hash: '#/settings/about' }), scenario: `
+    assert.ok(findButton(root, 'Set up Zelos'), 'setup is showing');
+    assert.equal(window.location.hash, '#/now');
+    assert.deepEqual(replaced, ['#/now']);
+    // It may have been a menu click that landed during the boot screen, so
+    // the panel it asked for opens; after a plain reload it is one Close away.
+    const main = plainWalk(root).find(n => n.attributes.id === 'main');
+    assert.match(textOf(root), /Downloading Zelos 1\\.9\\.5/);
+    assert.doesNotMatch(textOf(main), /Downloading/);
+    assert.ok(findButton(root, 'Close'));
   ` });
 });
 

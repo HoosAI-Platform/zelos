@@ -20,7 +20,7 @@
 import { el, button, meander, replace, focusQuietly } from './lib/dom.js';
 import {
   state, subscribe, refresh, watchSweeps, watchBoard, startSweep, railCounts, timezone,
-  needsOnboarding, onboardingDone, applyAccent, currentAccent, notify, nowMark, checkAgainLine,
+  needsOnboarding, onboardingDone, applyAccent, currentAccent, notify, dismissToast, nowMark, checkAgainLine,
 } from './lib/store.js';
 import { api, hasToken } from './lib/api.js';
 import { BUCKET_LABEL, sweepSummary, sweepDetail, tokenLine } from './lib/format.js';
@@ -28,6 +28,7 @@ import { humanDelta, formatDay } from './lib/time.js';
 import { createCommandMenu, commandShortcut } from './lib/commands.js';
 import { parseConnectionTarget } from './lib/source-status.js';
 import { updateBanner } from './lib/update-banner.js';
+import { updatesPanel } from './lib/updates.js';
 
 import { renderNow } from './views/now.js';
 import { renderToday } from './views/today.js';
@@ -67,14 +68,16 @@ const BUCKET_ROUTE = {
 const root = document.getElementById('app');
 
 let route = { view: 'now', sub: null };
+/** The hash `route` came from, to put back when setup turns a hash away. */
+let routeHash = '#/now';
 let lastRenderKey = '';
 let setupActive = false;
 
 // A model save changes whether setup is needed, but does not finish a setup
 // already on screen. Keep that flow until its own Finish/Skip action marks it
 // complete. This is set only after boot, so existing configured homes bypass it.
-function showOnboarding() {
-  return route.view === 'welcome' || (setupActive && !onboardingDone()) || needsOnboarding();
+function showOnboarding(r = route) {
+  return r.view === 'welcome' || (setupActive && !onboardingDone()) || needsOnboarding();
 }
 
 function parseHash() {
@@ -301,8 +304,8 @@ function buildChrome() {
     ]),
     capture.panel,
     sweep.node,
-    // Built once with the rest of the chrome, so it outlives view changes.
-    updateBanner({ onError: (message) => notify(message, { tone: 'warn' }) }),
+    // The one banner, shared with setup's skeleton.
+    sharedBanner(),
   ]);
   return {
     topbarNode,
@@ -313,10 +316,6 @@ function buildChrome() {
     commands,
     railNode: rail(route.view),
     tabbarNode: tabbar(route.view),
-    // The toast lives in a slot so showing and clearing it never moves its
-    // siblings. The slot is display:contents, so it is not a grid item and the
-    // shell's named areas are undisturbed.
-    toastSlot: el('div', { class: 'toast-slot' }),
   };
 }
 
@@ -375,7 +374,7 @@ function tabbar(current) {
 
 /**
  * The toast, as {node, text}. Its message node is left EMPTY here and filled by
- * announce() once the toast is in the document — a role="status" element that
+ * announce() once the toast is in the document — a live-region element that
  * arrives with its text already written is read by nobody, which meant every
  * failed save and every Undo offer in this app was silent.
  */
@@ -383,19 +382,24 @@ function toastBar() {
   if (!state.toast) return null;
   const action = state.toast.action;
   const text = el('p');
-  const node = el('div', { class: `toast toast-${state.toast.tone}`, role: 'status' }, [
+  // A failure interrupts; anything else waits for a pause in speech.
+  const role = state.toast.tone === 'warn' ? 'alert' : 'status';
+  const node = el('div', { class: `toast toast-${state.toast.tone}`, role }, [
     text,
     action ? button(action.label, {
       class: 'link',
       onClick: () => {
         // Clear first: the action usually re-renders, and a toast describing an
-        // undone thing must not outlive the undo it offered.
+        // undone thing must not outlive the undo it offered. Only a success
+        // carries an action today, so nothing waits behind it to come forward
+        // here; a failure that one day offers "Retry" would need to drop the
+        // waiting toast instead.
         const run = action.run;
-        notify(null);
+        dismissToast();
         run();
       },
     }) : null,
-    button('Dismiss', { class: 'link', onClick: () => notify(null) }),
+    button('Dismiss', { class: 'link', onClick: () => dismissToast() }),
   ]);
   return { node, text };
 }
@@ -450,9 +454,9 @@ function renderKey() {
     state.rev,
     state.fatal ? '1' : '0',
     showOnboarding() ? 'ob' : '-',
-    // Deliberately not the toast: it lives in the chrome, which repaints on
-    // every event, so putting it here would rebuild the view — and a draft
-    // someone is typing — every time a save failed.
+    // Deliberately not the toast: it has its own slot, painted on every
+    // event, so putting it here would rebuild the view — and a draft someone
+    // is typing — every time a save failed.
   ].join('|');
 }
 
@@ -476,6 +480,104 @@ let layout = null;
 /** The toast object last painted into its slot. Reference identity is the
  *  change signal, because notify() always mints a fresh object. */
 let paintedToast = null;
+
+/**
+ * The toast's one home, in both skeletons. It used to live inside the chrome,
+ * so first-run setup — which has no chrome — dropped every toast raised
+ * during it: "The made-up data is gone" reached neither the page nor a screen
+ * reader. Built once and moved between skeletons, never rebuilt. It sits just
+ * before <main>, so an Undo is reached before the view, as it always was.
+ * The slot is display:contents, so it is not a grid item and the shell's named
+ * areas are undisturbed; showing and clearing a toast never moves a sibling.
+ */
+const toastSlot = el('div', { class: 'toast-slot' });
+
+/** Leaving every skeleton: the next one must build and announce the toast
+ *  afresh, not re-insert a node whose text was already read. */
+function emptyToastSlot() {
+  replace(toastSlot, null);
+  paintedToast = null;
+}
+
+/**
+ * "Zelos 1.9.5 is ready to install", in whichever skeleton is up: the board's
+ * topbar, or setup's own bar. One node for the page's life, because each
+ * updateBanner() starts a poller that never stops.
+ */
+let banner = null;
+let bannerShown = false;
+function sharedBanner() {
+  if (!banner) {
+    banner = updateBanner({
+      onError: (message) => notify(message, { tone: 'warn' }),
+      onChange: (shown) => { bannerShown = shown; paintSetupBar(); },
+    });
+  }
+  return banner;
+}
+
+/**
+ * Setup's stand-in for Settings → About. The desktop menu's "Check for
+ * updates" sends the window to #/settings/about, which setup used to swallow:
+ * the check ran, and nothing on screen said so. Setup keeps the window, so the
+ * Updates panel opens here instead, beside the step, not over it.
+ */
+const updatesSlot = el('div', { class: 'setup-updates' });
+/** Setup's bar, while setup's skeleton is up. */
+let setupBar = null;
+/** Where focus was when the panel opened, for Close to put it back. */
+let updatesReturnFocus = null;
+
+function isUpdatesRoute(r) {
+  return r.view === 'settings' && r.sub === 'about';
+}
+
+/**
+ * Put the address back to the step's, with replaceState: an assignment would
+ * fire hashchange, re-render the step and wipe whatever was half typed, and
+ * leave a second menu click with no change to report. A previous address that
+ * was itself About (a reload there) has only the board's to fall back on.
+ */
+function restoreSetupHash() {
+  const back = isUpdatesRoute(route) ? '#/now' : routeHash;
+  window.history.replaceState(null, '', back);
+  routeHash = back;
+  route = parseHash();
+}
+
+/** An empty labelled landmark is still announced, so the bar hides while empty. */
+function paintSetupBar() {
+  if (setupBar) setupBar.hidden = !bannerShown && !updatesSlot.firstChild;
+}
+
+function openSetupUpdates() {
+  // Already open: keep it, and whatever focus is inside it. It is still polling.
+  if (updatesSlot.firstChild) {
+    updatesSlot.scrollIntoView?.({ block: 'nearest' });
+    return;
+  }
+  // Focus stays where the person is — the status line inside the panel is a
+  // live region, and moving focus out of <main> would flush a queued render
+  // over a half-typed step. Close takes them back to where they were.
+  updatesReturnFocus = document.activeElement;
+  // A fresh panel on each opening: a closed one stopped polling.
+  replace(updatesSlot, [
+    updatesPanel(),
+    el('div', { class: 'row-inline' }, button('Close', { class: 'btn quiet', onClick: closeSetupUpdates })),
+  ]);
+  paintSetupBar();
+  updatesSlot.scrollIntoView?.({ block: 'nearest' });
+}
+
+function closeSetupUpdates() {
+  replace(updatesSlot, null);
+  paintSetupBar();
+  const back = updatesReturnFocus;
+  updatesReturnFocus = null;
+  // The step may have been rebuilt while the panel was open, taking the node
+  // that had focus with it.
+  focusQuietly(back && back !== document.body && root.contains(back) ? back : main);
+}
 
 /**
  * A board refresh that lands while the cursor is inside a form field would
@@ -543,6 +645,7 @@ function render({ force = false } = {}) {
   const key = renderKey();
   if (!force && key === lastRenderKey && main) {
     paintChrome();
+    paintToast();
     return;
   }
   // Both skeletons: the bare one is onboarding, whose email step holds a
@@ -550,6 +653,7 @@ function render({ force = false } = {}) {
   if (!force && (layout === 'chrome' || layout === 'bare') && state.phase === 'ready' && editingInMain()) {
     renderQueued = true;
     paintChrome();
+    paintToast();
     return;
   }
   renderQueued = false;
@@ -560,6 +664,7 @@ function render({ force = false } = {}) {
     main = null;
     chromeWrap = null;
     layout = null;
+    emptyToastSlot();
     return;
   }
   if (state.phase === 'boot') {
@@ -567,6 +672,7 @@ function render({ force = false } = {}) {
     main = null;
     chromeWrap = null;
     layout = null;
+    emptyToastSlot();
     return;
   }
   if (state.phase === 'down' && state.fatal) {
@@ -574,6 +680,7 @@ function render({ force = false } = {}) {
     main = null;
     chromeWrap = null;
     layout = null;
+    emptyToastSlot();
     return;
   }
 
@@ -581,10 +688,29 @@ function render({ force = false } = {}) {
   if (onboarding) {
     setupActive = true;
     // The flow gets the whole window: no rail, no tab bar, nothing to click past.
-    main = el('main', { class: 'main', id: 'main', tabindex: '-1' }, currentView());
-    chromeWrap = null;
-    layout = 'bare';
-    replace(root, el('div', { class: 'shell shell-bare' }, main));
+    // Like the chrome skeleton, this one survives re-renders: rebuilding it
+    // would re-parent the toast slot each time, detaching an Undo mid-press.
+    if (layout !== 'bare') {
+      main = el('main', { class: 'main', id: 'main', tabindex: '-1' });
+      chromeWrap = null;
+      layout = 'bare';
+      replace(updatesSlot, null);
+      updatesReturnFocus = null;
+      // After <main>, so the step's heading comes first; a labelled landmark,
+      // so the banner and the panel are inside a region like everything else.
+      setupBar = el('aside', { class: 'setup-bar', 'aria-label': 'Zelos updates' }, [sharedBanner(), updatesSlot]);
+      paintSetupBar();
+      replace(root, el('div', { class: 'shell shell-bare' }, [toastSlot, main, setupBar]));
+      // A menu click that landed while the board was still loading, or a
+      // reload at About: setup shows either way, so the address says so too,
+      // and the panel the click asked for opens beside the step.
+      if (isUpdatesRoute(route)) {
+        restoreSetupHash();
+        openSetupUpdates();
+      }
+    }
+    replace(main, currentView());
+    paintToast();
     return;
   }
   setupActive = false;
@@ -605,6 +731,7 @@ function render({ force = false } = {}) {
         },
       }),
       chromeWrap,
+      toastSlot,
       main,
     ]));
     // Arriving at the board from a different skeleton — onboarding, mostly —
@@ -616,6 +743,7 @@ function render({ force = false } = {}) {
   }
   replace(main, currentView());
   paintChrome();
+  paintToast();
   const connectionKey = route.view === 'settings' && route.connectionId ? `${route.sub}/${route.connectionId}` : null;
   if (connectionKey && connectionKey !== focusedConnection) focusConnectionTarget();
   focusedConnection = connectionKey;
@@ -627,7 +755,7 @@ function render({ force = false } = {}) {
  * the page; the date, the sweep button and the whole sweep line are text and
  * attribute updates on nodes that also persist (the sweep line has to persist —
  * its text is a live region, and a region that is replaced rather than mutated
- * announces nothing); the rail, tab bar and toast hold no input, so they are
+ * announces nothing); the rail and tab bar hold no input, so they are
  * rebuilt and swapped in place with replaceWith, which cannot touch anything a
  * person is typing into.
  */
@@ -635,7 +763,9 @@ function paintChrome() {
   if (!chromeWrap) return;
   if (!chrome) chrome = buildChrome();
   if (chrome.topbarNode.parentNode !== chromeWrap) {
-    replace(chromeWrap, [chrome.topbarNode, chrome.railNode, chrome.tabbarNode, chrome.toastSlot]);
+    replace(chromeWrap, [chrome.topbarNode, chrome.railNode, chrome.tabbarNode]);
+    // Setup borrows the banner; take it back, still last in the topbar.
+    if (sharedBanner().parentNode !== chrome.topbarNode) chrome.topbarNode.appendChild(sharedBanner());
   }
 
   // The date comes from the ROLLED key, not from the board's `now` string: a
@@ -657,17 +787,23 @@ function paintChrome() {
   chrome.tabbarNode.replaceWith(freshTabs);
   chrome.tabbarNode = freshTabs;
 
-  // The toast is rebuilt only when the toast itself changed. paintChrome runs
-  // on every emit — sweep progress arrives several times a second — and
-  // rebuilding an action toast that often would replace its Undo button under
-  // a hovering cursor, mid-press.
+  measureTopbar();
+}
+
+/**
+ * The toast, in whichever skeleton is up. It is rebuilt only when the toast
+ * itself changed: this runs on every emit — sweep progress arrives several
+ * times a second — and rebuilding an action toast that often would replace its
+ * Undo button under a hovering cursor, mid-press.
+ */
+function paintToast() {
+  if (!layout) return;
   if (paintedToast !== state.toast) {
     paintedToast = state.toast;
     const built = toastBar();
-    replace(chrome.toastSlot, built && built.node);
+    replace(toastSlot, built && built.node);
     if (built) announce(built.text, state.toast.message);
   }
-  measureTopbar();
 }
 
 /**
@@ -767,9 +903,18 @@ function focusConnectionTarget() {
 }
 
 function onRoute() {
+  const next = parseHash();
+  // Judged against the NEW route: About is turned away only while setup is up
+  // and would stay up. Once setup is done it is an ordinary address.
+  if (layout === 'bare' && isUpdatesRoute(next) && showOnboarding(next)) {
+    restoreSetupHash();
+    openSetupUpdates();
+    return;
+  }
   const before = route.view;
   const beforeSub = route.sub;
-  route = parseHash();
+  route = next;
+  routeHash = window.location.hash || '#/now';
   render({ force: true });
   if (before !== route.view) {
     // A new view starts at its top. Same-view re-renders (a deferred board
@@ -787,6 +932,7 @@ function onRoute() {
 
 applyAccent(currentAccent());
 route = parseHash();
+routeHash = window.location.hash || '#/now';
 render();
 
 window.addEventListener('hashchange', onRoute);
