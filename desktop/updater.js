@@ -1466,7 +1466,10 @@ export function createUpdater({
         log('info', 'installing update', { version: ready.version });
         return true;
       } catch (err) {
-        try { fs.rmSync(attemptFile, { force: true }); } catch { /* nothing was attempted */ }
+        // The attempt file stays. The shell relaunches after a failure here,
+        // and that launch reads it, says the update did not install and drops
+        // the download, rather than reopening on the same broken update with
+        // no word (QA, 2026-10-10, TT-3486).
         installFailed?.(err);
         return false;
       }

@@ -540,6 +540,15 @@ describe('the Windows updater', () => {
     assert.equal(h.updater.install({ onFailure: (err) => failures.push(err.message) }), false);
     assert.deepEqual(h.launched, []);
     assert.match(failures[0], /changed before it could be installed/);
+
+    // The shell relaunches after that failure, and the relaunch has to say so
+    // and drop the update rather than offer it again (QA, 2026-10-10, TT-3486).
+    h.updater.stop();
+    const again = windowsUpdater(fx);
+    const state = await again.updater.start();
+    assert.match(state.installProblem, /Zelos 1\.9\.0 was not installed/);
+    assert.notEqual(state.status, 'ready', 'the update that would not install is offered again');
+    await until(() => !fs.existsSync(file), 'the download that would not install to be dropped');
   });
 
   it('offers the banner once an update is ready, until it is put off or skipped', async () => {
