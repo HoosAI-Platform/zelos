@@ -1726,6 +1726,49 @@ describe('the bare invocation is untouched', () => {
       child.kill('SIGKILL');
     }
   });
+
+  /**
+   * `sweeps.start()` settles once the run is claimed, so a `.catch` on it saw
+   * only a 409 or a missing engine. A model that answers in prose fails the
+   * run, and the person who typed --sweep-now heard nothing about it
+   * (QA, 2026-10-10, TT-3500).
+   */
+  test('--sweep-now says so in the terminal when the run fails', async (t) => {
+    const mock = await mockServer((req, res) => {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          model: 'mock-local',
+          choices: [{ message: { role: 'assistant', content: 'Sure! Here is a summary of your day.' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }));
+      });
+    });
+    t.after(() => mock.close());
+    const home = freshHome({
+      model: { protocol: 'openai', baseUrl: `${mock.origin}/v1`, label: 'Local', model: 'mock-local', keyRef: 'model.default' },
+    });
+    const child = spawn(process.execPath, ['zelos.mjs', '--no-open', '--port', '0', '--sweep-now'], {
+      cwd: ROOT,
+      env: { ...process.env, ZELOS_HOME: home, ZELOS_SECRETS_BACKEND: 'encrypted-file', ZELOS_LOG_LEVEL: 'info' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    try {
+      const deadline = Date.now() + 15_000;
+      while (!/--sweep-now failed/.test(stderr)) {
+        if (child.exitCode !== null) throw new Error(`zelos exited ${child.exitCode}:\n${stdout}\n${stderr}`);
+        if (Date.now() > deadline) assert.fail(`a failed --sweep-now never reached the terminal:\n${stdout}\n${stderr}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ *
