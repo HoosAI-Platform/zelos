@@ -5887,6 +5887,8 @@ test('connection status keeps successful read times separate from failures, paus
   const board = now.renderNow({ tz: 'UTC', navigate: path => paths.push(path) });
   assert.match(onScreen(board), /Reading status/);
   assert.match(onScreen(board), /Studio mail.*Sign in again/);
+  // One failure: "1 needs attention", not "1 need" (TT-3518).
+  assert.match(onScreen(board), /Reading status \| 1 needs attention/);
   findButton(board, 'Review connection').fire('click');
   assert.deepEqual(paths, ['#/settings/mail/m1']);
 });
@@ -7732,6 +7734,39 @@ test('Finished lists a task that left the selection under its own label, and it 
     ['/api/items/left/state', { state: 'open' }],
     ['/api/items/left/state', { state: 'dismissed' }],
   ]);
+});
+
+test('Now\'s "other things for today" does not count a Today item already shown at the top (TT-3518)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = async () => ({ ok: false, status: 404, text: async () => '{"error":"not found"}' });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const now = await import(fileUrl(UI, 'views/now.js'));
+  store.state.config = { identity: {}, model: { label: 'Claude' }, mail: [{ id: 'm1' }], calendars: [], sources: [] };
+  store.state.health = { model: { configured: true, label: 'Claude' } };
+  store.state.sweep = { running: false, phase: '', message: '', done: 0, total: 0, error: null, lastResult: null };
+  const today = (id, headline) => ({ id, bucket: 'today', state: 'open', headline });
+  store.state.board = {
+    ...store.state.board,
+    items: [today('t1', 'Ring the vet'), today('t2', 'Book the hall'), today('t3', 'Post the forms')],
+    counts: { now: 0, today: 3, soon: 0, waiting: 0, promised: 0, note: 0, money: 0 },
+    events: [], drafts: [], notes: [], finished: [],
+    runs: { last: { id: 'run_1', kind: 'full', ok: true, started_at: '2026-08-28T09:00:00Z', ended_at: '2026-08-28T09:01:00Z', stats: {} } },
+    first: 't1',
+    now: '2026-08-28T10:00:00Z',
+  };
+  store.state.boardAt = Date.now();
+
+  let seen = onScreen(now.renderNow({ tz: 'UTC', navigate() {} }));
+  assert.match(seen, /Ring the vet/, 'the Today item is not the one at the top');
+  assert.match(seen, /2 other things for today\./);
+
+  // A hero from Now's own bucket leaves the Today count alone.
+  store.state.board.items.push({ id: 'n1', bucket: 'now', state: 'open', headline: 'Pay the invoice' });
+  store.state.board.counts = { ...store.state.board.counts, now: 1 };
+  store.state.board.first = 'n1';
+  seen = onScreen(now.renderNow({ tz: 'UTC', navigate() {} }));
+  assert.match(seen, /3 other things for today\./);
 });
 
 test('a board without the finished field folds nothing and breaks nothing', async (t) => {

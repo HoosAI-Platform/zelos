@@ -258,7 +258,10 @@ export function renderNow(ctx) {
     body.appendChild(el('section', { class: 'section worth' }, [toggle, meander(), panel]));
   }
 
-  const todayCount = state.board.counts.today || 0;
+  // The hero can be a Today item (state.board.first is any open item), and
+  // then "8 other things for today" counted the one just shown above it (QA,
+  // 2026-10-10, TT-3518). Only the hero can overlap: the rows under it are Now's.
+  const todayCount = Math.max(0, (state.board.counts.today || 0) - (hero?.bucket === 'today' ? 1 : 0));
   if (todayCount) {
     body.appendChild(el('p', { class: 'handoff' }, [
       el('span', { text: `${plural(todayCount, 'other thing')} for today. ` }),
