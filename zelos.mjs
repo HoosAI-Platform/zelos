@@ -766,7 +766,9 @@ async function runWithData(flags) {
     model: modelLine,
     mailAccounts: enabledMail ? `${enabledMail} account${enabledMail === 1 ? '' : 's'}` : 'none yet',
     calendars: enabledCals ? `${enabledCals} calendar${enabledCals === 1 ? '' : 's'}` : 'none yet',
-    auto: scheduler ? `every ${config.sweep.intervalMinutes}m between ${config.sweep.activeHours[0]}:00 and ${config.sweep.activeHours[1]}:00` : 'manual',
+    // A scheduler is built whether or not sweeps are automatic (see above), so
+    // its existence says nothing about a schedule (QA, 2026-10-10, TT-3501).
+    auto: scheduler && config.sweep.auto ? `every ${config.sweep.intervalMinutes}m between ${config.sweep.activeHours[0]}:00 and ${config.sweep.activeHours[1]}:00` : 'manual',
     pasteNeeded: Boolean(plan) && !plan.handsOverToken,
   });
 

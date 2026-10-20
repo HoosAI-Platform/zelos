@@ -1693,6 +1693,10 @@ describe('the bare invocation is untouched', () => {
         headers: { 'X-Zelos-Token': url.searchParams.get('t'), 'Content-Type': 'application/json', ...(init.headers || {}) },
       });
 
+      // ...and the banner says the schedule is off rather than printing the
+      // one that is not running (QA, 2026-10-10, TT-3501).
+      assert.match(stdout, /Sweep\s+manual/, `the banner showed a schedule with automatic sweeps off:\n${stdout}`);
+
       // A scheduler has to exist even with the schedule off, or there is
       // nothing for a later save to reach.
       const before = await (await api('/api/health')).json();
