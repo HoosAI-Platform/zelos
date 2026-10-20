@@ -214,7 +214,7 @@ export const IMAP_HINTS = [
   },
   { host: 'imap.mail.yahoo.com', label: 'Yahoo', note: 'Yahoo needs an app password.' },
   { host: 'imap.fastmail.com', label: 'Fastmail', note: 'Fastmail wants an app password too.' },
-  { host: '127.0.0.1', label: 'Proton Bridge', note: 'Proton Bridge listens on 127.0.0.1:1143 without TLS.' },
+  { host: '127.0.0.1', label: 'Proton Bridge', note: 'Proton Bridge listens on 127.0.0.1:1143. If Bridge says its security is STARTTLS, leave “TLS on connect” off; if it says SSL, tick it. Bridge’s own certificate is accepted because the connection never leaves this computer.' },
 ];
 
 /**
@@ -1928,10 +1928,10 @@ function mailForm(account, { onSaved, onCancel }) {
     noteLine,
     el('div', { class: 'grid-2' }, [
       field('Port', portInput),
-      checkbox('TLS on connect (port 993)', { checked: secure, onChange: (v) => { secure = v; } }),
+      checkbox('TLS on connect (usually port 993)', { checked: secure, onChange: (v) => { secure = v; } }),
     ]),
     field('Sending your password', tlsSelect, {
-      hint: 'Zelos will not send your password until the connection is encrypted. Left to decide, it insists on that everywhere except a server running on this machine — which is where Proton Bridge and its kind live, and the only reason an unencrypted connection is still offered at all. Allow one anywhere else and anyone sharing your network, or sitting anywhere between you and your mail server, can read the password and the mail.',
+      hint: 'Zelos will not send your password until the connection is encrypted. Left to decide, it insists on that everywhere except a server running on this machine, where the connection never leaves your computer — the only reason an unencrypted connection is still offered at all. Allow one anywhere else and anyone sharing your network, or sitting anywhere between you and your mail server, can read the password and the mail.',
     }),
     field('Username', userInput),
     field('How Zelos signs in', authSelect, {

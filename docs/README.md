@@ -314,15 +314,16 @@ Zelos guesses the server from your email address, so usually you type your
 address and the app password and press **Connect** — or, under **Advanced**,
 **Test the connection** and then **Save account**.
 
-**About encryption, since one row above turns it off.** Every account has a
+**About encryption.** Every account has a
 *Require encryption* setting, and left alone it does the right thing: anything
 that is not on your own machine has to end up encrypted before your password is
 sent, so a server that will not do it is refused rather than fallen back from.
 That matters because the fallback is silent — a network able to strip the
-upgrade offer would otherwise be handed your password in plain text. The one
-account that legitimately runs unencrypted is Proton Bridge, because it lives
-on `127.0.0.1` and the traffic never leaves your machine; that is why it is a
-setting and not a rule.
+upgrade offer would otherwise be handed your password in plain text. A server
+on `127.0.0.1` is the exception, because that traffic never leaves your machine;
+that is why it is a setting and not a rule. Proton Bridge does encrypt, with a
+certificate it makes for itself: Zelos accepts a certificate like that only
+from a program on this computer, and checks every other server's as usual.
 
 **How much it reads.** By default, the last 14 days of `INBOX`, up to 400
 messages. Both are settings. Reading your sent mail as well is what lets Zelos

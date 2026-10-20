@@ -1018,6 +1018,24 @@ describe('doctor', () => {
       'a refusal to use cleartext is not a password problem and must not be described as one');
   });
 
+  test('a certificate doctor cannot verify is called that, not a blocked server or a password', async () => {
+    process.env.ZELOS_HOME = freshHome({
+      mail: [{ id: 'm_cert', enabled: true, label: 'Home server', host: 'mail.home.example', port: 993, secure: true, user: 'a@home.example', keyRef: 'mail.m_cert' }],
+    });
+    const report = await diagnose({
+      deps: {
+        ...SILENT_DEPS,
+        getSecret: async () => 'hunter2',
+        testImap: async () => ({ ok: false, capabilities: [], mailboxes: [], error: 'IMAP mail.home.example:993 — connection failed — self-signed certificate' }),
+      },
+    });
+    const line = byId(report, 'mail.m_cert');
+    assert.equal(line.status, 'fail');
+    assert.match(line.action, /certificate/);
+    assert.match(line.action, /Proton Bridge/);
+    assert.doesNotMatch(line.action, /blocking IMAP|app password/i);
+  });
+
   test('a mailbox the server does not have is a warning that lists the real ones', async () => {
     process.env.ZELOS_HOME = freshHome({
       mail: [{ id: 'm_3', enabled: true, label: 'Work', host: 'imap.fastmail.com', port: 993, secure: true, user: 'a@fastmail.com', keyRef: 'mail.m_3', mailboxes: ['INBOX', 'Projects'] }],

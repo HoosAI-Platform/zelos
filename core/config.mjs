@@ -98,8 +98,9 @@ export function isValidRef(ref) {
  * `true` means never send the password over an unencrypted socket, `false`
  * means the plaintext is deliberate, and `null` — which is what every config
  * written before this existed says — means decide from the host, requiring it
- * everywhere except loopback. Loopback is where Proton Bridge and its kind
- * live, which is the whole reason plaintext is still an option.
+ * everywhere except loopback. Loopback is where local mail bridges live, and
+ * traffic there never leaves the machine, which is the whole reason plaintext
+ * is still an option.
  *
  * It is stored as null rather than resolved to a boolean on the way in on
  * purpose: a resolved `false` would survive the user later pointing the same
