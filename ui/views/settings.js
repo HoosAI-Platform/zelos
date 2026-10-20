@@ -28,7 +28,7 @@ import { el, button, meander, section, copyText, replace } from '../lib/dom.js';
    place to look for a call that has exactly one call site. */
 import { api, request } from '../lib/api.js';
 import { state, saveConfig, loadConfig, setAccent, applyAccent, currentAccent, DEFAULT_ACCENT, markOnboarded, nowMark } from '../lib/store.js';
-import { plural, tokenLine } from '../lib/format.js';
+import { plural, tokenLine, calendarTestSummary } from '../lib/format.js';
 import { isLocalAddress, isThisMachine } from '../lib/local-address.js';
 import { monthName } from '../lib/time.js';
 import { aiAccessPanel } from './ai-access.js';
@@ -579,6 +579,18 @@ export function fieldControls(manifest, values = {}) {
  * the keychain wording stands until it says otherwise.
  */
 export function secretStoreNotes(backendName) {
+  /* Windows has no keychain entry to remove. core/secrets.mjs `dpapiFile` writes
+     each secret as its own DPAPI-encrypted file under %LOCALAPPDATA%\Zelos\secrets
+     — outside the home, so the keychain sentence below sent a Windows user off
+     to look for an entry that does not exist and left every password on disk
+     after they had "erased everything" (QA, 2026-10-10, TT-3461). */
+  if (backendName === 'windows-dpapi') {
+    return {
+      field: 'Windows encrypts it for your account alone, and it is saved as a file under %LOCALAPPDATA%\\Zelos\\secrets. It never goes into config.json or a log, and there is no route that reads it back.',
+      password: 'Encrypted by Windows (DPAPI) for your account alone and saved under %LOCALAPPDATA%\\Zelos\\secrets. It is never written to config.json, never passed on a command line, and never logged.',
+      data: 'On Windows the stored passwords and API keys are not in that directory, and there is no keychain entry to remove: each one is a DPAPI-encrypted file under %LOCALAPPDATA%\\Zelos\\secrets. Deleting the folder above leaves them behind, so delete that one too — it holds the passwords of every Zelos folder on this Windows account:',
+    };
+  }
   if (backendName === 'encrypted-file') {
     return {
       field: 'It goes into secrets.enc in your Zelos home, encrypted with the key in .seed beside it: never into config.json, never into a log, and there is no route that reads it back.',
@@ -603,6 +615,13 @@ export function secretStoreNotes(backendName) {
  */
 export function plainSecretNotes(backendName) {
   const field = 'Saved on this computer only, scrambled so nobody else can read it.';
+  if (backendName === 'windows-dpapi') {
+    return {
+      field,
+      data: 'Your saved passwords are not in this folder. Windows keeps them, locked to your account, in a second Zelos folder: paste %LOCALAPPDATA%\\Zelos into the File Explorer address bar to find it, and delete that folder too. It holds the passwords for any other Zelos folder on this computer as well.',
+      about: 'Your passwords are locked to your Windows account, in files on this computer.',
+    };
+  }
   if (backendName === 'encrypted-file') {
     return {
       field,
@@ -2929,8 +2948,7 @@ export function calendarForm(calendar, { manifests = [], guide = null, links = {
         requireTls: requireTls(),
       });
       if (result.ok) {
-        const name = result.calendars?.[0]?.name || 'calendar';
-        status.good(`${name}: ${plural(result.events ?? 0, 'appointment')} found.`);
+        status.good(calendarTestSummary(result));
         return true;
       }
       status.bad(result.error || 'Nothing came back.');
@@ -3491,6 +3509,31 @@ export function folderHint(platform = '') {
 }
 
 /**
+ * How to erase the folder, in the words of the system it is on. The panel said
+ * "drag it to the Trash" and gave an `rm -rf` line to everyone, Windows
+ * included, where there is a Recycle Bin and the shell is PowerShell (TT-3461).
+ * A DPAPI store is only ever on Windows, so it settles the question when the
+ * page cannot see a platform.
+ */
+export function eraseSteps(platform = '', backendName = '') {
+  const windows = String(platform || '').toLowerCase().startsWith('win') || backendName === 'windows-dpapi';
+  return windows
+    ? {
+      plain: 'To erase everything: quit Zelos, then delete this folder and empty the Recycle Bin.',
+      // -LiteralPath and single quotes: in double quotes PowerShell expands `$`
+      // and backticks, and -Path reads `[` `]` as wildcards.
+      command: (dir) => `Remove-Item -LiteralPath '${String(dir).replace(/'/g, "''")}' -Recurse -Force`,
+      /* Join-Path refuses a missing LOCALAPPDATA rather than turning
+         "$env:LOCALAPPDATA\Zelos" into "\Zelos" at the root of the drive. */
+      secrets: "Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Zelos') -Recurse -Force",
+    }
+    : {
+      plain: 'To erase everything: quit Zelos, then drag this folder to the Trash and empty the Trash.',
+      command: (dir) => `rm -rf "${dir}"`,
+    };
+}
+
+/**
  * Whether the page is inside the desktop shell with the one bridge that
  * reveals the folder (desktop/preload.js). The board has to keep working
  * when opened from `zelos` on the command line, where no preload runs.
@@ -3547,10 +3590,41 @@ function dataStats() {
   return slot;
 }
 
+/**
+ * The settings as the board snapshot writes them: every web address cut back to
+ * the site it is on.
+ *
+ * A calendar's address is not a pointer to a password, it IS the password.
+ * Google's "Secret address in iCal format", an Outlook publish link and an
+ * iCloud public calendar all let anyone holding the URL read the calendar, and
+ * core/config.mjs keeps it in `calendars[].url` beside the label — so the
+ * snapshot, which says it has no passwords in it, carried one per calendar. A
+ * private feed's `settings.url` is the same kind of thing. The whole tree is
+ * walked rather than those two keys named, so the next connector with a
+ * `type: 'url'` field is covered without anyone remembering this function.
+ * Built from protocol and host, not `URL.origin`, which is "null" for webcal:.
+ */
+export function snapshotConfig(config) {
+  const strip = (value) => {
+    if (Array.isArray(value)) return value.map(strip);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, strip(v)]));
+    }
+    if (typeof value !== 'string' || !/^(?:https?|webcal):/i.test(value.trim())) return value;
+    let url;
+    try { url = new URL(value.trim()); } catch { return '(address removed)'; }
+    const site = `${url.protocol}//${url.host}`;
+    return url.href === `${site}/` ? value : `${site}/… (rest of the address removed)`;
+  };
+  return strip(config);
+}
+
 function dataPanel() {
   const status = statusLine('data');
   const home = state.health?.home || '(unknown)';
   const platform = typeof window !== 'undefined' ? (window.zelos?.platform || window.navigator?.platform || '') : '';
+  const backendName = state.health?.backend?.name;
+  const erase = eraseSteps(platform, backendName);
 
   async function exportSnapshot() {
     status.working('Gathering…');
@@ -3559,8 +3633,11 @@ function dataPanel() {
       const payload = JSON.stringify({
         exportedAt: new Date().toISOString(),
         version: state.health?.version || null,
-        config: config.config,
-        board,
+        config: snapshotConfig(config.config),
+        /* A sweep before TT-3423 recorded an unlabelled calendar under its full
+           address, and `runs.last` still serves that record until the next
+           sweep replaces it. */
+        board: { ...board, runs: snapshotConfig(board.runs) },
       }, null, 2);
       const blob = new Blob([payload], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -3569,7 +3646,7 @@ function dataPanel() {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      status.good('Board snapshot saved. It contains no passwords and is not a full backup.');
+      status.good('Board snapshot saved. It contains no passwords or private calendar addresses, and is not a full backup.');
     } catch (err) {
       status.bad(err.message);
     }
@@ -3600,15 +3677,16 @@ function dataPanel() {
         : button('Copy the folder path', { class: 'btn solid', onClick: copyPath }),
       button('Save board snapshot', { class: 'btn quiet', onClick: exportSnapshot }),
     ]),
-    el('p', { class: 'quiet-note', text: 'The snapshot includes the current board and settings, without passwords. It does not include your full mail archive, captures or complete item history. Use a backup to restore your data.' }),
+    el('p', { class: 'quiet-note', text: 'The snapshot includes the current board and settings, without passwords. Every web address in your settings, calendar and feed addresses among them, is cut back to the site it is on, because the full address is often a key in itself. It does not include your full mail archive, captures or complete item history. Use a backup to restore your data.' }),
     canShowFolder() ? null : el('p', { class: 'quiet-note', text: folderHint(platform) }),
     section('Erasing everything', {}, [
-      el('p', { class: 'quiet-note', text: 'To erase everything: quit Zelos, then drag this folder to the Trash and empty the Trash.' }),
-      el('p', { class: 'quiet-note', text: plainSecretNotes(state.health?.backend?.name).data }),
+      el('p', { class: 'quiet-note', text: erase.plain }),
+      el('p', { class: 'quiet-note', text: plainSecretNotes(backendName).data }),
       fold('For experts', [
         el('p', { class: 'quiet-note', text: 'Zelos deliberately has no route that wipes your data — a local server that can destroy the database on request is a local server a stray web page can point at. Done by hand, with the app closed, it is one command:' }),
-        el('pre', { class: 'code' }, el('code', { text: `rm -rf "${home}"` })),
+        el('pre', { class: 'code' }, el('code', { text: erase.command(home) })),
         el('p', { class: 'quiet-note', text: secretStoreNotes(state.health?.backend?.name).data }),
+        backendName === 'windows-dpapi' ? el('pre', { class: 'code' }, el('code', { text: erase.secrets })) : null,
       ], { id: 'data.experts' }),
     ]),
     status.node,

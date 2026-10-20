@@ -11,7 +11,7 @@
 import { el, button, section, autogrow, copyText } from '../lib/dom.js';
 import { itemRow, foldedList, emptyState } from '../lib/items.js';
 import { byUrgency } from '../lib/format.js';
-import { state, itemsInBucket, openDrafts, refreshBoard, notify } from '../lib/store.js';
+import { state, itemsInBucket, openDrafts, refreshBoard, notify, dropDraft } from '../lib/store.js';
 import { api } from '../lib/api.js';
 
 const SAVE_DEBOUNCE_MS = 900;
@@ -264,18 +264,13 @@ function draftCard(draft, itemsById) {
           }
           writer.heldSaves.clear();
           writer.pendingSaves.clear();
-          // A failed refetch should still leave the successful discard in
-          // place. Detached cards retain their closed writer gate.
-          state.board = {
-            ...state.board,
-            drafts: state.board.drafts.filter(d => d.id !== draft.id),
-          };
-          draftWriters.delete(draft.id);
-          try {
-            await refreshBoard();
-          } catch (err) {
-            notify(`Could not refresh the board: ${err.message}`, { tone: 'warn' });
-          }
+          // Off the page at once, with a redraw (dropDraft). A failed refetch
+          // still leaves the successful discard in place — refreshBoard says
+          // so itself. The writer is KEPT, discarding: a stale board fetch
+          // must never hand a revived card an open gate that would autosave
+          // the discarded draft back to life.
+          dropDraft(draft.id);
+          await refreshBoard();
         },
       }),
     ]),

@@ -2695,7 +2695,7 @@ test('REGRESSION: the secrets copy names the store in use — on the encrypted-f
   }
 
   // A real keychain keeps the wording it had; so does "not loaded yet".
-  for (const name of ['macos-keychain', 'windows-credential-manager', 'libsecret', undefined, 'unknown']) {
+  for (const name of ['macos-keychain', 'libsecret', undefined, 'unknown']) {
     const notes = settings.secretStoreNotes(name);
     assert.match(notes.data, /OS keychain/, String(name));
     assert.match(notes.data, /not in that directory/, String(name));
@@ -7614,4 +7614,177 @@ test('headings never skip a level, and every whole-page screen is a main landmar
   const html = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
   const noscript = /<noscript>([\s\S]*?)<\/noscript>/.exec(html)?.[1] || '';
   assert.match(noscript, /^\s*<main class="screen">[\s\S]*<h1 [^>]*>[^<]+<\/h1>[\s\S]*<\/main>\s*$/, 'the no-JavaScript screen is not a main landmark');
+});
+
+/*
+ * TT-3423. A calendar's subscription address is a credential in its own right —
+ * Google calls it the "Secret address" — and it sits in config.json as
+ * `calendars[].url`. The board snapshot, which promises no passwords, wrote the
+ * config out whole. It now cuts every address back to its site.
+ */
+test('the board snapshot does not carry a calendar or feed secret address', async () => {
+  stubBrowserGlobals();
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  const google = 'https://calendar.google.com/calendar/ical/me%40gmail.com/private-0123456789abcdef/basic.ics';
+  const icloud = 'webcal://p01-caldav.icloud.com/published/2/SECRETTOKEN';
+  const config = {
+    model: { baseUrl: 'https://api.anthropic.com', label: 'Claude' },
+    calendars: [
+      { id: 'g', label: 'Work', kind: 'ics', url: google, keyRef: null },
+      { id: 'a', label: 'Home', kind: 'ics', url: icloud, keyRef: null },
+      { id: 'c', label: 'Fastmail', kind: 'caldav', url: 'https://me:hunter2@caldav.example.com', user: 'me' },
+      { id: 'f', label: 'File', kind: 'file', url: '/Users/nemo/cal.ics' },
+    ],
+    sources: [{ id: 'r', type: 'rss', settings: { url: 'https://feeds.example.com/private?token=abc', maxItems: 50 } }],
+  };
+  const out = settings.snapshotConfig(config);
+  const text = JSON.stringify(out);
+  for (const secret of ['private-0123456789abcdef', 'SECRETTOKEN', 'hunter2', 'token=abc']) {
+    assert.ok(!text.includes(secret), `the snapshot still holds ${secret}`);
+  }
+  assert.equal(out.calendars[0].url, 'https://calendar.google.com/… (rest of the address removed)');
+  assert.equal(out.calendars[1].url, 'webcal://p01-caldav.icloud.com/… (rest of the address removed)',
+    'URL.origin is "null" for webcal:, so the site must be built by hand');
+  assert.equal(out.calendars[2].url, 'https://caldav.example.com/… (rest of the address removed)');
+  assert.equal(out.calendars[3].url, '/Users/nemo/cal.ics', 'a local path is not an address');
+  assert.equal(out.model.baseUrl, 'https://api.anthropic.com', 'a bare site has nothing to remove');
+  assert.equal(out.sources[0].settings.maxItems, 50);
+  assert.equal(out.calendars[0].label, 'Work');
+  assert.equal(config.calendars[0].url, google, 'the live config is not touched');
+
+  // And the export uses it.
+  const src = fs.readFileSync(path.join(UI, 'views/settings.js'), 'utf8');
+  assert.match(src, /config: snapshotConfig\(config\.config\)/, 'exportSnapshot writes the config unfiltered');
+  assert.match(src, /runs: snapshotConfig\(board\.runs\)/, 'exportSnapshot writes a stored run record unfiltered');
+
+  // A run recorded before the sweep stopped using the address as a label.
+  const runs = { last: { stats: { sources: [{ kind: 'calendar', id: 'g', label: google, ok: true }] } } };
+  assert.equal(settings.snapshotConfig(runs).last.stats.sources[0].label,
+    'https://calendar.google.com/… (rest of the address removed)');
+});
+
+/*
+ * TT-3461. On Windows the store is DPAPI: one encrypted file per secret under
+ * %LOCALAPPDATA%\Zelos\secrets, outside the home. The panel told Windows users
+ * the passwords were in a keychain entry to remove, to drag the home to "the
+ * Trash", and gave them `rm -rf` — so erasing everything left every password.
+ */
+test('on Windows, erasing everything names the second folder, the Recycle Bin and PowerShell', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; delete globalThis.window.zelos; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [] };
+  store.state.health = { model: { configured: false }, home: 'C:\\Users\\nemo\\.zelos', backend: { name: 'windows-dpapi' } };
+  store.state.configErrors = [];
+  globalThis.window.zelos = { desktop: true, platform: 'win32', showHome: async () => true };
+
+  const view = settings.renderSettings({ sub: 'data', navigate() {}, rerender() {} });
+  const seen = onScreen(view);
+  assert.match(seen, /delete this folder and empty the Recycle Bin/);
+  assert.doesNotMatch(seen, /Trash/);
+  assert.match(seen, /second Zelos folder: paste %LOCALAPPDATA%\\Zelos into the File Explorer address bar/);
+  assert.doesNotMatch(seen, JARGON, `the Your data card: ${seen.match(JARGON)?.[0]}`);
+  const all = anywhere(view);
+  assert.doesNotMatch(all, /rm -rf|keychain tool|com\.zelos\.app/);
+  assert.match(all, /Remove-Item -LiteralPath 'C:\\Users\\nemo\\\.zelos' -Recurse -Force/);
+  assert.match(all, /Remove-Item -LiteralPath \(Join-Path \$env:LOCALAPPDATA 'Zelos'\) -Recurse -Force/);
+
+  const notes = settings.secretStoreNotes('windows-dpapi');
+  for (const [slot, text] of Object.entries(notes)) {
+    assert.doesNotMatch(text, /OS keychain/, `${slot} still sends a Windows user to a keychain`);
+    assert.match(text, /%LOCALAPPDATA%\\Zelos\\secrets/, `${slot} does not say where the secret goes`);
+  }
+  for (const text of Object.values(settings.plainSecretNotes('windows-dpapi'))) assert.doesNotMatch(text, JARGON);
+
+  // The platform alone decides the words when the store is not DPAPI, and the
+  // store alone when a browser tab cannot see the platform.
+  assert.match(settings.eraseSteps('Win32', 'encrypted-file').plain, /Recycle Bin/);
+  assert.match(settings.eraseSteps('', 'windows-dpapi').command('x'), /^Remove-Item/);
+  assert.match(settings.eraseSteps('MacIntel', 'macos-keychain').plain, /Trash/);
+  assert.equal(settings.eraseSteps('linux', 'libsecret').command('/h'), 'rm -rf "/h"');
+  assert.equal(settings.eraseSteps('win32').command("C:\\Users\\o'brien $x [1]\\.zelos"),
+    "Remove-Item -LiteralPath 'C:\\Users\\o''brien $x [1]\\.zelos' -Recurse -Force",
+    'a quote, a dollar and a bracket in the path are taken literally');
+
+  // The second folder is only offered where it exists: Windows on DPAPI.
+  store.state.health = { ...store.state.health, backend: { name: 'encrypted-file' } };
+  const fileStore = anywhere(settings.renderSettings({ sub: 'data', navigate() {}, rerender() {} }));
+  assert.match(fileStore, /Recycle Bin/, 'the platform alone decides the words');
+  assert.doesNotMatch(fileStore, /LOCALAPPDATA/);
+});
+
+test('a calendar Test names the calendars it will read, not "0 appointments" (TT-3456)', async () => {
+  /* QA, 2026-10-10: CalDAV "Test it" said "Site visits: 0 appointments found"
+     for a calendar holding two — the route lists calendars and has no count,
+     and the page printed `result.events ?? 0`. */
+  for (const dir of [UI, path.join(ROOT, 'website', 'try')]) {
+    const { calendarTestSummary } = await import(fileUrl(dir, 'lib/format.js'));
+    const at = path.relative(ROOT, dir);
+    // CalDAV: no count, the calendars it found.
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Site visits' }] }),
+      'Connected. Zelos will read 1 calendar: Site visits.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Home' }, { name: 'Work' }, { name: 'Site visits' }] }),
+      'Connected. Zelos will read 3 calendars: Home, Work and Site visits.', at);
+    const seven = Array.from({ length: 7 }, (_, i) => ({ name: `C${i + 1}` }));
+    assert.equal(calendarTestSummary({ ok: true, calendars: seven }),
+      'Connected. Zelos will read 7 calendars: C1, C2, C3, C4, C5 and 2 more.', at);
+    assert.doesNotMatch(calendarTestSummary({ ok: true, calendars: [{ name: 'Site visits' }] }), /appointment/, at);
+    // A .ics link or a file does count, and keeps saying so — 0 included.
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Team' }], events: 2 }), 'Team: 2 appointments found.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{ name: 'Empty' }], events: 0 }), 'Empty: 0 appointments found.', at);
+    // The edges of the list.
+    assert.equal(calendarTestSummary({ ok: true, calendars: [] }), 'Connected.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: [{}] }), 'Connected. Zelos will read 1 calendar: a calendar without a name.', at);
+    const names = (n) => Array.from({ length: n }, (_, i) => ({ name: `C${i + 1}` }));
+    assert.equal(calendarTestSummary({ ok: true, calendars: names(5) }), 'Connected. Zelos will read 5 calendars: C1, C2, C3, C4 and C5.', at);
+    assert.equal(calendarTestSummary({ ok: true, calendars: names(6) }), 'Connected. Zelos will read 6 calendars: C1, C2, C3, C4, C5 and 1 more.', at);
+  }
+  // And the pages use it, not the old line.
+  for (const file of [path.join(UI, 'views', 'settings.js'), path.join(ROOT, 'website', 'try', 'views', 'settings.js')]) {
+    const src = fs.readFileSync(file, 'utf8');
+    assert.match(src, /status\.good\(calendarTestSummary\(result\)\)/, file);
+    assert.doesNotMatch(src, /result\.events \?\? 0/, file);
+  }
+});
+
+test('a discarded draft leaves the page at once, and the count with it (TT-3463)', () => {
+  /* QA, 2026-10-10: after Discard the card stayed on the page, greyed out,
+     and "Replies it wrote for you" still counted it, until something else
+     redrew the view — the handler edited state.board without bumping rev,
+     so the refetch saw no change either. Booted for real; the first refetch
+     after the click returns the OLD list, as a heartbeat that started before
+     the discard landed would. */
+  runAppScenario({
+    beforeBoot: `
+      const pending = (id, subject) => ({ id, state: 'pending', to_email: 'sam@example.com', subject, body: subject + ' reply.', item_id: null });
+      let drafts = [pending('d1', 'The survey'), pending('d2', 'The retainage')];
+      let stale = null;
+      globalThis.edits = [];
+      api.state = async () => ({ items: [], drafts: stale ? (() => { const s = stale; stale = null; return s; })() : drafts, events: [], counts: {}, notes: [], runs: {}, now: '2026-08-12T09:00:00-04:00' });
+      api.updateDraft = async (id, patch) => {
+        if (patch.state === 'discarded') { stale = drafts; drafts = drafts.filter((d) => d.id !== id); }
+        else globalThis.edits.push({ id, ...patch });
+        return { ok: true };
+      };
+    `,
+    scenario: `
+      window.location.hash = '#/owed'; windowEvents.hashchange(); await settle();
+      const subjects = () => plainWalk(root).filter((n) => n.tag === 'h3' && (n.attributes.class || '').includes('draft-subject')).map((n) => textOf(n));
+      const sectionText = () => plainWalk(root).map((n) => n.textContent || '').join(' ');
+      assert.deepEqual(subjects(), ['The survey', 'The retainage']);
+      const card = plainWalk(root).find((n) => n.tag === 'h3' && textOf(n) === 'The survey');
+      let node = card; while (node && !findButton(node, 'Discard')) node = node.parentNode;
+      findButton(node, 'Discard').fire('click');
+      for (let i = 0; i < 4; i += 1) await settle();
+      assert.deepEqual(subjects(), ['The retainage'], 'the discarded card is still (or again) on the page');
+      // Once more, as another heartbeat would.
+      const store = await import(${JSON.stringify(fileUrl(UI, 'lib/store.js'))});
+      await store.refreshBoard(); await settle();
+      assert.deepEqual(subjects(), ['The retainage']);
+      assert.deepEqual(globalThis.edits.filter((e) => e.id === 'd1'), [], 'the discarded draft was written to again');
+      assert.equal(store.openDrafts().length, 1, 'the count still includes the discarded draft');
+    `,
+  });
 });
