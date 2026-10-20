@@ -153,7 +153,7 @@ function desktopUpdatesPanel(bridge) {
 
   async function refresh() {
     apply(await bridge.state());
-    if (!state || state.supported === true) schedulePoll();
+    if (!state || state.supported === true || state.starting === true) schedulePoll();
   }
 
   box.addEventListener('change', async () => {
@@ -172,6 +172,13 @@ function desktopUpdatesPanel(bridge) {
   };
 
   function render() {
+    // `supported` is false until the shell has decided, too; a panel opened in
+    // that moment is not one that cannot update (QA, 2026-10-10, TT-3482).
+    if (state?.starting === true) {
+      const text = problem || 'Reading the update status…';
+      if (status.textContent !== text) status.textContent = text;
+      return;
+    }
     if (state && state.supported !== true) {
       // A build that cannot update itself still gets the manual check, plus
       // the reason it cannot do more.

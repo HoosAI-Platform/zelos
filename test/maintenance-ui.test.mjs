@@ -224,6 +224,25 @@ test('a desktop build without the update key keeps the manual check and says why
   assert.equal(fetched[0][0], '/api/updates/check', 'the manual check is the one the browser uses');
 });
 
+test('Settings opened while the updater is starting waits for it rather than calling the build unable to update', async t => {
+  // (QA, 2026-10-10, TT-3482) `supported` reads false until the shell has
+  // decided, and the panel used to swap in the manual check for good.
+  const document = installDom(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fake = fakeUpdaterBridge({ supported: false, starting: true });
+  window.zelos = { desktop: true, updates: fake.bridge };
+  const { updatesPanel } = await import('../ui/lib/updates.js');
+  const panel = updatesPanel();
+  document.body.appendChild(panel);
+  await settle();
+  assert.match(text(panel), /Reading the update status/);
+  assert.doesNotMatch(text(panel), /only when you press the button/, 'a starting updater was shown as the manual check');
+  fake.set({ supported: true, starting: false });
+  t.mock.timers.tick(1_500);
+  await settle();
+  assert.match(text(panel), /Install updates automatically/, 'the panel stopped asking once it saw `starting`');
+});
+
 test('the desktop update panel keeps saying when the last update did not install', async t => {
   const document = installDom(t);
   const fake = fakeUpdaterBridge({ installProblem: 'Zelos 1.9.0 was not installed, so you are still on 1.8.1.' });
@@ -300,4 +319,23 @@ test('a restart that does not go ahead from the banner says why', async t => {
   await settle();
   assert.deepEqual(errors, ['Zelos stayed open so your draft edits are not lost.']);
   assert.equal(text(slot), '', 'the banner waits for the next launch rather than coming back');
+});
+
+test('a banner asked for while the updater is still starting appears within a second of it being ready', async t => {
+  /* (QA, 2026-10-10, TT-3482) The board asks once on load, which on a reopen
+     is before the shell has restored the kept update; the next ask was 30 s
+     later. While the answer says `starting`, the banner asks again in 1 s. */
+  const document = installDom(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let state = { status: 'idle', banner: '', starting: true };
+  window.zelos = { desktop: true, updates: { state: () => Promise.resolve({ ok: true, state }), snooze: () => Promise.resolve({ ok: true }) } };
+  const { updateBanner } = await import('../ui/lib/update-banner.js');
+  const slot = updateBanner();
+  document.body.appendChild(slot);
+  await settle();
+  assert.equal(text(slot), '');
+  state = { status: 'ready', banner: '1.9.2', starting: false };
+  t.mock.timers.tick(1_000);
+  await settle();
+  assert.match(text(slot), /Zelos 1\.9\.2 is ready to install/, 'the banner waited for the 30-second poll');
 });
