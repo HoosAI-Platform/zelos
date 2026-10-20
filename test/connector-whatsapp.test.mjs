@@ -258,6 +258,106 @@ test('REGRESSION: collect reads a plain .txt export — the binary guard must no
   assert.match(String(refused.error), /NUL bytes/, 'a real binary must still be refused by name');
 });
 
+test('an unchanged export is not read again at all, only stat-ed (TT-3443)', async (t) => {
+  /* QA, 2026-10-10: the signature check came after readExport, so every
+     unchanged export was read in full, and a .zip inflated, on every sweep.
+     Proved without a spy: after the first read the file's bytes are replaced
+     by same-length junk with the same mtime. Its signature is unchanged, so a
+     connector that only stats it reports nothing; one that reads it trips the
+     NUL-byte guard. */
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-whatsapp-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'WhatsApp Chat with Kit Alder.txt');
+  const text = '[9/8/26, 9:14:02 AM] Kit Alder: Retainage schedule is posted\n';
+  fs.writeFileSync(file, text);
+  const when = new Date('2026-09-08T12:00:00Z');
+  fs.utimesSync(file, when, when);
+
+  const collect = (target, cursor) => whatsapp.collect({
+    source: { id: 's_wa', settings: { path: target, yourName: 'Nemo Hale' } },
+    label: 'WhatsApp', cursor, timezone: 'UTC', identityEmail: '',
+    emit() {}, signal: null, log: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+
+  for (const target of [file, dir]) {
+    const first = await collect(target, null);
+    assert.equal(first.parts[0].rows.length, 1, 'the first read should deliver the message');
+
+    fs.writeFileSync(file, Buffer.alloc(Buffer.byteLength(text), 0));
+    fs.utimesSync(file, when, when);
+    const second = await collect(target, first.cursor);
+    assert.ok(second.parts.every((p) => !p.error), `the unchanged export was read again: ${second.parts.map((p) => p.error).join('; ')}`);
+    assert.equal(second.parts.reduce((n, p) => n + p.rows.length, 0), 0);
+    assert.deepEqual(second.cursor.seen, first.cursor.seen, 'the skipped export must stay remembered');
+
+    fs.writeFileSync(file, text);
+    fs.utimesSync(file, when, when);
+  }
+});
+
+test('a folder with nothing new to read is a quiet read, not a failure (TT-3442)', async (t) => {
+  /* QA, 2026-10-10: an unchanged export adds no part, so the "nothing is
+     waiting" note fired on every sweep of a healthy folder, and the sweep
+     stores a note as a failed read. */
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-whatsapp-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const collect = (cursor) => whatsapp.collect({
+    source: { id: 's_wa', settings: { path: dir, yourName: 'Nemo Hale' } },
+    label: 'WhatsApp', cursor, timezone: 'UTC', identityEmail: '',
+    emit() {}, signal: null, log: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+
+  // An empty drop folder is a steady state too (new, or emptied after each
+  // import); doctor is where it is pointed out.
+  const empty = await collect(null);
+  assert.ok(empty.parts.every((p) => !p.note && !p.error), 'an empty folder was reported as a failed read');
+
+  fs.writeFileSync(path.join(dir, 'WhatsApp Chat with Kit Alder.txt'),
+    '[9/8/26, 9:14:02 AM] Kit Alder: Retainage schedule is posted\n');
+  const first = await collect(null);
+  assert.equal(first.parts[0].rows.length, 1);
+
+  const again = await collect(first.cursor);
+  assert.ok(again.parts.every((p) => !p.note && !p.error),
+    `an unchanged folder was reported: ${again.parts.map((p) => p.note || p.error).join('; ')}`);
+  assert.equal(again.parts.reduce((n, p) => n + p.rows.length, 0), 0);
+});
+
+test('doctor says how old a folder\'s exports are, as it does for one file (TT-3444)', async (t) => {
+  /* QA, 2026-10-10: for a folder, check() printed only the count. The age is
+     the one question only doctor can usefully ask. */
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-whatsapp-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const line = '[9/8/26, 9:14:02 AM] Kit Alder: Retainage schedule is posted\n';
+  const daysAgo = (n) => new Date(Date.now() - n * 86_400_000 - 3_600_000);
+  const write = (name, days) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, line);
+    fs.utimesSync(file, daysAgo(days), daysAgo(days));
+    return file;
+  };
+
+  const kit = write('WhatsApp Chat with Kit Alder.txt', 3);
+  const one = await whatsapp.check({ settings: { path: dir } });
+  assert.equal(one.status, 'pass', one.detail);
+  assert.match(one.detail, /1 export · exported 3 days ago/);
+
+  write('WhatsApp Chat - Alder family.txt', 40);
+  const two = await whatsapp.check({ settings: { path: dir } });
+  assert.match(two.detail, /2 exports · newest exported 3 days ago, oldest 40 days ago/);
+
+  // Past the 20 a sweep reads, the ages still cover every export, and the
+  // line says only the newest are read: a stale chat cannot hide behind them.
+  for (let i = 0; i < 20; i += 1) write(`WhatsApp Chat with Crew ${i}.txt`, 2);
+  write('WhatsApp Chat with Old Supplier.txt', 400);
+  const many = await whatsapp.check({ settings: { path: dir } });
+  assert.match(many.detail, /23 exports · newest exported 2 days ago, oldest 400 days ago, and Zelos reads only the newest 20/);
+
+  // The single file it always covered still says so.
+  const single = await whatsapp.check({ settings: { path: kit } });
+  assert.match(single.detail, /exported 3 days ago/);
+});
+
 test('the manifest says out loud that this is an archive, not a connection', () => {
   /* The most important line in the connector is not code. WhatsApp offers no
      way to read a personal account live, so a user who reads "WhatsApp" in a

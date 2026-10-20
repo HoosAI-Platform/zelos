@@ -925,6 +925,20 @@ async function inflateTail(handle, at, compSize, label) {
 }
 
 /**
+ * The stat an export's signature is made from, without reading a byte of it.
+ * `lstat`, so a symlink is never followed here either: it is not a file, so it
+ * goes on to readExport, which refuses it as it always has. Null if it vanished.
+ */
+async function statExport(file) {
+  try {
+    return await fs.lstat(file);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
  * One export file -> its text and the name of the chat it holds.
  *
  * A file over the ceiling is read FROM THE END. A chat log only ever grows at
@@ -1024,7 +1038,14 @@ async function listExports(target) {
   // Newest export first: if a folder holds more than one sweep's worth, the
   // chats somebody exported today are the ones they want to see today.
   found.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return { files: found.slice(0, MAX_CHATS).map((f) => f.full), folder: true, total: found.length };
+  return {
+    files: found.slice(0, MAX_CHATS).map((f) => f.full),
+    folder: true,
+    total: found.length,
+    // Over EVERY export found, not only the ones read, for doctor (TT-3444).
+    newestMs: found.length ? found[0].mtimeMs : null,
+    oldestMs: found.length ? found[found.length - 1].mtimeMs : null,
+  };
 }
 
 /** Several sentences, joined and capped so `sources[].error` never truncates one. */
@@ -1137,8 +1158,24 @@ export default {
       if (ctx?.signal?.aborted) break;
       const base = path.basename(file);
 
+      /* AN UNCHANGED EXPORT IS NOT RE-READ, and this is where the connector's
+         honesty about itself is enforced rather than merely stated: an archive
+         that has not changed has nothing new in it, so the source reports a
+         successful read of nothing instead of re-reading the same file every
+         thirty minutes. The check is made from a stat, BEFORE the read: it
+         used to come after readExport, so every unchanged export was read in
+         full, and every .zip inflated, on every sweep (QA, 2026-10-10,
+         TT-3443). */
       let read;
       try {
+        const stat = await statExport(file);
+        // Vanished between the listing and the stat. Next sweep, or never.
+        if (!stat) continue;
+        const sig = signature(base, stat);
+        if (stat.isFile() && seen.has(sig)) {
+          kept.push({ sig, mtimeMs: stat.mtimeMs });
+          continue;
+        }
         read = await readExport(file);
       } catch (err) {
         if (err instanceof ExportError) {
@@ -1151,13 +1188,10 @@ export default {
       // Vanished between the listing and the open. Next sweep, or never.
       if (!read) continue;
 
+      // Signed from the stat taken with the read, so a file that changed
+      // between the two is remembered as what was actually parsed.
       const sig = signature(base, read.stat);
       kept.push({ sig, mtimeMs: read.mtimeMs });
-      /* AN UNCHANGED EXPORT IS NOT RE-READ, and this is where the connector's
-         honesty about itself is enforced rather than merely stated: an archive
-         that has not changed has nothing new in it, so the source reports a
-         successful read of nothing instead of re-parsing the same file every
-         thirty minutes and republishing the same rows. */
       if (seen.has(sig)) continue;
       fresh += 1;
 
@@ -1213,12 +1247,14 @@ export default {
     }
 
     if (!parts.length) {
-      parts.push({
-        label: '',
-        rows: [],
-        error: null,
-        note: listing.folder ? `No .txt or .zip export is waiting in ${target}.` : null,
-      });
+      /* A successful read of nothing, never a note: the sweep stores a note
+         as a failed read. Every unchanged export adds no part, so "No export
+         is waiting" fired on every sweep of a healthy folder (QA, 2026-10-10,
+         TT-3442), and an empty drop folder (a new one, or one emptied after
+         each import) is a steady state too. core/connectors/folder.mjs says
+         nothing in the same case; this source's check() still warns, when
+         somebody asks, that a folder holds no export. */
+      parts.push({ label: '', rows: [], error: null, note: null });
     }
 
     ctx.emit(`${ctx.label}: ${total} message${total === 1 ? '' : 's'} from ${fresh} export${fresh === 1 ? '' : 's'}`,
@@ -1280,8 +1316,11 @@ export default {
     /* Whole days, floored, from the file's mtime. An export is written once and
        never touched, so its mtime IS the moment the user tapped Export — the
        one fact that answers "is what I am looking at current". */
-    const ageDays = Math.max(0, Math.floor((Date.now() - stat.mtimeMs) / 86_400_000));
-    const aged = ageDays === 0 ? 'today' : ageDays === 1 ? 'yesterday' : `${ageDays} days ago`;
+    const agoFrom = (mtimeMs) => {
+      const days = Math.max(0, Math.floor((Date.now() - mtimeMs) / 86_400_000));
+      return days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+    };
+    const aged = agoFrom(stat.mtimeMs);
 
     if (stat.isDirectory()) {
       let listing;
@@ -1302,9 +1341,20 @@ export default {
           action: 'Export a chat from WhatsApp — the chat → its name → Export chat → Without media — and save it in there.',
         };
       }
+      /* The age is the reason this check exists, and a folder needs it as much
+         as a single file: it used to print only the count (QA, 2026-10-10,
+         TT-3444). Newest AND oldest, because one fresh export must not make a
+         folder look current while another chat in it stopped in April — and
+         over every export in the folder, saying so when the sweep reads only
+         the newest few, so a chat Zelos never reads cannot hide behind them. */
+      const { newestMs, oldestMs } = listing;
+      const when = newestMs === null ? ''
+        : agoFrom(newestMs) === agoFrom(oldestMs) ? ` · exported ${agoFrom(newestMs)}`
+          : ` · newest exported ${agoFrom(newestMs)}, oldest ${agoFrom(oldestMs)}`;
+      const read = n > listing.files.length ? `, and Zelos reads only the newest ${listing.files.length}` : '';
       return {
         status: 'pass',
-        detail: `${target} · ${n} export${n === 1 ? '' : 's'} · these are archives: nothing that happened after each `
+        detail: `${target} · ${n} export${n === 1 ? '' : 's'}${when}${read} · these are archives: nothing that happened after each `
           + 'one was made is in Zelos until you export that chat again.',
       };
     }

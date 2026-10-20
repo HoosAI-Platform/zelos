@@ -715,10 +715,11 @@ not re-read at all.
   Two locale-blind facts do the heavy lifting: a line that does not begin with a
   timestamp is a continuation of the one above it, and a system notice has no
   "Sender: " prefix because nobody sent it.
-- `zelos doctor` prints how many days ago the export was made. That is the
-  question only it can usefully ask: a source working perfectly and reading a
-  four-month-old file produces no error at all — the sweep is green, the rows
-  are real, and the conversation stopped in April.
+- `zelos doctor` prints how many days ago the export was made — for a folder,
+  the newest and the oldest export in it, and how many of them the sweep reads.
+  That is the question only it can usefully ask: a source working perfectly and
+  reading a four-month-old file produces no error at all — the sweep is green,
+  the rows are real, and the conversation stopped in April.
 
 ---
 
