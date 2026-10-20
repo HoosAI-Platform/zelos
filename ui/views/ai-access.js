@@ -949,7 +949,9 @@ export function aiAccessPanel() {
         el('div', { class: 'banner banner-warn', role: 'status' }, [
           el('h2', { class: 'banner-title', text: 'This panel could not read its own settings' }),
           el('p', { class: 'banner-detail', text: `${loadError} — until that is answered, treat sharing as unknown rather than off.` }),
-          el('div', { class: 'banner-actions' }, button('Try again', { class: 'btn quiet', onClick: load })),
+          // Wrapped, not handed over: a bare `load` would take the click event
+          // as the log window (QA, 2026-10-10, TT-3440).
+          el('div', { class: 'banner-actions' }, button('Try again', { class: 'btn quiet', onClick: () => load() })),
         ]),
       ];
     }

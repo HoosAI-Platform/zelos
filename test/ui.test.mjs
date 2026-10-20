@@ -6865,6 +6865,37 @@ test('the spawn block round-trips a Windows path with spaces and carries Node mo
   assert.equal(findButton(moving, 'Copy'), undefined, 'a block that will break can still be copied');
 });
 
+test('"Try again" on the sharing panel\'s error banner reads the ordinary window, not the click (TT-3440)', async (t) => {
+  withPlainDom(t);
+  const asked = [];
+  let fail = true;
+  const aiPayload = {
+    enabled: false, scopes: {}, effectiveScopes: {}, maxRows: 50, tokens: [], access: [], accessMore: true, accessMax: 500,
+    client: { command: '/usr/local/bin/node', args: ['/opt/zelos/bin/zelos', 'mcp'], home: '/tmp/zelos-home', httpUrl: 'http://127.0.0.1:7777/api/mcp' },
+    scopeInfo: [{ id: 'board', label: 'Board', summary: 'Items.', tools: ['zelos_board'] }],
+  };
+  globalThis.fetch = async (reqPath) => {
+    if (reqPath === '/api/ai' || reqPath.startsWith('/api/ai?')) {
+      asked.push(reqPath);
+      if (fail) return { ok: false, status: 500, text: async () => JSON.stringify({ error: 'the database is locked' }) };
+      return { ok: true, status: 200, text: async () => JSON.stringify(aiPayload) };
+    }
+    throw new Error(`unexpected GET ${reqPath}`);
+  };
+  t.after(() => { delete globalThis.fetch; });
+  // A copy of its own: the panel's phase outlives a rebuild, so one another
+  // test has already loaded would never show the error banner.
+  const access = await import(`${fileUrl(UI, 'views/ai-access.js')}?retry-test`);
+  const panel = access.aiAccessPanel();
+  await settle();
+  assert.match(onScreen(panel), /This panel could not read its own settings/);
+  fail = false;
+  findButton(panel, 'Try again').fire('click');
+  await settle();
+  assert.deepEqual(asked, ['/api/ai', '/api/ai'], 'the retry asked for a log window nobody chose');
+  assert.ok(!findButton(panel, 'Show fewer'), '"Show fewer" is offered for a window nobody widened');
+});
+
 /* ------------------------------------------------ 8. "Stuck? Ask Claude" */
 
 /**
