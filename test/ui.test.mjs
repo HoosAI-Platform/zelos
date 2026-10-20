@@ -3943,9 +3943,9 @@ for (const { sub, find, typed, event = 'input', sent } of TAB_TO_SAVE_PANELS) {
       await checkFinishes();
       assert.equal(main().firstChild, view, 'a redraw while a field has focus must queue, not run');
 
-      // The nearest ancestor with a role is the tabpanel (the plain DOM's
-      // closest() matches attribute names, not values).
-      const save = plainWalk(control.closest('[role]')).filter(n => n.tag === 'button' && textOf(n) === 'Save').pop();
+      // The panel is the editing region around the control (not the nearest
+      // role: Schedule's hour pickers sit in a role="group", TT-3421).
+      const save = plainWalk(control.closest('[data-editing-region]')).filter(n => n.tag === 'button' && textOf(n) === 'Save').pop();
       assert.ok(save, 'the panel has a Save button');
       await tabTo(save);
       assert.equal(main().firstChild, view, 'Tab to Save must not flush the queued redraw');
@@ -6307,6 +6307,32 @@ test('the schedule speaks am/pm and stores the 24-hour numbers config validates'
   const saved = calls.find((c) => c.method === 'PUT' && c.path === '/api/config').body.sweep;
   assert.deepEqual(saved.activeHours, [8, 21], 'the pickers did not store the 24-hour numbers');
   assert.equal(saved.intervalMinutes, 30);
+});
+
+test('the schedule\'s two hour pickers each have a name, in a group called "Between" (TT-3421)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({ calls: [] });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [], sweep: { intervalMinutes: 30, activeHours: [6, 23], auto: true } };
+  store.state.health = { model: { configured: false } };
+  store.state.configErrors = [];
+  const view = settings.renderSettings({ sub: 'sweep', navigate() {}, rerender() {} });
+  const nodes = plainWalk(view);
+  const idOf = (n) => n.id || n.getAttribute('id');
+  // A <label for> names only the control it points at; aimed at the div
+  // around the two selects, it named neither of them.
+  for (const label of nodes.filter((n) => n.tag === 'label' && n.getAttribute('for'))) {
+    const target = nodes.find((n) => idOf(n) === label.getAttribute('for'));
+    assert.ok(target && ['input', 'select', 'textarea'].includes(target.tag), `“${label.textContent}” is a label for a ${target?.tag}, which it cannot name`);
+  }
+  const selects = nodes.filter((n) => n.tag === 'select');
+  assert.equal(selects.length, 2);
+  assert.deepEqual(selects.map((n) => n.getAttribute('aria-label')), ['Start hour', 'End hour']);
+  const group = nodes.find((n) => n.getAttribute('role') === 'group' && selects.every((s) => plainWalk(n).includes(s)));
+  assert.ok(group, 'the two pickers are not in a group');
+  assert.equal(nodes.find((n) => idOf(n) === group.getAttribute('aria-labelledby'))?.textContent, 'Between');
 });
 
 test('Privacy refuses a blank or 0 cap instead of saving the default (TT-3424)', async (t) => {

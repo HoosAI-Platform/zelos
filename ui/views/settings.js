@@ -3358,6 +3358,17 @@ function sweepPanel() {
   const fromSelect = select(HOUR_CHOICES, { value: String(cfg.activeHours?.[0] ?? 6) });
   const toSelect = select(END_HOUR_CHOICES, { value: String(cfg.activeHours?.[1] ?? 23) });
   let auto = cfg.auto !== false;
+  /* field() pointed a <label for> at the div around the two pickers, which
+     names nothing, so each select read as a bare "6 am, combobox" (QA,
+     2026-10-10, TT-3421). Now "Between" names a group and each picker has
+     its own name. */
+  fromSelect.setAttribute('aria-label', 'Start hour');
+  toSelect.setAttribute('aria-label', 'End hour');
+  const betweenId = nextId('f');
+  const betweenField = el('div', { class: 'field', role: 'group', 'aria-labelledby': betweenId }, [
+    el('span', { class: 'field-label', id: betweenId, text: 'Between' }),
+    el('div', { class: 'row-inline' }, [fromSelect, el('span', { text: 'and' }), toSelect]),
+  ]);
 
   // An editing region, as on You (TT-3465): Save is in a plain div.
   return el('div', { class: 'panel', 'data-editing-region': true }, [
@@ -3365,7 +3376,7 @@ function sweepPanel() {
     checkbox('Check my mail automatically', { checked: auto, onChange: (v) => { auto = v; } }),
     el('div', { class: 'grid-2' }, [
       field('Check my mail every (minutes)', intervalInput),
-      field('Between', el('div', { class: 'row-inline' }, [fromSelect, el('span', { text: 'and' }), toSelect])),
+      betweenField,
     ]),
     el('div', { class: 'row-inline' }, [
       button('Save', {
