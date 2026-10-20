@@ -7243,6 +7243,49 @@ test('with sharing off, the summary counts "boxes", and one box "does" nothing (
   assert.match(onScreen(panel), /The switch is off, so the 1 box ticked below does nothing until you switch it on\./);
 });
 
+test('ticking a box announces "your drafts are", not "is", now readable (TT-3498)', async (t) => {
+  withPlainDom(t);
+  const base = plainFetch({});
+  const scopeInfo = [
+    { id: 'board', label: 'Board', summary: 'Items.', tools: ['zelos_board'] },
+    { id: 'drafts', label: 'Drafts', summary: 'Drafts.', tools: ['zelos_drafts'] },
+    { id: 'people', label: 'People', summary: 'People.', tools: ['zelos_people'] },
+  ];
+  let scopes = {};
+  const payload = () => ({ enabled: true, scopes, effectiveScopes: scopes, maxRows: 50, tokens: [], access: [], accessMore: false, accessMax: 500, client: null, scopeInfo });
+  globalThis.fetch = async (reqPath, init = {}) => {
+    if (reqPath === '/api/ai' || reqPath.startsWith('/api/ai?')) {
+      if (init.method === 'PUT') scopes = { ...scopes, ...JSON.parse(init.body).scopes };
+      return { ok: true, status: 200, text: async () => JSON.stringify(payload()) };
+    }
+    return base(reqPath, init);
+  };
+  t.after(() => { delete globalThis.fetch; });
+  const access = await import(fileUrl(UI, 'views/ai-access.js'));
+  const panel = access.aiAccessPanel();
+  await settle();
+
+  const boxFor = (label) => {
+    const tag = plainWalk(panel).find((n) => n.tag === 'label' && /^Drafts|^People|^Board/.test(textOf(n)) && textOf(n).startsWith(label));
+    return plainWalk(panel).find((n) => n.tag === 'input' && n.attributes.id === tag.attributes.for);
+  };
+  const toggle = async (label, on) => {
+    const box = boxFor(label);
+    box.checked = on;
+    box.fire('change');
+    await settle();
+    await settle();
+  };
+  await toggle('Drafts', true);
+  assert.match(anywhere(panel), /Your drafts are now readable\./);
+  await toggle('People', true);
+  assert.match(anywhere(panel), /Your contacts are now readable\./);
+  await toggle('Drafts', false);
+  assert.match(anywhere(panel), /Your drafts are no longer readable\./);
+  await toggle('Board', true);
+  assert.match(anywhere(panel), /Your board is now readable\./);
+});
+
 /* ------------------------------------------------ 8. "Stuck? Ask Claude" */
 
 /**
