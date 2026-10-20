@@ -2,6 +2,10 @@ import { el, button, replace } from './dom.js';
 
 /** How often the board asks the shell whether an update is waiting. Local IPC only. */
 const POLL_MS = 30_000;
+/** How often while the updater is still starting: restoring a kept update
+ *  takes about a second, and the banner should follow it, not 30 s later
+ *  (QA, 2026-10-10, TT-3482). */
+const STARTING_POLL_MS = 1_000;
 const VERSION = /^\d+\.\d+\.\d+$/;
 
 /**
@@ -68,13 +72,15 @@ export function updateBanner({ onError = () => {}, onChange = () => {} } = {}) {
   };
 
   async function refresh() {
+    let starting = false;
     try {
       const answer = await bridge.state();
+      starting = answer?.ok === true && answer.state?.starting === true;
       const version = answer?.ok && typeof answer.state?.banner === 'string' && VERSION.test(answer.state.banner) ? answer.state.banner : '';
       if (!busy) show(version);
     } catch { /* the next poll tries again */ }
     clearTimeout(poll);
-    poll = setTimeout(refresh, POLL_MS);
+    poll = setTimeout(refresh, starting ? STARTING_POLL_MS : POLL_MS);
     poll?.unref?.(); // only under Node, in the tests; a browser timer is a number
   }
 

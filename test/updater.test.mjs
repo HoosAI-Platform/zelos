@@ -368,8 +368,10 @@ describe('when a build cannot update itself', () => {
         setTimer: timers.setTimer, clearTimer: timers.clearTimer,
         ...rest,
       });
+      assert.equal(updater.state().starting, true, 'undecided is not the same as no');
       const state = await updater.start();
       assert.equal(state.supported, false);
+      assert.equal(state.starting, false, 'a build that cannot update has finished starting');
       assert.match(state.reason, reason);
       assert.equal(timers.timers.length, 0, 'no schedule is armed');
       assert.equal((await updater.checkNow()).status, 'idle');
@@ -378,6 +380,21 @@ describe('when a build cannot update itself', () => {
       assert.equal(updater.install(), false);
     });
   }
+
+  it('finishes starting even when deciding support throws', async () => {
+    // (QA, 2026-10-10, TT-3482) The board asks again every second while
+    // `starting` is true, so a start that threw must not leave it set.
+    const changes = [];
+    const updater = createUpdater({
+      currentVersion: '1.8.1', platform: 'darwin', arch: 'arm64', isPackaged: true,
+      settingsFile: path.join(sandbox, 'updates.json'), downloadDir: path.join(sandbox, PENDING_DIR), publicKeys: [KEY.x],
+      mac: { bundlePath: '/Applications/Zelos.app', canReplace: () => { throw new Error('stat failed'); }, extractZip: async () => {}, readBundleInfo: async () => ({}), copyApp: async () => {}, launchSwap: () => {} },
+      onChange: (state) => changes.push(state.starting),
+    });
+    await assert.rejects(updater.start(), /stat failed/);
+    assert.equal(updater.state().starting, false);
+    assert.equal(changes.at(-1), false, 'the end of starting was never announced');
+  });
 
   it('refuses a download folder it does not own, because it empties it', () => {
     for (const platform of ['win32', 'darwin']) {
@@ -700,6 +717,26 @@ describe('the Windows updater', () => {
     h.timers.fire(20_000);
     await until(() => h.updater.state().status === 'error', 'the timeout');
     assert.match(h.updater.state().error, /took too long/);
+  });
+
+  it('says it is starting until a kept update has been restored, and not after', async () => {
+    // (QA, 2026-10-10, TT-3482) The board's first ask lands while the kept
+    // installer is re-hashed; `starting` is what tells it to ask again soon.
+    const fx = fixture();
+    const first = windowsUpdater(fx);
+    await first.updater.start();
+    await first.updater.checkNow();
+    await until(() => first.updater.state().status === 'ready', 'the download');
+    first.updater.stop();
+
+    const again = windowsUpdater(fx);
+    assert.equal(again.updater.state().starting, true);
+    const started = again.updater.start();
+    assert.equal(again.updater.state().starting, true, 'starting cleared before the kept update was restored');
+    const state = await started;
+    assert.equal(state.starting, false);
+    assert.equal(state.status, 'ready');
+    assert.equal(state.banner, '1.9.0', 'the banner is offered the moment starting ends');
   });
 
   it('reports an installer that will not start, so the shell can still exit', async () => {
