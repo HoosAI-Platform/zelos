@@ -1544,6 +1544,21 @@ test('every path in the SPEC.md layout exists', () => {
   assert.ok(!spec.includes('assets/fonts'), 'SPEC.md still names assets/fonts, which does not exist');
 });
 
+test('docs/INSTALL.md recommends only the Windows installers a release publishes', () => {
+  /* QA, 2026-10-09 (TT-3478): INSTALL.md told a Windows user who was not sure of
+     their machine to take "the combined installer", in three places. A release
+     publishes only the per-architecture installers that scripts/prepare-release.mjs
+     lists, so the advice pointed at a file that is not on the release page. */
+  const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const prepare = fs.readFileSync(path.join(ROOT, 'scripts', 'prepare-release.mjs'), 'utf8');
+  const published = [...prepare.matchAll(/`Zelos-\$\{version\}-(setup-[\w-]+)\.exe`/g)].map((m) => m[1]);
+  assert.deepEqual(published.sort(), ['setup-arm64', 'setup-x64'], 'prepare-release publishes a different set of Windows installers now — revisit INSTALL.md');
+  assert.doesNotMatch(install, /combined\s+installer/i, 'INSTALL.md points at a combined installer no release publishes');
+  for (const [, name] of install.matchAll(/Zelos-[\d.]+-(setup-[\w-]+)\.exe/g)) {
+    assert.ok(published.includes(name), `INSTALL.md names a ${name}.exe that prepare-release does not publish`);
+  }
+});
+
 test('docs/INSTALL.md leads each first-open warning with what to click, in plain words', () => {
   const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
 

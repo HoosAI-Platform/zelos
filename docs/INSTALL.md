@@ -244,9 +244,11 @@ Zelos-1.8.1-setup-arm64.exe    Windows on ARM
 ```
 
 Windows also gets a third installer from the same run, carrying both
-architectures in one larger file; take it if you are not sure which machine you
-are on. (That is why the workflow collects `*setup*.exe` rather than two fixed
-names.)
+architectures in one larger file. (That is why the workflow collects
+`*setup*.exe` rather than two fixed names.) A release does not publish it, so
+take the installer for your machine; step 1 of
+[Installing on Windows](#installing-on-windows--and-what-you-will-actually-see)
+says how to tell.
 
 A run artifact is not a public download link. GitHub hands artifacts only to
 signed-in users, and deletes them once the repository's retention window is up —
@@ -379,9 +381,10 @@ reasonable to click past *this* one is that you can read the source and build
 the installer yourself.
 
 1. **Take the installer that matches your machine.**
-   `Zelos-1.8.1-setup-x64.exe` for an ordinary PC, `-arm64` for Windows on ARM,
-   or the combined installer if you are not sure. The wrong one either runs
-   slowly under emulation or does not run at all.
+   `Zelos-1.8.1-setup-x64.exe` for an ordinary PC, `-arm64` for Windows on ARM.
+   If you are not sure, **Settings → System → About** says which under
+   *System type*: an *x64-based processor* or an *ARM-based processor*. The
+   wrong one either runs slowly under emulation or does not run at all.
 2. **Your browser may refuse to keep the file.** Edge says *"…setup.exe was
    blocked because it could harm your device"*; Chrome says *"…isn't commonly
    downloaded"*. Open the downloads list, click the **…** beside the file, and
@@ -542,8 +545,8 @@ directly.
 - **Architecture matters on both platforms.** Take the `arm64` build for Apple
   Silicon and Windows on ARM, and the `x64` build for Intel Macs and ordinary
   PCs. The wrong one either runs slowly under emulation or does not run at all.
-  Windows is the one place you can dodge the question, by taking the combined
-  installer instead; it is larger because it contains both.
+  On Windows, **Settings → System → About** names the processor under
+  *System type*.
 
 ---
 
