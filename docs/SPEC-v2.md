@@ -118,7 +118,7 @@ without saying this is sending a reader to an error.
 
 ---
 
-## 3. OAuth, built but not enabled
+## 3. OAuth: wired for mail, with no client ids shipped
 
 Researched and settled — do not re-litigate:
 
@@ -131,16 +131,20 @@ Researched and settled — do not re-litigate:
 
 So: build `core/sources/oauth.mjs` implementing **OAuth 2.0 + PKCE with a loopback redirect** —
 the correct flow for a desktop app, and the one that needs no client secret. Refresh tokens go in
-the secret store. **Do not wire Gmail.** IMAP stays the supported mail path.
+the secret store. **Do not wire Gmail.** IMAP stays the supported mail path. (Since reversed:
+Gmail sign-in is wired, over IMAP with XOAUTH2 — `docs/OAUTH.md` § Why sign-in has the decision.)
 
-**Status: the module exists (989 lines, tested) and none of the wiring does.** Nothing in `core/`,
-`ui/`, `desktop/` or `zelos.mjs` imports it; `DEFAULTS` in `core/config.mjs` has no `oauth` key;
-there is no Settings surface (`grep -rin oauth ui/` returns nothing) and therefore no note in it;
-and `CALENDAR_KINDS` is `['ics','caldav','file']`, so there is no reader a token could feed. It is
-excluded from the published tarball for that reason. The remaining "config flag with a blank client
-id" framing is what this section *asked for*, not what is there — see `docs/OAUTH.md`, which states
-the gap plainly so that nobody buys a domain and waits out a ten-day review expecting a working
-button at the end.
+**Status: wired end to end for mail; no client ids ship.** Settings → Email offers **Sign in with
+Google** and **Sign in with Microsoft**. Google is Authorization Code + PKCE back to
+`GET /oauth/callback` on the Zelos port; Microsoft is the device code (`core/sources/imap.mjs` § 6);
+either grant is used as XOAUTH2 over IMAP. What is missing is the registrations:
+`DEFAULT_OAUTH_CLIENTS` in `core/sources/oauth.mjs` is blank, so each sign-in needs the user's own
+Google Cloud or Entra client id, pasted into the sign-in panel or set as
+`config.oauth.clients.<provider>`, and `POST /api/mail/guess` answers `clientReady: false` until
+one exists. That bites hardest on personal Microsoft accounts (Outlook.com, Hotmail, Live):
+Microsoft accepts no password from a mail app there, so without a registration they have no way
+in at all. Calendars do not use OAuth: `CALENDAR_KINDS` is still `['ics','caldav','file']`.
+`docs/OAUTH.md` has both flows and what shipping Zelos's own registrations takes.
 
 ---
 
