@@ -28,7 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { DEFAULTS, loadConfig, paths, validateConfig } from './config.mjs';
+import { DEFAULTS, loadConfig, paths, validateConfig, PRIVACY_CLOSED } from './config.mjs';
 import { SCHEMA_VERSION, hasFts5 } from './db.mjs';
 import { backend as secretBackend, getSecret as readSecret, setSecret as writeSecret, deleteSecret as removeSecret } from './secrets.mjs';
 import { readModelKey, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
@@ -349,8 +349,16 @@ function checkConfig(config, configFile, loadError) {
       `Look at ${configFile}. If it is damaged, move it aside — Zelos writes a fresh one with the defaults on the next launch.`,
     );
   }
-  const { ok, errors } = validateConfig(config);
-  if (!ok) {
+  // A privacy section that is not an object is put back CLOSED by loadConfig
+  // (TT-3424), and the closed values are below validateConfig's ranges on
+  // purpose. Those errors are that repair, explained below, not a second fault.
+  const malformed = fs.existsSync(configFile) ? malformedSectionsOnDisk(configFile) : [];
+  const p = config?.privacy;
+  const privacyClosed = malformed.includes('privacy')
+    || (p && Object.keys(PRIVACY_CLOSED).every((k) => p[k] === PRIVACY_CLOSED[k]));
+  const errors = validateConfig(config).errors
+    .filter((e) => !(privacyClosed && String(e.path).startsWith('privacy')));
+  if (errors.length) {
     const shown = errors.slice(0, 6).map((e) => `${e.path || '(root)'} ${e.message}`).join('; ');
     const more = errors.length > 6 ? ` (and ${errors.length - 6} more)` : '';
     return check(
@@ -366,13 +374,22 @@ function checkConfig(config, configFile, loadError) {
       'Nothing to do: the first change you save in Settings creates it.',
     );
   }
-  const malformed = malformedSectionsOnDisk(configFile);
   if (malformed.length) {
     const one = malformed.length === 1;
+    const closed = malformed.includes('privacy')
+      ? ' Privacy is the exception: it was set to its most private reading — no message bodies or event notes, one item per check — until you save Settings → Privacy again.'
+      : '';
     return check(
       'config', label, 'warn',
-      `${configFile} loads, but ${malformed.join(', ')} ${one ? 'is not an object' : 'are not objects'} in the file — Zelos replaced ${one ? 'it' : 'them'} with the built-in defaults to get started, and whatever ${one ? 'that section' : 'those sections'} held is gone.`,
-      `Open ${configFile} and give ${malformed.map((s) => `"${s}"`).join(', ')} ${one ? 'a JSON object' : 'JSON objects'} — "${malformed[0]}": {} is a valid one — then restart Zelos and set ${one ? 'that section' : 'those sections'} again in Settings. Saving anything in Settings also rewrites the file with the defaults in place, which stops the warning but does not bring the old values back.`,
+      `${configFile} loads, but ${malformed.join(', ')} ${one ? 'is not an object' : 'are not objects'} in the file — Zelos replaced ${one ? 'it' : 'them'} with the built-in defaults to get started, and whatever ${one ? 'that section' : 'those sections'} held is gone.${closed}`,
+      `Open ${configFile} and give ${malformed.map((s) => `"${s}"`).join(', ')} ${one ? 'a JSON object' : 'JSON objects'} — "${malformed[0]}": {} is a valid one — then restart Zelos and set ${one ? 'that section' : 'those sections'} again in Settings. Saving anything in Settings also rewrites the file with ${closed ? 'the defaults (and privacy\'s most private values)' : 'the defaults'} in place, which stops the warning but does not bring the old values back.`,
+    );
+  }
+  if (privacyClosed) {
+    return check(
+      'config', label, 'warn',
+      `${configFile} loads, but privacy is at its most private reading — no message bodies or event notes go to the AI, and one item per check — because the section was unreadable and was put back closed.`,
+      'Open Settings → Privacy, choose what to send, and press Save.',
     );
   }
   return check('config', label, 'pass', `${configFile} · valid`);

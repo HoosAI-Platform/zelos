@@ -45,6 +45,7 @@ import {
   BUCKETS,
 } from './db.mjs';
 import { log } from './log.mjs';
+import { privacyLimits } from './config.mjs';
 
 const tlog = log.child('[triage]');
 
@@ -713,7 +714,7 @@ function renderMessage(msg, ctx, level, bodyChars) {
     // Falling back to the body when no snippet was stored is only allowed when
     // bodies may be sent at all — otherwise the fallback is the leak.
     const source = msg.snippet || (ctx.sendBodies ? msg.body : '');
-    const snippet = clean(source, SNIPPET_CHARS);
+    const snippet = clean(source, ctx.snippetChars);
     if (snippet) parts.push(`  snippet: ${snippet.replace(/\n+/g, ' ')}`);
   }
   if (level === 'rich' && bodyChars >= MIN_BODY_CHARS) {
@@ -933,8 +934,9 @@ function applyItemCap(counts, maxItems) {
  * arrives back on the board as something brand new.
  *
  * `privacy.sendBodies:false` is honoured literally: no message body text is
- * placed in the prompt at all, only headers and the stored ≤240-character
- * snippet, and event descriptions are held to the same length.
+ * placed in the prompt at all, only headers and the stored snippet (at most
+ * 240 characters, and never more than `privacy.bodyChars`), and event
+ * descriptions are left out entirely.
  */
 export function buildSweepPrompt({
   identity = {},
@@ -948,11 +950,9 @@ export function buildSweepPrompt({
   budgetChars = DEFAULT_CONTEXT_CHARS,
 } = {}) {
   const nowMs = instant(now) ?? Date.now();
-  const sendBodies = privacy.sendBodies !== false;
-  const bodyChars = Number.isFinite(privacy.bodyChars) ? Math.max(0, Math.floor(privacy.bodyChars)) : 4000;
-  const maxItems = Number.isFinite(privacy.maxItemsPerSweep)
-    ? Math.max(1, Math.floor(privacy.maxItemsPerSweep))
-    : 150;
+  const limits = privacyLimits(privacy);
+  const { sendBodies, bodyChars } = limits;
+  const maxItems = limits.maxItemsPerSweep;
   const budget = Number.isFinite(budgetChars) && budgetChars > 2000
     ? Math.floor(budgetChars)
     : DEFAULT_CONTEXT_CHARS;
@@ -969,7 +969,11 @@ export function buildSweepPrompt({
     for (const a of m.to) if (a?.email) correspondents.add(String(a.email).toLowerCase());
   }
 
-  const ctx = { nowMs, userEmail, threads, correspondents, sendBodies, todayKey: dayKey(now) };
+  /* "Characters of each email sent to the AI" holds the snippet too. It used
+     to be a fixed 240, so a setting of 200–239 dropped the body block and
+     still sent 240 characters of every email (QA, 2026-10-10, TT-3447). */
+  const snippetChars = Math.min(SNIPPET_CHARS, bodyChars);
+  const ctx = { nowMs, userEmail, threads, correspondents, sendBodies, snippetChars, todayKey: dayKey(now) };
 
   // Decided once, here, because `recapVendor` needs the thread index and the
   // correspondent set that were only just built — and because the answer is
@@ -1116,7 +1120,9 @@ export function buildSweepPrompt({
   const eventEntries = eventRows.map((e) => ({
     text: {
       bare: renderEvent(e, ctx, 'bare', 0),
-      plain: renderEvent(e, ctx, 'plain', sendBodies ? Math.max(SNIPPET_CHARS, Math.min(bodyChars, 600)) : 0),
+      // Held under the same cap as an email's text: a description is body
+      // content (see renderEvent), never more than 600 characters of it.
+      plain: renderEvent(e, ctx, 'plain', sendBodies ? Math.min(bodyChars, 600) : 0),
     },
   }));
   const eventFit = fitSection(eventEntries, eventAllowance);
@@ -1162,18 +1168,22 @@ export function buildSweepPrompt({
       bits.push(`${fit.kept.length} of ${total} shown in full, highest-ranked first; ${fit.keysNamed} more by key alone`);
       if (fit.keysMissing) bits.push(`${fit.keysMissing} did not fit even as keys`);
     } else if (fit.kept.length < total) bits.push(`${fit.kept.length} of ${total} shown, highest-ranked first`);
-    if (bodies === 'omitted') bits.push(`${noun} omitted — the privacy setting says only headers and snippets may be sent`);
-    else if (bodies === 'nofit') bits.push(`${noun} omitted to fit the context window — snippets only`);
+    if (bodies === 'omitted') {
+      bits.push(`${noun} omitted — the privacy setting says only headers${snippetChars > 0 ? ' and snippets' : ''} may be sent`);
+    } else if (bodies === 'nofit') bits.push(`${noun} omitted to fit the context window — snippets only`);
     else if (typeof bodies === 'number' && bodies > 0 && bodies < bodyChars) {
       bits.push(`${noun} cut to the first ${bodies} characters`);
     }
     if (fit.level === 'bare' && fit.kept.length) bits.push('snippets dropped, headers only');
     if (bits.length) truncation.push(`  ${label}: ${bits.join('; ')}.`);
   };
+  // A cap below a useful body is the privacy setting's doing, not the context
+  // window's, and the model is told so (TT-3447).
+  const privacyOmits = !sendBodies || bodyChars < MIN_BODY_CHARS;
   describe('Inbound mail', available.inbound, inboundFit,
-    !sendBodies ? 'omitted' : inboundFit.level === 'rich' ? inboundBuilt.bodyChars : 'nofit');
+    privacyOmits ? 'omitted' : inboundFit.level === 'rich' ? inboundBuilt.bodyChars : 'nofit');
   describe('Sent mail', available.sent, sentFit,
-    !sendBodies ? 'omitted' : sentFit.level === 'rich' ? sentBuilt.bodyChars : 'nofit');
+    privacyOmits ? 'omitted' : sentFit.level === 'rich' ? sentBuilt.bodyChars : 'nofit');
   describe('Calendar', available.events, eventFit, sendBodies ? null : 'omitted', 'event descriptions');
   describe('Your notes', available.captures, captureFit, null);
   describe('Prior board', available.prior, priorFit, null);

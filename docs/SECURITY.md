@@ -530,10 +530,27 @@ true.
 This is a real switch, not a label.
 
 - `sendBodies: true` (default) — the model receives message bodies, truncated
-  to `privacy.bodyChars` characters (default 4000).
+  to `privacy.bodyChars` characters (default 4000). The same number also caps
+  each email's snippet (never more than 240) and each event's notes, so below
+  240 nothing of an email's or an event's text goes past the setting.
 - `sendBodies: false` — the model receives **headers and the snippet only**:
   sender, recipients, subject, date, and the short plain-text preview stored in
-  the database. Full bodies are never placed in the prompt.
+  the database. Full bodies are never placed in the prompt, and neither are
+  calendar event descriptions, which are free text somebody wrote. Event
+  titles, times, places, organisers and attendees still go. This holds for the
+  sweep and for Ask alike.
+
+`privacy.maxItemsPerSweep` (default 150) caps how many emails, events and
+notes a check sends, and how many sources Ask grounds an answer on (never more
+than 12 there). The board's own items, which a check sends so the model can
+carry them forward, are not counted against it.
+
+A privacy value that is present but not usable — a blank or `null` cap, a
+`sendBodies` that is not `true` or `false`, a `privacy` section that is not an
+object — is read as the most private setting it allows (no message bodies and
+no event descriptions, one item per check), never as the default. Settings
+refuses to save a blank or 0 in the first place, and names the bad value until
+it is fixed.
 
 What it does **not** change: subjects, sender names and recipient addresses are
 sent either way, because without them there is nothing to reason about. If you

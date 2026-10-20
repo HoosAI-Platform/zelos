@@ -1063,6 +1063,151 @@ test('Ask scrubs titles and subjects as it scrubs what is under them', async (t)
   assert.match(prompt, /\[template marker removed\]/);
 });
 
+test('Ask keeps event descriptions out of the prompt with "Send message bodies" off', async (t) => {
+  /* QA, 2026-10-10 (TT-3416): the sweep treats a description as body content
+     and drops it with sendBodies off; Ask sent it anyway. */
+  const NOTES = 'ZZ-DESCRIPTION-DOOR-CODE-4417-ZZ';
+  const BODY = 'ZZ-MESSAGE-BODY-ROUTING-ZZ';
+  async function askWith(sendBodies) {
+    const upstream = await startMockUpstream(t);
+    const ctx = await startServer(t, {
+      config: baseConfig({
+        model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' },
+        privacy: { maxItemsPerSweep: 150, sendBodies, bodyChars: 4000 },
+      }),
+    });
+    db.upsertEvent(ctx.db, {
+      calendarId: 'c_1', uid: 'site-visit-1', startsAt: '2026-08-11T14:00:00-04:00',
+      title: 'Site visit at the warehouse', location: 'Dock 4', description: `Gate notes ${NOTES}`,
+    });
+    db.upsertMessage(ctx.db, {
+      sourceId: 'm_1', uid: 3, messageId: '<warehouse@test>',
+      from: { name: 'Marcus', email: 'marcus@example.com' },
+      subject: 'Warehouse site visit', date: '2026-08-10T09:00:00-04:00',
+      snippet: 'See you at the warehouse.', text: `See you at the warehouse. ${BODY}`, folder: 'INBOX',
+    });
+    const response = await fetch(`${ctx.base}/api/ask`, {
+      method: 'POST',
+      headers: { 'X-Zelos-Token': ctx.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'When is the warehouse site visit?' }),
+    });
+    await readStream(response, null, { until: (f) => f.startsWith('event: done') });
+    const sent = upstream.received.find((r) => r.url.startsWith('/chat/completions'));
+    assert.ok(sent, 'Ask never reached the model');
+    return sent.body.messages.map((m) => m.content).join('\n');
+  }
+
+  const on = await askWith(true);
+  assert.ok(on.includes(NOTES), 'with bodies on, the description should be in the grounding, or this test proves nothing');
+  assert.ok(on.includes(BODY), 'with bodies on, the message body should be in the grounding, or this test proves nothing');
+
+  const off = await askWith(false);
+  assert.ok(!off.includes(NOTES), 'an event description reached the model with "Send message bodies" off');
+  assert.ok(!off.includes(BODY), 'a message body reached the model with "Send message bodies" off');
+  assert.match(off, /Site visit at the warehouse/, 'the event itself should still be in the grounding');
+  assert.match(off, /Dock 4/, 'the event\'s place is a header and should still be sent');
+
+  /* TT-3424: a refused value is saved first and reported second, so a
+     sendBodies of "false" can be what the server holds. It is off. */
+  const mistyped = await askWith('false');
+  assert.ok(!mistyped.includes(NOTES), 'a description was sent with sendBodies "false"');
+  assert.ok(!mistyped.includes(BODY), 'a body was sent with sendBodies "false"');
+});
+
+test('Ask holds the snippet and event notes under "Characters of each email" (TT-3447)', async (t) => {
+  const upstream = await startMockUpstream(t);
+  const ctx = await startServer(t, {
+    config: baseConfig({
+      model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' },
+      privacy: { maxItemsPerSweep: 150, sendBodies: false, bodyChars: 200 },
+    }),
+  });
+  db.upsertMessage(ctx.db, {
+    sourceId: 'm_1', uid: 4, messageId: '<quarry@test>',
+    from: { name: 'Marcus', email: 'marcus@example.com' },
+    subject: 'Quarry permit', date: '2026-08-10T09:00:00-04:00',
+    snippet: `Quarry ${'q'.repeat(220)} SNIPPET-TAIL`, text: 'Quarry permit body.', folder: 'INBOX',
+  });
+  const response = await fetch(`${ctx.base}/api/ask`, {
+    method: 'POST',
+    headers: { 'X-Zelos-Token': ctx.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: 'What about the quarry permit?' }),
+  });
+  await readStream(response, null, { until: (f) => f.startsWith('event: done') });
+  const sent = upstream.received.find((r) => r.url.startsWith('/chat/completions'));
+  const prompt = sent.body.messages.map((m) => m.content).join('\n');
+  assert.match(prompt, /Quarry q/, 'the message was not in the grounding, so this proves nothing');
+  assert.doesNotMatch(prompt, /SNIPPET-TAIL/, 'the snippet went past the 200-character setting');
+
+  // Event notes, with bodies on: held to the setting, not to Ask's 1,200.
+  const upstream2 = await startMockUpstream(t);
+  const ctx2 = await startServer(t, {
+    config: baseConfig({
+      model: { protocol: 'openai', baseUrl: upstream2.baseUrl, model: 'mock-model' },
+      privacy: { maxItemsPerSweep: 150, sendBodies: true, bodyChars: 200 },
+    }),
+  });
+  db.upsertEvent(ctx2.db, {
+    calendarId: 'c_1', uid: 'quarry-visit', startsAt: '2026-08-11T14:00:00-04:00',
+    title: 'Quarry inspection', description: `Quarry ${'n'.repeat(220)} NOTES-TAIL`,
+  });
+  const response2 = await fetch(`${ctx2.base}/api/ask`, {
+    method: 'POST',
+    headers: { 'X-Zelos-Token': ctx2.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: 'When is the quarry inspection?' }),
+  });
+  await readStream(response2, null, { until: (f) => f.startsWith('event: done') });
+  const sent2 = upstream2.received.find((r) => r.url.startsWith('/chat/completions'));
+  const prompt2 = sent2.body.messages.map((m) => m.content).join('\n');
+  assert.match(prompt2, /Quarry n/, 'the event notes were not in the grounding, so this proves nothing');
+  assert.doesNotMatch(prompt2, /NOTES-TAIL/, 'event notes went past the 200-character setting');
+});
+
+test('Ask carries no more items than "Most items per check" (TT-3446)', async (t) => {
+  /* QA, 2026-10-10: set to 10, the sweep held to 10 but Ask carried 12. */
+  async function askWith(maxItemsPerSweep, question = 'What do the gravel invoices say?') {
+    const upstream = await startMockUpstream(t);
+    const ctx = await startServer(t, {
+      config: baseConfig({
+        model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' },
+        privacy: { maxItemsPerSweep, sendBodies: true, bodyChars: 4000 },
+      }),
+    });
+    for (let i = 0; i < 8; i += 1) {
+      db.upsertMessage(ctx.db, {
+        sourceId: 'm_1', uid: 100 + i, messageId: `<invoice-${i}@test>`,
+        from: { name: 'Billing', email: 'billing@example.com' },
+        subject: `Invoice ${i} for the gravel order`, date: `2026-08-0${i + 1}T09:00:00-04:00`,
+        snippet: `Gravel invoice number ${i}.`, text: `Gravel invoice number ${i}.`, folder: 'INBOX',
+      });
+    }
+    const response = await fetch(`${ctx.base}/api/ask`, {
+      method: 'POST',
+      headers: { 'X-Zelos-Token': ctx.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const frames = (await readStream(response, null, { until: (f) => f.startsWith('event: done') }))
+      .map(parseFrame)
+      .filter((f) => f.event);
+    const sent = upstream.received.find((r) => r.url.startsWith('/chat/completions'));
+    const prompt = sent.body.messages.map((m) => m.content).join('\n');
+    const grounded = new Set(prompt.split('\n').map((line) => /^\[(msg:[0-9a-f]+)\]/.exec(line)?.[1]).filter(Boolean));
+    return { grounded: grounded.size, listed: frames.find((f) => f.event === 'sources').data.length };
+  }
+
+  const roomy = await askWith(150);
+  assert.equal(roomy.grounded, 8, 'all eight invoices should ground the answer when the cap allows, or this proves nothing');
+  assert.equal(roomy.listed, 8);
+
+  // The question as a whole matches nothing, so this goes through the
+  // per-term merge; "gravel invoice" matches whole, the first step.
+  for (const question of ['What do the gravel invoices say?', 'gravel invoice']) {
+    const tight = await askWith(3, question);
+    assert.equal(tight.grounded, 3, `Ask sent more items than "Most items per check" allows (${question})`);
+    assert.equal(tight.listed, 3, 'the sources shown should be the ones the model was given');
+  }
+});
+
 test('/api/ask streams a grounded answer and names its sources', async (t) => {
   const upstream = await startMockUpstream(t);
   const ctx = await startServer(t, {

@@ -53,7 +53,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { CALENDAR_DEFAULTS, loadConfig, saveConfig, validateConfig, paths, isValidRef } from './config.mjs';
+import { CALENDAR_DEFAULTS, loadConfig, saveConfig, validateConfig, privacyLimits, paths, isValidRef } from './config.mjs';
 /* The registry, so the two places below that used to name source kinds by hand
    ask it instead. It costs this process nothing new: every module it pulls in —
    core/sources/imap.mjs, caldav.mjs, ics.mjs — is already imported below. */
@@ -146,6 +146,7 @@ const MAX_ICS_BYTES = 8 * 1_048_576;
  * number in two files is the price of that; the rule it guards lives in one.
  */
 const NOW_BOARD_LIMIT = 4;
+/** Ask's ceiling on grounding sources; privacy.maxItemsPerSweep may set it lower (TT-3446). */
 const ASK_CONTEXT_HITS = 12;
 const ASK_CONTEXT_CHARS = 1_200;
 /** A grounding block's heading, on one line: the sweep's cap on a subject. */
@@ -2368,7 +2369,10 @@ function groundingHits(db, question, limit) {
 
 /** Build the grounding block for a question out of the FTS5 index. */
 function askContext(db, question, privacy) {
-  const hits = groundingHits(db, question, ASK_CONTEXT_HITS);
+  /* "Most items per check" caps how much of the user's email, calendar and
+     notes each AI request carries, Ask's included, as the Privacy panel says. Ask used to send up to 12 whatever it said
+     (QA, 2026-10-10, TT-3446). */
+  const hits = groundingHits(db, question, Math.min(ASK_CONTEXT_HITS, privacy.maxItemsPerSweep));
   const sources = [];
   const blocks = [];
 
@@ -2384,13 +2388,20 @@ function askContext(db, question, privacy) {
       title = row.subject || '(no subject)';
       facts.push(`from: ${row.from_name || ''} <${row.from_email || ''}>`.trim());
       facts.push(`sent: ${row.sent_at || 'unknown'}`);
-      facts.push(privacy.sendBodies ? cap(row.body || row.snippet, privacy.bodyChars) : cap(row.snippet, 240));
+      // The snippet is held under "Characters of each email" too (TT-3447).
+      facts.push(privacy.sendBodies
+        ? cap(row.body || row.snippet, privacy.bodyChars)
+        : cap(row.snippet, Math.min(240, privacy.bodyChars)));
     } else if (hit.kind === 'event') {
       title = row.title || '(untitled event)';
       facts.push(`when: ${row.starts_at || 'unknown'}${row.ends_at ? ` to ${row.ends_at}` : ''}`);
       if (row.location) facts.push(`where: ${row.location}`);
       if (row.organizer) facts.push(`organiser: ${row.organizer}`);
-      facts.push(cap(row.description, ASK_CONTEXT_CHARS));
+      /* A description is free text somebody wrote, so it is body content, as
+         the sweep treats it (triage.mjs renderEvent): with "Send message
+         bodies" off it does not travel at all. Ask sent it anyway (QA,
+         2026-10-10, TT-3416). */
+      if (privacy.sendBodies) facts.push(cap(row.description, Math.min(ASK_CONTEXT_CHARS, privacy.bodyChars)));
     } else if (hit.kind === 'item') {
       title = row.headline || '(no headline)';
       facts.push(`bucket: ${row.bucket}`, `state: ${row.state}`, cap(row.why, ASK_CONTEXT_CHARS));
@@ -2482,7 +2493,7 @@ async function handleAsk(ctx) {
     throw new HttpError(409, 'no model is configured yet — pick one in Settings');
   }
 
-  const { sources, context } = askContext(ctx.db, question, cfg.privacy);
+  const { sources, context } = askContext(ctx.db, question, privacyLimits(cfg.privacy));
   const apiKey = await modelKeyFor(cfg.model.baseUrl, cfg);
 
   // Headers go out only once we know the request itself is good, so a setup

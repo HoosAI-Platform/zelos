@@ -454,8 +454,19 @@ describe('the settings file check', () => {
     assert.match(config.detail, /identity/);
     assert.match(config.detail, /privacy/);
     assert.match(config.detail, /is gone|are gone/, 'the values were lost, and that is the point');
+    assert.match(config.detail, /most private reading/, 'privacy is repaired closed (TT-3424), and doctor says so');
     assert.match(config.action, /config\.json/);
     assert.ok(report.ok, 'the app still runs, so this is worth knowing, not broken');
+  });
+
+  test('privacy left at its closed values is explained, not reported as unloadable (TT-3424)', async () => {
+    // What the file holds once a broken privacy section has been repaired
+    // closed and another section saved over it.
+    freshHome({ config: { version: 1, privacy: { sendBodies: false, bodyChars: 0, maxItemsPerSweep: 1 } } });
+    const config = byId(await diagnose({ deps: SILENT_DEPS }), 'config');
+    assert.equal(config.status, 'warn', config.detail);
+    assert.match(config.detail, /most private reading/);
+    assert.match(config.action, /Settings → Privacy/);
   });
 
   test('an ordinary settings file is still just valid', async () => {

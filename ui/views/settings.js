@@ -3050,7 +3050,8 @@ function sweepPanel() {
   const cfg = state.config?.sweep || { intervalMinutes: 30, activeHours: [6, 23], auto: true };
   const status = statusLine();
 
-  const intervalInput = input({ type: 'number', value: String(cfg.intervalMinutes), min: '5', max: '1440' });
+  const [everyMin, everyMax] = SWEEP_INTERVAL_RANGE;
+  const intervalInput = input({ type: 'number', value: String(cfg.intervalMinutes), min: String(everyMin), max: String(everyMax) });
   const fromSelect = select(HOUR_CHOICES, { value: String(cfg.activeHours?.[0] ?? 6) });
   const toSelect = select(END_HOUR_CHOICES, { value: String(cfg.activeHours?.[1] ?? 23) });
   let auto = cfg.auto !== false;
@@ -3066,12 +3067,29 @@ function sweepPanel() {
       button('Save', {
         class: 'btn solid',
         onClick: async () => {
+          /* A blank or 0 used to save 30 without a word, and 3 or 2000 were
+             stored and flagged afterwards (QA, 2026-10-10, TT-3489). The
+             same check as Privacy's: nothing is saved until it reads. */
+          const intervalMinutes = wholeNumberIn(intervalInput.value, everyMin, everyMax);
+          if (intervalMinutes === null) {
+            status.bad(`“Check my mail every (minutes)” needs a whole number from ${everyMin} to ${everyMax}. Nothing was saved.`);
+            return;
+          }
+          /* The hours had the same shape: 10 pm to 6 am was stored, flagged and
+             run as 6 am to 11 pm, and an hour missing from the list (a
+             hand-edited 24) saved as 0 or 23 without a word. */
+          const from = wholeNumberIn(fromSelect.value, 0, 23);
+          const to = wholeNumberIn(toSelect.value, 1, 23);
+          if (from === null || to === null || from >= to) {
+            status.bad('“Between” needs a start hour before the end hour, on the same day. Nothing was saved.');
+            return;
+          }
           status.working('Saving…');
           try {
             await saveConfig({
               sweep: {
-                intervalMinutes: Number(intervalInput.value) || 30,
-                activeHours: [Number(fromSelect.value) || 0, Number(toSelect.value) || 23],
+                intervalMinutes,
+                activeHours: [from, to],
                 auto,
               },
             });
@@ -3091,40 +3109,75 @@ function sweepPanel() {
 
 /* ---------------------------------------------------------------- privacy */
 
+/**
+ * The ranges core/config.mjs validateConfig holds the two privacy numbers to
+ * (its PRIVACY_RANGES; the page cannot import core/, and test/ui.test.mjs
+ * checks the copies agree). The fields used to be narrower, which would have
+ * refused a hand-set 50,000 or 5 even on a Save that only turned bodies off.
+ */
+export const PRIVACY_RANGES = Object.freeze({ bodyChars: [200, 100000], maxItemsPerSweep: [1, 1000] });
+
+/** core/config.mjs's SWEEP_INTERVAL_RANGE, copied for the same reason (TT-3489). */
+export const SWEEP_INTERVAL_RANGE = Object.freeze([5, 1440]);
+
+/**
+ * The whole number typed in a field, if it lies from `min` to `max`, else
+ * null. Blank, 0, a decimal or a word is refused rather than replaced by a
+ * default, so a cap the person cleared is never read as the generous one.
+ */
+export function wholeNumberIn(value, min, max) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text)) return null;
+  const n = Number(text);
+  return n >= min && n <= max ? n : null;
+}
+
 function privacyPanel() {
   const cfg = state.config?.privacy || { maxItemsPerSweep: 150, sendBodies: true, bodyChars: 4000 };
   const status = statusLine();
-  let sendBodies = cfg.sendBodies !== false;
-  const charsInput = input({ type: 'number', value: String(cfg.bodyChars), min: '200', max: '20000' });
-  const maxInput = input({ type: 'number', value: String(cfg.maxItemsPerSweep), min: '10', max: '1000' });
+  // Ticked only for a real `true` (or no setting at all, which is the
+  // default): a "false", 0 or null on disk is off to the engine, and a box
+  // that showed it ticked would turn bodies on at the next Save (TT-3424).
+  let sendBodies = cfg.sendBodies === undefined || cfg.sendBodies === true;
+  const [charsMin, charsMax] = PRIVACY_RANGES.bodyChars;
+  const [itemsMin, itemsMax] = PRIVACY_RANGES.maxItemsPerSweep;
+  const charsInput = input({ type: 'number', value: String(cfg.bodyChars), min: String(charsMin), max: String(charsMax) });
+  const maxInput = input({ type: 'number', value: String(cfg.maxItemsPerSweep), min: String(itemsMin), max: String(itemsMax) });
 
   return el('div', { class: 'panel' }, [
     el('p', { class: 'panel-lede', text: 'Zelos only talks to the AI service you chose. It sends nothing to us and nothing to anyone else.' }),
     checkbox('Let the AI read the full text of your emails (recommended — it does a better job)', {
       checked: sendBodies,
       onChange: (v) => { sendBodies = v; },
-      hint: 'Switched off, the AI sees only who wrote, the subject, and the first couple of lines. It will be worse at judging what matters, and it will say less about why.',
+      hint: 'Switched off, the AI sees only who wrote, the subject, and the first couple of lines, and none of the notes on your calendar events. It will be worse at judging what matters, and it will say less about why.',
     }),
     fold('Advanced', [
-      el('p', { class: 'quiet-note', text: 'There is no telemetry, analytics or remote font. Reading and AI use your configured services; update checks contact only the official GitHub release, without your data. These two numbers cap what each AI request carries.' }),
+      el('p', { class: 'quiet-note', text: 'There is no telemetry, analytics or remote font. Reading and AI use your configured services; update checks contact only the official GitHub release, without your data. These two numbers cap how much of your email, calendar and notes each AI request carries.' }),
       el('div', { class: 'grid-2' }, [
         field('Characters of each email sent to the AI', charsInput),
-        field('Most items per check', maxInput),
+        field('Most items per check', maxInput, { hint: 'Ask uses this too, up to 12 sources.' }),
       ]),
     ]),
     el('div', { class: 'row-inline' }, [
       button('Save', {
         class: 'btn solid',
         onClick: async () => {
+          /* A blank or a 0 used to save the default (4,000 characters, 150
+             items) without a word: a privacy cap that failed open (QA,
+             2026-10-10, TT-3424). Now nothing is saved until both read. */
+          const bodyChars = wholeNumberIn(charsInput.value, charsMin, charsMax);
+          const maxItemsPerSweep = wholeNumberIn(maxInput.value, itemsMin, itemsMax);
+          if (bodyChars === null) {
+            status.bad(`“Characters of each email sent to the AI” needs a whole number from ${charsMin} to ${charsMax}. Nothing was saved.`);
+            return;
+          }
+          if (maxItemsPerSweep === null) {
+            status.bad(`“Most items per check” needs a whole number from ${itemsMin} to ${itemsMax}. Nothing was saved.`);
+            return;
+          }
           status.working('Saving…');
           try {
-            await saveConfig({
-              privacy: {
-                sendBodies,
-                bodyChars: Number(charsInput.value) || 4000,
-                maxItemsPerSweep: Number(maxInput.value) || 150,
-              },
-            });
+            await saveConfig({ privacy: { sendBodies, bodyChars, maxItemsPerSweep } });
             status.good('Saved.');
           } catch (err) {
             status.bad(err.message);
