@@ -6510,6 +6510,32 @@ test('Your data shows the folder and says "drag it to the Trash"; the command is
   }
 });
 
+test('a code block that can scroll sideways is a tab stop (TT-3473)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [] };
+  // A long folder path, and the Windows store, so both erase blocks are drawn.
+  store.state.health = { model: { configured: false }, home: 'C:\\Users\\Nemo Hale\\AppData\\Local\\Zelos\\a folder name long enough to overflow', backend: { name: 'windows-dpapi' } };
+  store.state.configErrors = [];
+  const view = settings.renderSettings({ sub: 'data', navigate() {}, rerender() {} });
+  const blocks = plainWalk(view).filter((n) => n.tag === 'pre');
+  assert.equal(blocks.length, 2);
+  // Nothing inside a block takes focus, and WebKit does not focus a scroll box
+  // by itself, so the end of a line wider than the phone was out of reach.
+  for (const block of blocks) assert.equal(block.getAttribute('tabindex'), '0', `a block is not a tab stop: ${anywhere(block)}`);
+
+  // The sharing panel's blocks (the settings files, and what the AI is told)
+  // are checked in the source: each line that builds a <pre> gives it a tabindex.
+  for (const file of ['views/ai-access.js', 'views/settings.js']) {
+    const lines = fs.readFileSync(path.join(UI, file), 'utf8').split('\n').filter((line) => line.includes("el('pre'"));
+    assert.ok(lines.length, `${file} has no code block to check`);
+    for (const line of lines) assert.match(line, /tabindex/, `${file}: ${line.trim()}`);
+  }
+});
+
 test('no user-facing failure names an address the person did not type, and the board speaks of checks and AIs', () => {
   // core/llm.mjs's empty-model error and core/sweep.mjs's stand-down reasons
   // reach the board's banner verbatim. Neither may interpolate the base URL.

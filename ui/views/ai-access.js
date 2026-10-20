@@ -268,7 +268,10 @@ function codeCard(title, text, note, onCopied) {
       }),
     ]),
     note ? el('p', { class: 'field-hint', text: note }) : null,
-    el('pre', { class: 'code' }, el('code', { text })),
+    /* Wider than a phone, and nothing inside takes focus: without a tab stop
+       a browser that does not focus scroll boxes itself leaves the end of
+       each line out of keyboard reach (QA, 2026-10-10, TT-3473). */
+    el('pre', { class: 'code', tabindex: '0' }, el('code', { text })),
   ]);
 }
 
@@ -843,7 +846,7 @@ export function aiAccessPanel() {
       probe.instructions
         ? el('div', { class: 'ai-code' }, [
           el('div', { class: 'ai-code-head' }, el('span', { class: 'ai-code-title', text: 'What the AI is told Zelos is' })),
-          el('pre', { class: 'code' }, el('code', { text: String(probe.instructions) })),
+          el('pre', { class: 'code', tabindex: '0' }, el('code', { text: String(probe.instructions) })),
         ])
         : null,
     ]);

@@ -3695,9 +3695,10 @@ function dataPanel() {
       el('p', { class: 'quiet-note', text: plainSecretNotes(backendName).data }),
       fold('For experts', [
         el('p', { class: 'quiet-note', text: 'Zelos deliberately has no route that wipes your data — a local server that can destroy the database on request is a local server a stray web page can point at. Done by hand, with the app closed, it is one command:' }),
-        el('pre', { class: 'code' }, el('code', { text: erase.command(home) })),
+        // A tab stop: a long folder path scrolls it sideways on a phone (TT-3473).
+        el('pre', { class: 'code', tabindex: '0' }, el('code', { text: erase.command(home) })),
         el('p', { class: 'quiet-note', text: secretStoreNotes(state.health?.backend?.name).data }),
-        backendName === 'windows-dpapi' ? el('pre', { class: 'code' }, el('code', { text: erase.secrets })) : null,
+        backendName === 'windows-dpapi' ? el('pre', { class: 'code', tabindex: '0' }, el('code', { text: erase.secrets })) : null,
       ], { id: 'data.experts' }),
     ]),
     status.node,
