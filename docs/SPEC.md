@@ -479,7 +479,7 @@ comparison would make every run a full run and the distinction would quietly sto
 ## 8. `core/server.mjs` + `zelos.mjs`
 
 `createServer({db, config, scheduler})` → a `node:http` server. Binds `127.0.0.1`, port from
-`ZELOS_PORT` or 7777, incrementing to find a free one.
+`ZELOS_PORT` or 7777, incrementing to find a free one. Port 0, from either, means any free port.
 
 **Local security model — required, not optional.** Any web page in the user's browser can send
 requests to `127.0.0.1`. So:

@@ -161,12 +161,15 @@ working when you restart. Do not paste it into anything.
 ### Options
 
 ```
-node zelos.mjs --port 7788     # a different port (default 7777, or $ZELOS_PORT)
+node zelos.mjs --port 7788     # a different port (default 7777, or $ZELOS_PORT; 0 means any free port)
 node zelos.mjs --home ~/zdata  # keep the data somewhere else (default ~/.zelos)
 node zelos.mjs --no-open       # do not open a browser, just print the URL
 node zelos.mjs --sweep-now     # sweep immediately on start
 node zelos.mjs --help
 ```
+
+Port 0 picks a different port on every launch, so a bookmark or a pasted MCP
+address stops working when Zelos restarts.
 
 The subcommands from Path 1 work here too — `node zelos.mjs doctor`,
 `node zelos.mjs sweep`, `node zelos.mjs mcp`.

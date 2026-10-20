@@ -204,9 +204,11 @@ export function parseShellArgs(argv = []) {
   return flags;
 }
 
-function portFromEnv() {
+/** `$ZELOS_PORT`, read as core/server.mjs's listen() reads it: blank is unset
+ *  (`Number(' ')` is 0, which would have meant "any free port"). */
+export function portFromEnv() {
   const raw = process.env.ZELOS_PORT;
-  if (raw === undefined || raw === '') return null;
+  if (raw === undefined || raw.trim() === '') return null;
   const port = Number(raw);
   return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : null;
 }

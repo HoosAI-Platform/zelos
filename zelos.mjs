@@ -43,6 +43,7 @@ Zelos — a local-first second brain.
 Options:
   --port <n>      Port to listen on (default 7777, or $ZELOS_PORT).
                   If it is busy, Zelos walks up until it finds a free one.
+                  0 means any free port.
   --home <dir>    Where Zelos keeps its data (default ~/.zelos).
   --no-open       Do not open a browser; just print the URL.
   --sweep-now     Run a sweep immediately on start.

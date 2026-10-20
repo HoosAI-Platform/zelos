@@ -2098,6 +2098,19 @@ describe('parseShellArgs', () => {
       assert.equal(parseShellArgs(bad).port, null, bad.join(' '));
     }
   });
+
+  it('reads $ZELOS_PORT as the CLI does: blank is unset, 0 is any free port (TT-3499)', async (t) => {
+    const { portFromEnv } = await import(pathToFileURL(path.join(REPO, 'desktop', 'main.js')).href);
+    const before = process.env.ZELOS_PORT;
+    t.after(() => {
+      if (before === undefined) delete process.env.ZELOS_PORT;
+      else process.env.ZELOS_PORT = before;
+    });
+    for (const [raw, want] of [['', null], ['  ', null], ['0', 0], ['7788', 7788], ['nope', null]]) {
+      process.env.ZELOS_PORT = raw;
+      assert.equal(portFromEnv(), want, JSON.stringify(raw));
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ *
