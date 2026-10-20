@@ -56,13 +56,34 @@ function mask(s) {
   return `${s.slice(0, 4)}…[redacted ${s.length}ch]`;
 }
 
+/**
+ * How big a log may be when it is opened before it is set aside. One older
+ * generation is kept. Only at open: a session that runs for months still
+ * grows its own file until the next launch.
+ * The log lives in the data folder people back up, and was the one file there
+ * that only ever grew (QA, 2026-10-09, TT-3479).
+ */
+export const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
+
+/** `<name>.log` → `<name>.log.1`, replacing an older `.1`, when it is over the
+ *  limit. Any failure leaves it where it is, to be appended to: logging must
+ *  never be the reason the app fails to start. */
+function rotateIfLarge(logPath) {
+  try {
+    if (fs.statSync(logPath).size <= LOG_ROTATE_BYTES) return;
+    fs.renameSync(logPath, `${logPath}.1`);
+  } catch { /* no log yet, or it could not be moved: keep appending */ }
+}
+
 export function createLogger({ dir = null, level = 'info', stream = process.stderr, name = 'zelos' } = {}) {
   const threshold = LEVELS[level] ?? LEVELS.info;
   let file = null;
   if (dir) {
     try {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      file = fs.createWriteStream(path.join(dir, `${name}.log`), { flags: 'a', mode: 0o600 });
+      const logPath = path.join(dir, `${name}.log`);
+      rotateIfLarge(logPath);
+      file = fs.createWriteStream(logPath, { flags: 'a', mode: 0o600 });
       // Opening and writing a stream can fail after createWriteStream returns.
       // A missing log destination must not become an unhandled error that
       // brings down the board. Keep the terminal sink available for diagnosis.
