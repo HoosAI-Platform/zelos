@@ -583,6 +583,27 @@ describe('menus', () => {
     }
   });
 
+  it('is the shortcut list docs/INSTALL.md gives', () => {
+    /* QA, 2026-10-10 (TT-3526): INSTALL.md said "⌘1…⌘6 jump between views"
+       while the Go menu had seven, with Search on ⌘F and Ask and Settings on
+       ⌘6 and ⌘7. Every item's key and name has to be in the sentence, and the
+       sentence may name no key the menu does not have. */
+    const install = fs.readFileSync(path.join(REPO, 'docs', 'INSTALL.md'), 'utf8');
+    const at = install.indexOf('- A menu bar,');
+    assert.ok(at >= 0, 'INSTALL.md no longer describes the menu bar');
+    const bullet = install.slice(at, install.indexOf('\n- ', at + 1)).replace(/\s+/g, ' ')
+      .replace(/⌘(\d)…⌘(\d)/g, (_, a, b) => Array.from({ length: b - a + 1 }, (_, i) => `⌘${Number(a) + i}`).join(' '));
+    const go = buildAppMenuTemplate({ platform: 'darwin', actions: {} }).find((menu) => menu.label === 'Go');
+    const keys = go.submenu.map((item) => item.accelerator.replace('CmdOrCtrl+', '⌘'));
+    for (const [i, item] of go.submenu.entries()) {
+      assert.ok(bullet.includes(keys[i]), `INSTALL.md does not give ${item.label}'s ${keys[i]}`);
+      assert.ok(bullet.includes(item.label), `INSTALL.md does not name ${item.label} among the views`);
+    }
+    for (const [key] of bullet.matchAll(/⌘[0-9]/g)) {
+      assert.ok(keys.includes(key), `INSTALL.md gives ${key}, which the Go menu does not have`);
+    }
+  });
+
   it('offers the board to the system browser, through an action the shell supplies', () => {
     const fired = [];
     const template = buildAppMenuTemplate({

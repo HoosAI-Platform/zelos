@@ -181,8 +181,9 @@ Press `Ctrl-C` in the terminal to stop it.
 
 - A real application window and a Dock/taskbar icon.
 - A tray icon with **Check now**, **Open Zelos** and **Quit**.
-- A menu bar, so ⌘C and ⌘V work in the draft editors, and ⌘1…⌘6 jump between
-  views.
+- A menu bar, so ⌘C and ⌘V work in the draft editors, and its Go menu jumps
+  between the seven views: ⌘1…⌘4 for Now, Today, Promises and Calendar, ⌘F for
+  Search, ⌘6 for Ask and ⌘7 for Settings (Ctrl instead of ⌘ on Windows).
 - It keeps running when you close the window, so scheduled sweeps keep
   happening. Exactly when, by platform:
   - **macOS** — always. That is how macOS apps work; ⌘Q quits.
@@ -421,7 +422,7 @@ can clear it first: right-click the `.exe` → **Properties** → tick **Unblock
 at the bottom of the **General** tab → **OK**. In PowerShell that is:
 
 ```
-Unblock-File .\Zelos-1.8.1-setup-x64.exe
+Unblock-File .\Zelos-*-setup-x64.exe
 ```
 
 That marker is a real safety mechanism — clear it only from something you built
