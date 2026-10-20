@@ -1902,3 +1902,27 @@ describe('a runtime without FTS5 (TT-3467)', () => {
     });
   }
 });
+
+test('a command that gives up prints the refusal sentence for a runtime without FTS5, a stack otherwise (TT-3502)', async () => {
+  /* QA, 2026-10-10: `zelos mcp` on a runtime without FTS5 printed a stack
+     trace where the server and doctor print the one-sentence refusal. Both mcp
+     entry points (the CLI's and the desktop app's) now print through fatalText. */
+  const { fatalText, UnsupportedRuntimeError, assertRuntimeSupported } = await import('../core/db.mjs');
+  let refusal;
+  try {
+    const sqlite = await import('node:sqlite');
+    const exec = sqlite.DatabaseSync.prototype.exec;
+    sqlite.DatabaseSync.prototype.exec = function (sql) {
+      if (/using\s+fts5/i.test(String(sql))) throw new Error('no such module: fts5');
+      return exec.call(this, sql);
+    };
+    try { assertRuntimeSupported(); } catch (err) { refusal = err; } finally { sqlite.DatabaseSync.prototype.exec = exec; }
+  } catch { /* fall through */ }
+  assert.ok(refusal instanceof UnsupportedRuntimeError, 'the refusal could not be produced, so this proves nothing');
+  const said = fatalText('zelos mcp', refusal);
+  assert.match(said, /built without SQLite's FTS5 extension/);
+  assert.doesNotMatch(said, /\n\s+at /, 'a stack trace instead of the sentence');
+  assert.match(fatalText('zelos mcp', new Error('boom')), /^zelos mcp: Error: boom\n\s+at /, 'anything else keeps its stack');
+  // The desktop path, where this is reachable, is driven end to end in
+  // test/desktop.test.mjs; the CLI's own launcher refuses before commandMcp.
+});

@@ -1946,7 +1946,8 @@ export async function serveStdio(opts = {}) {
   let owned = null;
 
   if (!db) {
-    owned = openDb(paths().db);
+    // No path: open() checks the runtime before paths() makes the home.
+    owned = openDb();
     migrate(owned);
     db = owned;
   }
