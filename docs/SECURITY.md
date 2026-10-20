@@ -755,8 +755,9 @@ Every call and every refusal writes a row: when, which tool, which scope, how
 many rows came back, which token, which transport, and the client's own name
 from its `initialize`. It records that a read happened — never what was read.
 A call that fails argument validation is logged too, so "what did my AI do?"
-does not have holes in it. The rows are visible in Settings → AI access, and are
-the same rows whether the call arrived over stdio or over HTTP.
+does not have holes in it. The rows are visible in Settings → Share with another
+AI (advanced), and are the same rows whether the call arrived over stdio or over
+HTTP.
 
 Two details, because a log that is nearly right is worse than one you understand.
 **The row count is what actually went back**, after the size cap has dropped

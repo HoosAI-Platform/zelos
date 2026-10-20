@@ -830,6 +830,7 @@ describe('JSON-RPC 2.0', () => {
     assert.equal(res.jsonrpc, '2.0');
     assert.equal(res.id, 1);
     assert.equal(res.result.protocolVersion, '2024-11-05', 'a supported version the client asked for is echoed');
+    // A direct call (the HTTP path) cannot speak first, so it does not say it will.
     assert.equal(res.result.capabilities.tools.listChanged, false);
     assert.equal(res.result.serverInfo.name, 'zelos');
     assert.match(res.result.serverInfo.version, /^\d+\.\d+\.\d+/);
@@ -847,6 +848,8 @@ describe('JSON-RPC 2.0', () => {
   test('the instructions say plainly what is shared', async () => {
     const off = await handle(rpc('initialize'), { db: null, config: cfg(ALL_ON, { enabled: false }) });
     assert.match(off.result.instructions, /switched OFF/i);
+    // And it names the tab that exists (TT-3431).
+    assert.ok(off.result.instructions.includes(mcp.SHARE_SETTINGS), off.result.instructions);
     const noBodies = await handle(rpc('initialize'), { db: null, config: cfg(ALL_ON_NO_BODIES) });
     assert.match(noBodies.result.instructions, /bodies are NOT shared/i);
     const bodies = await handle(rpc('initialize'), { db: null, config: cfg(ALL_ON) });
@@ -1302,6 +1305,7 @@ describe('the stdio transport', () => {
     assert.ok(parsed[0].result.instructions.includes('OFF'));
     assert.deepEqual(parsed[1].result.tools, []);
     assert.equal(parsed[2].error.code, ERROR_CODES.AI_DISABLED);
+    assert.ok(parsed[2].error.message.includes(mcp.SHARE_SETTINGS), `the refusal names another place: ${parsed[2].error.message}`);
   });
 
   test('serveStdio runs until stdin closes', async () => {
@@ -1928,4 +1932,105 @@ describe('the board an AI reads is the board the app shows', () => {
     assert.equal(/\bimport\s*\(/.test(MCP_SOURCE), false,
       'a dynamic import is a specifier decided at run time; this file may not have one');
   });
+});
+
+test('Zelos sends people to the Settings tab that exists (TT-3431)', async () => {
+  /* QA, 2026-10-10: "Settings → AI access" was named to people and, through
+     the MCP instructions, to the AI clients on this machine — no tab has that
+     name; it is "Share with another AI (advanced)". */
+  const { SHARE_SETTINGS } = mcp;
+  const settingsSrc = fs.readFileSync(path.join(ROOT, 'ui', 'views', 'settings.js'), 'utf8');
+  const tab = /\{ id: 'ai', label: '([^']+)' \}/.exec(settingsSrc)?.[1];
+  assert.ok(tab, 'the sharing tab could not be found in settings.js');
+  assert.equal(SHARE_SETTINGS, `Settings → ${tab}`);
+  // And nothing a person or an AI client reads still names the old one.
+  for (const rel of [['core', 'mcp.mjs'], ['core', 'server.mjs']]) {
+    const src = fs.readFileSync(path.join(ROOT, ...rel), 'utf8');
+    assert.doesNotMatch(src, /Settings → AI access/, `${rel} still names "Settings → AI access"`);
+  }
+});
+
+
+test('a client connected while sharing is off is told when it comes on, over stdio (TT-3496)', async () => {
+  /* QA, 2026-10-10: the server declared tools.listChanged: false and sent no
+     notification, so a client that cached its tool list at connect kept
+     "AI access is currently switched OFF … no tools are available" for the
+     whole session. A scope switched on later was the same. */
+  let current = cfg(ALL_ON, { enabled: false });
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let text = '';
+  output.on('data', (chunk) => { text += chunk.toString('utf8'); });
+  const server = createStdioServer({ db: null, config: () => current, input, output, watchMs: 10 });
+  server.start();
+  const messages = () => text.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const waitFor = async (pred, what) => {
+    for (let i = 0; i < 200 && !pred(); i += 1) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(pred(), `timed out waiting for ${what}`);
+  };
+
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'T', version: '1' } } })}\n`);
+  await waitFor(() => messages().some((m) => m.id === 1), 'the handshake');
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+  const init = messages().find((m) => m.id === 1);
+  assert.equal(init.result.capabilities.tools.listChanged, true, 'stdio can announce, and should say so');
+  assert.match(init.result.instructions, /ask for the tool list again/);
+
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(messages().filter((m) => m.method === 'notifications/tools/list_changed').length, 0, 'announced with nothing changed');
+
+  current = cfg(ALL_ON); // the owner switches sharing on
+  await waitFor(() => messages().some((m) => m.method === 'notifications/tools/list_changed'), 'the announcement');
+
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })}\n`);
+  await waitFor(() => messages().some((m) => m.id === 2), 'the new list');
+  assert.ok(messages().find((m) => m.id === 2).result.tools.length > 0, 'the tools are there once asked again');
+
+  const announced = () => messages().filter((m) => m.method === 'notifications/tools/list_changed').length;
+  // A change that alters no tool (bodies on/off) is not announced…
+  const before = announced();
+  current = cfg(ALL_ON_NO_BODIES);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(announced(), before, 'announced a change that alters no tool');
+  // …and switching off is.
+  current = cfg(ALL_ON, { enabled: false });
+  await waitFor(() => announced() === before + 1, 'switching off announced');
+
+  input.end();
+  await server.done;
+});
+
+
+test('the config reader re-reads only on a change, and never misses a revocation (TT-3496)', () => {
+  /* Idle polling must not re-read (loadConfig renames a half-saved file and
+     repeats warnings), but the same reader decides what a request may do — so
+     a save with the same size in the same mtime second must still be seen. */
+  const { cachedConfigReader } = mcp;
+  let clock = 0;
+  let loads = 0;
+  let st = { ino: 1, mtimeMs: 1_700_000_000_000, ctimeMs: 1_700_000_000_000, size: 120 };
+  let value = { v: 'A' };
+  const read = cachedConfigReader({ file: 'x', load: () => { loads += 1; return value; }, now: () => clock, stat: () => st });
+
+  assert.equal(read().v, 'A');
+  assert.equal(loads, 1);
+  for (let i = 0; i < 20; i += 1) { clock += 2_000; read(); }
+  assert.equal(loads, 1 + Math.floor(40_000 / 60_001), 'an idle, unchanged file was read again');
+
+  // Same size, same whole-second mtime — only the inode differs, as an atomic save makes it.
+  value = { v: 'B' };
+  st = { ...st, ino: 2 };
+  clock += 1_500;
+  assert.equal(read().v, 'B', 'a same-size save in the same second was missed');
+
+  // An edit in place changes ctime.
+  value = { v: 'C' };
+  st = { ...st, ctimeMs: st.ctimeMs + 1 };
+  clock += 1_500;
+  assert.equal(read().v, 'C');
+
+  // And nothing is trusted for longer than a minute.
+  value = { v: 'D' };
+  clock += 61_000;
+  assert.equal(read().v, 'D');
 });

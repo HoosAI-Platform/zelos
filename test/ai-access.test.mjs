@@ -501,6 +501,8 @@ test('disabled means 403 on /api/mcp, whatever token is presented', async (t) =>
     const res = await mcpCall(ctx, RPC, options);
     assert.equal(res.status, 403, 'off means off');
     assert.match(res.json.error, /AI access is off/);
+    // It sends the person to the tab that exists (TT-3431).
+    assert.match(res.json.detail, /Settings → Share with another AI \(advanced\)/);
   }
   assert.equal(ctx.mcp.calls.length, 0, 'nothing may reach the tool layer while the switch is off');
 
