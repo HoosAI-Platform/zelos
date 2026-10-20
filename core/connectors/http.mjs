@@ -51,6 +51,7 @@
  */
 
 import crypto from 'node:crypto';
+import { fetchFailureReason } from '../fetch-error.mjs';
 
 /** A credential that will not work again until the user does something. */
 export class AuthError extends Error {
@@ -300,16 +301,28 @@ export function createHttp({
     // redirect cannot buy a second full timeout.
     const deadline = AbortSignal.any(signals);
 
-    const once = (url, sendAuth) => doFetch(url, {
-      method,
-      headers: sendAuth ? withAuth : base,
-      body,
-      redirect: 'manual',
-      signal: deadline,
-    });
+    const once = async (url, sendAuth) => {
+      try {
+        return await doFetch(url, {
+          method,
+          headers: sendAuth ? withAuth : base,
+          body,
+          redirect: 'manual',
+          signal: deadline,
+        });
+      } catch (err) {
+        // A deadline or a cancel is the caller's to word; anything else is a
+        // connection that never happened, and used to arrive as a bare "fetch
+        // failed" with neither the host nor the reason (TT-3514).
+        if (deadline.aborted || err?.name === 'AbortError' || err?.name === 'TimeoutError') throw err;
+        throw new Error(`could not reach ${url.host}: ${fetchFailureReason(err)}`, { cause: err });
+      }
+    };
 
     let res = await once(target, true);
     let finalUrl = target;
+    // Whether the answer that counts was given a credential at all.
+    let sentAuth = Boolean(auth);
     if (res.status >= 300 && res.status < 400 && res.status !== 304) {
       const location = res.headers.get('location');
       if (!location) throw new Error(`${target.host} redirected without a destination`);
@@ -321,8 +334,24 @@ export function createHttp({
       await spend(next.host);
       res = await once(next, next.origin === target.origin);
       finalUrl = next;
+      sentAuth = Boolean(auth) && next.origin === target.origin;
     }
 
+    /* A refusal is only a rejected CREDENTIAL when one was sent. A feed has
+       none, so a 401 or 403 there used to say "rejected the credential … check
+       it in Settings" beside a form that says the source needs none, and rest
+       the source for six hours until a secret that does not exist changed
+       (QA, 2026-10-10, TT-3459). Sent nothing, it is an ordinary failure that
+       names the address, and the next sweep tries again. */
+    if ((res.status === 401 || res.status === 403) && !sentAuth) {
+      throw new Error(auth
+        // It has one, but a redirect took the request to another host, which
+        // is never given it.
+        ? `${finalUrl.host} refused to serve this address (${res.status}) after a redirect from ${target.host}, `
+          + 'and Zelos does not carry your key to a host you did not choose. Check the address in Settings.'
+        : `${finalUrl.host} refused to serve this address (${res.status}). This source sends no password or key, `
+          + 'so check the address in Settings — it may be private, or have moved.');
+    }
     if (res.status === 401 || res.status === 403) {
       throw new AuthError(
         `${finalUrl.host} rejected the credential (${res.status}). Check it in Settings — Zelos will not keep trying with the one it has.`,

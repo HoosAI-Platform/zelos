@@ -2,19 +2,21 @@
  * core/connectors/ics.mjs — a subscribed .ics document over http(s).
  *
  * `fetchIcsText` below is lifted out of core/sweep.mjs, and it deliberately
- * does NOT go through `ctx.http`. Routing it there would turn a 401
- * on a subscription URL into an `AuthError`, and an `AuthError` rests the source
- * for six hours — where today it throws "calendar at host returned 401" on every
- * sweep and the user sees the banner every time they look. That is a behaviour
- * change with a test-visible surface, and this pass is a refactor. New
- * connectors get `ctx.http`; this one keeps its own request until somebody wants
- * to pay for the change on purpose. The BODY is read with the transport's
- * `readCapped`, though: `res.text()` bought a whole 40 MB (or endless) feed
- * before the 8 MB check could refuse it.
+ * does NOT go through `ctx.http`. Routing it there would turn a 401 on a
+ * subscription URL that was sent a password into an `AuthError` (the transport
+ * raises one only when a credential was sent — TT-3459), and an `AuthError`
+ * rests the source for six hours — where today it throws "calendar at host
+ * returned 401" on every sweep and the user sees the banner every time they
+ * look. That is a behaviour change with a test-visible surface, and this pass
+ * is a refactor. New connectors get `ctx.http`; this one keeps its own request
+ * until somebody wants to pay for the change on purpose. The BODY is read with
+ * the transport's `readCapped`, though: `res.text()` bought a whole 40 MB (or
+ * endless) feed before the 8 MB check could refuse it.
  */
 
 import { calendarConnector, eventsFrom } from './calendar.mjs';
 import { readCapped } from './http.mjs';
+import { fetchFailureReason } from '../fetch-error.mjs';
 
 const ICS_TIMEOUT_MS = 20_000;
 const ICS_MAX_BYTES = 8 * 1024 * 1024;
@@ -47,11 +49,17 @@ export async function fetchIcsText(rawUrl, { user, pass, signal, timeoutMs = ICS
 
   const request = async (target, withAuth) => {
     const sendHeaders = withAuth ? headers : { accept: headers.accept };
-    return fetch(target, {
-      headers: sendHeaders,
-      redirect: 'manual',
-      signal: deadline,
-    });
+    try {
+      return await fetch(target, {
+        headers: sendHeaders,
+        redirect: 'manual',
+        signal: deadline,
+      });
+    } catch (err) {
+      // The reason, not "fetch failed": see core/fetch-error.mjs (TT-3514).
+      if (deadline.aborted) throw err;
+      throw new Error(`calendar at ${target.host} could not be reached: ${fetchFailureReason(err)}`, { cause: err });
+    }
   };
 
   let res = await request(url, true);

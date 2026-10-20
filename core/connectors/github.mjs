@@ -607,7 +607,8 @@ function clockOf(ctx) {
  * ------------------------------------------------------------------ */
 
 /**
- * The transport turns 401 AND 403 into one `AuthError` with one sentence:
+ * The transport turns 401 AND 403 on a request that carried the token into
+ * one `AuthError` with one sentence:
  * "rejected the credential — check it in Settings". For GitHub that sentence is
  * right for a 401 and actively misleading for a 403, which is what you get from
  * a PERFECTLY VALID token that is merely missing the `notifications` scope. A
