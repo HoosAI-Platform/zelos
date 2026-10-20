@@ -1206,18 +1206,36 @@ export function getRun(db, id) {
   return hydrateRun(prep(db, 'SELECT * FROM runs WHERE id = ?').get(str(id)));
 }
 
+/*
+ * started_at is stamped in whole seconds, so two runs can share one. rowid is
+ * insertion order and breaks the tie: a failed check followed at once by a
+ * successful retry was reported as the last check, and failed
+ * (QA, 2026-10-10, TT-3454). VACUUM (and a backup's VACUUM INTO) may renumber
+ * rowids, but it copies rows in rowid order, so in practice they keep their
+ * order here.
+ *
+ * The shapes below keep runs_started_at in use. lastRun runs on every board
+ * GET, and a plain `ORDER BY started_at DESC, rowid DESC` scanned the whole
+ * table into a temporary B-tree, because the index stores equal started_at
+ * values in ascending rowid order. Finding the newest second through MAX() and
+ * then ordering only that second's rows by rowid is two index searches.
+ */
 /** The most recent run, optionally of a kind and optionally only successful ones. */
 export function lastRun(db, { kind = null, okOnly = false } = {}) {
   const where = [];
   const args = [];
   if (kind) { where.push('kind = ?'); args.push(str(kind)); }
   if (okOnly) where.push('ok = 1');
-  const sql = `SELECT * FROM runs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY started_at DESC LIMIT 1`;
-  return hydrateRun(prep(db, sql).get(...args));
+  const filter = where.length ? where.join(' AND ') : '1';
+  const sql = `SELECT * FROM runs WHERE ${filter}
+    AND started_at = (SELECT MAX(started_at) FROM runs WHERE ${filter})
+    ORDER BY rowid DESC LIMIT 1`;
+  return hydrateRun(prep(db, sql).get(...args, ...args));
 }
 
+/** Newest first. Only runs that share a second are sorted outside the index. */
 export function listRuns(db, { limit = 20 } = {}) {
-  return prep(db, 'SELECT * FROM runs ORDER BY started_at DESC LIMIT ?').all(Math.max(1, Number(limit) || 20)).map(hydrateRun);
+  return prep(db, 'SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?').all(Math.max(1, Number(limit) || 20)).map(hydrateRun);
 }
 
 /* -------------------------------------------------------------------- kv */

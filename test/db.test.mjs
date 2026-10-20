@@ -627,6 +627,21 @@ test('runs record what happened and lastRun() finds the newest', () => {
   assert.equal(getRun(db, open_).ok, null, 'an unfinished run is neither ok nor failed');
 });
 
+test('of two runs started in the same second, the later one is the last (TT-3454)', () => {
+  const db = fresh();
+  // started_at is stamped in whole seconds: a failed check and the retry the
+  // person pressed at once carry the same one.
+  const at = '2026-08-05T10:00:00-04:00';
+  const failed = startRun(db, { now: at });
+  finishRun(db, failed, { ok: false, error: 'imap.example refused the connection', now: at });
+  const retry = startRun(db, { now: at });
+  finishRun(db, retry, { ok: true, now: at });
+
+  assert.equal(lastRun(db).id, retry, 'the retry, not the failure it replaced');
+  assert.equal(lastRun(db, { kind: 'full' }).id, retry, 'and the same when filtered by kind');
+  assert.deepEqual(listRuns(db).map((r) => r.id), [retry, failed]);
+});
+
 /* ---------------------------------------------------------------------- kv */
 
 test('kv round-trips and deletes', () => {
