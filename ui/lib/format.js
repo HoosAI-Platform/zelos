@@ -298,7 +298,17 @@ export function sweepSummary(run) {
   if (!run) return '';
   const s = run.stats || {};
   const bits = [];
-  if (s.messages) bits.push(`${s.messages} email${s.messages === 1 ? '' : 's'}`);
+  // Feeds, Slack, GitHub and the rest are stored as messages too, and were
+  // all counted as "emails" (QA, 2026-10-10, TT-3515). A run that lists its
+  // sources says how many came from email; one that does not keeps the old
+  // count, which is all it has.
+  const sources = Array.isArray(s.sources) ? s.sources : null;
+  if (sources && s.messages) {
+    const fromMail = sources.filter((x) => x?.kind === 'mail').reduce((n, x) => n + (Number(x.count) || 0), 0);
+    const emails = Math.min(fromMail, s.messages);
+    if (emails) bits.push(plural(emails, 'email'));
+    if (s.messages > emails) bits.push(`${s.messages - emails} from other sources`);
+  } else if (s.messages) bits.push(`${s.messages} email${s.messages === 1 ? '' : 's'}`);
   if (s.events) bits.push(`${s.events} appointment${s.events === 1 ? '' : 's'}`);
   if (s.items) bits.push(`${s.items} item${s.items === 1 ? '' : 's'}`);
   return bits.join(' · ');

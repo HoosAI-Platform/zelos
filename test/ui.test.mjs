@@ -419,6 +419,17 @@ test('sweepSummary reads as a sentence, and survives a run with no stats', () =>
   assert.equal(fmt.sweepSummary({ stats: { messages: 214, events: 28 } }), '214 emails · 28 appointments');
   assert.equal(fmt.sweepSummary({ stats: {} }), '');
   assert.equal(fmt.sweepSummary(null), '');
+  // Feeds, Slack and GitHub are stored as messages too; only mail is "emails" (TT-3515).
+  const sources = [
+    { kind: 'mail', id: 'm1', ok: true, count: 8 },
+    { kind: 'rss', id: 'r1', ok: true, count: 4 },
+    { kind: 'slack', id: 's1', ok: true, count: 1 },
+    { kind: 'calendar', id: 'c1', ok: true, count: 2 },
+  ];
+  assert.equal(fmt.sweepSummary({ stats: { messages: 13, events: 2, items: 3, sources } }),
+    '8 emails · 5 from other sources · 2 appointments · 3 items');
+  assert.equal(fmt.sweepSummary({ stats: { messages: 8, sources: [{ kind: 'rss', ok: true, count: 8 }] } }), '8 from other sources');
+  assert.equal(fmt.sweepSummary({ stats: { messages: 1, sources: [{ kind: 'mail', ok: true, count: 1 }] } }), '1 email');
   assert.equal(fmt.sweepDetail({ stats: { ms: 41_800 } }), 'took 41.8s');
   assert.equal(fmt.sweepDetail({ stats: { ms: 40 } }), '', 'a run that died in milliseconds must not say "took 0.0s"');
   assert.equal(fmt.sweepDetail({ stats: {} }), '');
@@ -1363,6 +1374,41 @@ test('a sweep that lost one source says so, and does not call the run failed', (
     `the partial arm is the first ternary branch and it must not be the one that says "yet" (got ${JSON.stringify(titles[0])})`,
   );
   assert.match(emptyUnderBanner[0], /trouble === 'partial'/, 'the branch has to be on the trouble kind');
+});
+
+test('the partial-failure banner calls a feed or a Slack channel a source, not an account or calendar (TT-3515)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = async () => ({ ok: false, status: 404, text: async () => '{"error":"not found"}' });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const now = await import(fileUrl(UI, 'views/now.js'));
+  store.state.config = { identity: {}, model: { label: 'Claude' }, mail: [{ id: 'm1' }], calendars: [], sources: [] };
+  store.state.health = { model: { configured: true, label: 'Claude' } };
+  store.state.sweep = { running: false, phase: '', message: '', done: 0, total: 0, error: null, lastResult: null };
+  const run = (sources) => ({ id: 'run_1', kind: 'full', ok: true, started_at: '2026-08-28T09:00:00Z', ended_at: '2026-08-28T09:01:00Z',
+    stats: { sourcesFailed: sources.filter((x) => !x.ok).length, sources } });
+  const board = (sources) => {
+    store.state.board = { ...store.state.board, items: [], events: [], drafts: [], notes: [], finished: [], counts: {}, first: null, runs: { last: run(sources) } };
+    return onScreen(now.renderNow({ tz: 'UTC', navigate() {} }));
+  };
+
+  let seen = board([
+    { kind: 'rss', id: 'r1', label: 'Hacker News', ok: false, count: 0, error: 'Feed not found' },
+    { kind: 'rss', id: 'r2', label: 'Lobsters', ok: false, count: 0, error: 'Feed not found' },
+    { kind: 'mail', id: 'm1', label: 'Work mail', ok: false, count: 0, error: 'Sign in again' },
+  ]);
+  assert.match(seen, /3 sources could not be read\./);
+  assert.match(seen, /The sources named above went unread/);
+  assert.doesNotMatch(seen, /accounts or calendars/);
+
+  seen = board([{ kind: 'slack', id: 's1', label: '#studio', ok: false, count: 0, error: 'Token revoked' }]);
+  assert.match(seen, /One source could not be read\./);
+
+  // Mail and calendars only: the old words were right, and stay.
+  seen = board([{ kind: 'mail', id: 'm1', label: 'Work mail', ok: false, count: 0, error: 'Sign in again' },
+    { kind: 'calendar', id: 'c1', label: 'Home', ok: false, count: 0, error: 'Not found' }]);
+  assert.match(seen, /2 accounts or calendars could not be read\./);
+  assert.match(seen, /The accounts named above went unread/);
 });
 
 test('the first screen paints its action row whether or not it is in the document', () => {
