@@ -229,6 +229,43 @@ Press `Ctrl-C` in the terminal to stop it.
 - No second copy of anything. The shell runs the Zelos core **inside its own
   process** — it does not launch a background Node.
 
+### When an AI client starts it
+
+Settings → **Share with another AI** → *For experts* prints the block to paste
+into the AI client's own config file. For the desktop app it runs the app's own
+binary as plain Node, on the small server file the installer puts beside the
+app:
+
+```json
+{
+  "mcpServers": {
+    "zelos": {
+      "command": "<the Zelos binary>",
+      "args": ["<the app's resources folder>/core/mcp-stdio.mjs"],
+      "env": { "ELECTRON_RUN_AS_NODE": "1", "ZELOS_HOME": "<your data folder>" }
+    }
+  }
+}
+```
+
+Copy it from Settings rather than typing it: the block there holds this copy's
+real paths. Claude Desktop and Cursor (`~/.cursor/mcp.json`) read it as
+written. VS Code's `mcp.json` keeps its servers under a top-level `"servers"`
+key instead of `"mcpServers"`, so put the inner `"zelos"` object there. Claude
+Code takes the same thing on its command line:
+
+```
+claude mcp add zelos -e ELECTRON_RUN_AS_NODE=1 -e "ZELOS_HOME=<your data folder>" -- "<the Zelos binary>" "<the app's resources folder>/core/mcp-stdio.mjs"
+```
+
+`ELECTRON_RUN_AS_NODE` is what keeps the channel clean. Started as the app,
+Electron writes a blank line to its output on Windows before any of Zelos runs,
+and that output is the channel the client reads. A config pasted before this
+change (`Zelos mcp`) still works, and says on the client's log that it is out
+of date. On a Mac, move Zelos to Applications first: Settings says so if macOS
+is running it from the disk image or a temporary copy, because that path stops
+existing when Zelos quits.
+
 ### Where a build comes from
 
 There is no download page in this repository, and no release binary committed to

@@ -6835,6 +6835,36 @@ test('Ask, Search, the Calendar and the sharing panel meet a first-timer without
   assert.ok(!/text-transform: uppercase/.test(mark[1]), '.scope-mark still shouts');
 });
 
+test('the spawn block round-trips a Windows path with spaces and carries Node mode, and a Mac app to be moved gets no block', async (t) => {
+  // (QA, 2026-10-10, TT-3507) The desktop block starts the app's binary with
+  // ELECTRON_RUN_AS_NODE=1 on core/mcp-stdio.mjs; without the env var it is
+  // the Electron app again, whose start-up output corrupts the channel.
+  withPlainDom(t);
+  const access = await import(fileUrl(UI, 'views/ai-access.js'));
+  const client = {
+    command: 'C:\\Users\\A B\\AppData\\Local\\Programs\\Zelos\\Zelos.exe',
+    args: ['C:\\Users\\A B\\AppData\\Local\\Programs\\Zelos\\resources\\core\\mcp-stdio.mjs'],
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    home: 'C:\\Users\\A B\\.zelos',
+  };
+  const { zelos } = JSON.parse(access.stdioBlock(client)).mcpServers;
+  assert.equal(zelos.command, client.command);
+  assert.deepEqual(zelos.args, client.args);
+  assert.deepEqual(zelos.env, { ELECTRON_RUN_AS_NODE: '1', ZELOS_HOME: client.home });
+
+  const ready = access.spawnCard(client, 'Ready to paste', 'note', () => {});
+  assert.match(onScreen(ready), /"ELECTRON_RUN_AS_NODE": "1"/);
+  assert.ok(findButton(ready, 'Copy'), 'the ready block cannot be copied');
+
+  // A path that stops existing when Zelos quits is not offered at all.
+  const moving = access.spawnCard({ ...client, moveFirst: true }, 'Ready to paste', 'note', () => {});
+  const seen = onScreen(moving);
+  assert.match(seen, /Move Zelos to Applications first/);
+  assert.match(seen, /Move Zelos to your Applications folder, open it from there/);
+  assert.doesNotMatch(seen, /mcpServers|Ready to paste/, 'a block that will break is still on offer');
+  assert.equal(findButton(moving, 'Copy'), undefined, 'a block that will break can still be copied');
+});
+
 /* ------------------------------------------------ 8. "Stuck? Ask Claude" */
 
 /**

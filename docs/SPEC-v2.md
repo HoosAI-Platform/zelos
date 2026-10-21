@@ -31,6 +31,9 @@ entire product. So:
 
 Implement MCP over **JSON-RPC 2.0**, both transports:
 - **stdio** — `zelos mcp` runs a server on stdin/stdout. This is what desktop AI clients spawn.
+  The desktop app's block runs the app's own binary with `ELECTRON_RUN_AS_NODE=1` on
+  `core/mcp-stdio.mjs`, because Electron's own start-up writes to stdout before any app code
+  runs (TT-3507); `core/mcp-stdio.mjs` `stdioLaunch` builds that command for Settings and CI.
 - **HTTP** — `POST /api/mcp` on the existing local server, token-gated, for clients that prefer it.
 
 ```js

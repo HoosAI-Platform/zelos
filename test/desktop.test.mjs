@@ -2720,11 +2720,11 @@ describe('planRendererRestart', () => {
 /* ------------------------------------------------------------------ *
  * The shell as a stdio MCP server
  *
- * The "Ready to paste" block in Settings names the packaged binary plus the
- * one word `mcp` (core/server.mjs mcpClientHints), because the build ships no
- * zelos.mjs for a client to spawn. That block is only true if the shell
- * actually serves JSON-RPC on stdio when spawned that way — this is the other
- * end of that contract, run with the streams a real client would own.
+ * The "Ready to paste" block in Settings once named the packaged binary plus
+ * the one word `mcp`; it now runs core/mcp-stdio.mjs in Node mode (TT-3507,
+ * test/mcp-stdio.test.mjs). Configs pasted before that still spawn the shell
+ * this way, so it still has to serve JSON-RPC on stdio — this is that end of
+ * the contract, run with the streams a real client would own.
  * ------------------------------------------------------------------ */
 
 describe('the shell as a stdio MCP server', () => {
@@ -2815,6 +2815,39 @@ describe('the shell as a stdio MCP server', () => {
     // A fresh home has AI access off, so the tool list is empty — proof the
     // server read its config from the home the flags named.
     assert.deepEqual(replies[1].result.tools, []);
+  });
+
+  it('the old way in says, on stderr only, that the client config is out of date, and refuses a home mid-restore', async () => {
+    /* (QA, 2026-10-10, TT-3507) Settings now prints a block that runs
+       core/mcp-stdio.mjs in Node mode; a config pasted before that still starts
+       the Electron app, whose start-up \r\n the client logs. And this path
+       checks maintenance as zelos.mjs and the Node entry do. */
+    const realWrite = process.stderr.write;
+    let errors = '';
+    process.stderr.write = (chunk, ...rest) => {
+      errors += chunk;
+      rest.find((r) => typeof r === 'function')?.();
+      return true;
+    };
+    const home = path.join(sandbox, 'legacy');
+    try {
+      const input = new PassThrough();
+      const output = new PassThrough();
+      let written = '';
+      output.on('data', (chunk) => { written += chunk; });
+      const serving = main.serveMcp(main.parseShellArgs(['mcp', `--home=${home}`]), { input, output });
+      input.end();
+      assert.equal((await serving).ok, true);
+      assert.ok(errors.includes(main.MCP_LEGACY_HINT), `no hint on stderr:\n${errors}`);
+      assert.equal(written, '', 'the hint reached the JSON-RPC stream');
+
+      fs.writeFileSync(path.join(home, '.restore-journal.json'), '{}');
+      const refused = await main.serveMcp(main.parseShellArgs(['mcp', `--home=${home}`]), { input: new PassThrough(), output: new PassThrough() });
+      assert.equal(refused.ok, false);
+      assert.match(errors, /interrupted restore needs recovery/);
+    } finally {
+      process.stderr.write = realWrite;
+    }
   });
 
   it('reads requests from file descriptor 0 on Windows, where Electron\'s stdin is an empty stream', () => {

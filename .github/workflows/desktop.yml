@@ -71,10 +71,12 @@ jobs:
       - name: Check the window cannot reach the network
         run: node scripts/check-webrtc.mjs
 
-      # `Zelos mcp` is how a desktop AI client starts Zelos, over stdio. The
-      # unit tests hand the server their own streams, so only the real binary
-      # spawned with real pipes shows what a client gets — on Windows it once
-      # got an empty stdin and an instant exit.
+      # A desktop AI client starts Zelos over stdio, as the "Ready to paste"
+      # block in Settings says. The unit tests hand the server their own
+      # streams, so only the real binary spawned with real pipes shows what a
+      # client gets — on Windows it once got an empty stdin and an instant
+      # exit, and Electron's start-up wrote a bare \r\n before any reply
+      # (TT-3507). Here against the checkout; after Build, against the app.
       - name: Check Zelos mcp serves MCP over stdio
         run: node scripts/check-mcp-stdio.mjs
 
@@ -100,6 +102,12 @@ jobs:
 
       - name: Check the packaged native runtime and first-run server
         run: node scripts/check-desktop.mjs
+
+      # The same check against what ships: the entry the block names has to
+      # be in the installer's resources, and the binary has to still run as
+      # Node (Electron's RunAsNode fuse, on by default; nothing turns it off).
+      - name: Check the packaged app serves MCP over stdio
+        run: node scripts/check-mcp-stdio.mjs --packaged
 
       - uses: actions/upload-artifact@v4
         with:

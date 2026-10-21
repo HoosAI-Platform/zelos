@@ -604,32 +604,46 @@ test('GET /api/ai reports the switch, the scopes, the tokens and the log', async
   assert.equal((await api(ctx, 'DELETE', '/api/ai/tokens/t_aaaaaa', { token: null })).status, 401);
 });
 
-test('inside the packaged desktop shell, the paste block names the app itself', async (t) => {
+test('inside the desktop shell, the paste block runs the app itself as Node on the shipped entry', async (t) => {
   await resetAi();
   const ctx = await startServer(t);
 
-  /* The packaged build ships core/ but not zelos.mjs, and process.execPath
-     there is the shell binary — so a hint naming the launcher script points at
-     a file the install does not have, pasted under a heading that says it is
-     ready. The shell answers `mcp` in its own right (desktop/main.js), so the
-     block has to be the binary plus that one word. `process.versions.electron`
-     is how the server knows which copy it is; plain Node — this test as it
-     started, and every CLI install — keeps the launcher form. */
+  /* `Zelos mcp` started as an Electron app put a bare \r\n on stdout before
+     any of Zelos's code ran (QA, 2026-10-10, TT-3507), so the block runs the
+     app's binary with ELECTRON_RUN_AS_NODE=1 on core/mcp-stdio.mjs, which the
+     build copies beside the app. A dev shell gets the same shape, so a
+     checkout on Windows is clean too. Plain Node keeps `zelos.mjs mcp`. */
   process.versions.electron = '43.3.0';
   t.after(() => { delete process.versions.electron; });
 
   const res = await api(ctx, 'GET', '/api/ai');
   assert.equal(res.json.client.command, process.execPath);
-  assert.deepEqual(res.json.client.args, ['mcp'],
-    'the packaged shell ships no zelos.mjs to spawn — the binary itself answers "mcp"');
+  assert.deepEqual(res.json.client.args, [path.join(ROOT, 'core', 'mcp-stdio.mjs')]);
+  assert.ok(fs.existsSync(res.json.client.args[0]), 'the block names an entry this copy does not have');
+  assert.deepEqual(res.json.client.env, { ELECTRON_RUN_AS_NODE: '1' });
+  assert.equal(res.json.client.moveFirst, false);
 
-  // A dev shell run from a checkout (`electron .`) sets process.defaultApp and
-  // sits next to a zelos.mjs that exists, so it keeps the launcher form too.
   process.defaultApp = true;
   t.after(() => { delete process.defaultApp; });
   const dev = await api(ctx, 'GET', '/api/ai');
-  assert.ok(dev.json.client.args[0].endsWith('zelos.mjs'));
-  assert.equal(dev.json.client.args[1], 'mcp');
+  assert.deepEqual(dev.json.client.args, res.json.client.args, 'a dev shell gets the same block');
+  assert.deepEqual(dev.json.client.env, { ELECTRON_RUN_AS_NODE: '1' });
+});
+
+test('a Mac app run from a translocated copy or the disk image is told to move first', async () => {
+  // Its path stops existing when it quits, and so would the command pasted
+  // into a client's config (QA, 2026-10-10, TT-3507).
+  const { stdioLaunch } = await import('../core/mcp-stdio.mjs');
+  const asked = [];
+  const readOnly = (dir) => { asked.push(dir); return false; };
+  const launch = (execPath, canWrite = readOnly) => stdioLaunch({ electron: true, execPath, root: '/r', canWrite });
+  assert.equal(launch('/private/var/folders/x/T/AppTranslocation/0A1B/d/Zelos.app/Contents/MacOS/Zelos').moveFirst, true);
+  assert.equal(launch('/Volumes/Zelos 1.9.5/Zelos.app/Contents/MacOS/Zelos').moveFirst, true, 'the disk image');
+  assert.deepEqual(asked.at(-1), '/Volumes/Zelos 1.9.5', 'it asks about the folder holding the app');
+  // An app installed on a writable external drive lives there; nothing to move.
+  assert.equal(launch('/Volumes/Work/Applications/Zelos.app/Contents/MacOS/Zelos', () => true).moveFirst, false);
+  assert.equal(launch('/Applications/Zelos.app/Contents/MacOS/Zelos').moveFirst, false);
+  assert.equal(stdioLaunch({ electron: false, execPath: '/Volumes/x/node', root: '/r', canWrite: readOnly }).moveFirst, false, 'the CLI is not an app to move');
 });
 
 test('PUT /api/ai writes only what it is given, and refuses a scope that does not exist', async (t) => {
