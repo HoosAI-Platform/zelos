@@ -199,7 +199,9 @@ function exposureLine(v) {
   const on = v.scopeInfo.filter((s) => v.effective[s.id]).map(nameOf);
   if (!v.enabled) {
     return on.length
-      ? `Nothing is shared. The switch is off, so the ${plural(on.length, 'box')} ticked below do nothing until you switch it on.`
+      // "boxes", and "does" for one: plural() adds a bare "s", which made
+      // "the 2 boxs" (QA, 2026-10-10, TT-3466).
+      ? `Nothing is shared. The switch is off, so the ${plural(on.length, 'box', 'boxes')} ticked below ${on.length === 1 ? 'does' : 'do'} nothing until you switch it on.`
       : 'Nothing is shared. The switch is off and no box is ticked.';
   }
   if (!on.length) {
