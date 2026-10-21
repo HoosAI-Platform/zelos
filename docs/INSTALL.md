@@ -161,12 +161,15 @@ working when you restart. Do not paste it into anything.
 ### Options
 
 ```
-node zelos.mjs --port 7788     # a different port (default 7777, or $ZELOS_PORT)
+node zelos.mjs --port 7788     # a different port (default 7777, or $ZELOS_PORT; 0 means any free port)
 node zelos.mjs --home ~/zdata  # keep the data somewhere else (default ~/.zelos)
 node zelos.mjs --no-open       # do not open a browser, just print the URL
 node zelos.mjs --sweep-now     # sweep immediately on start
 node zelos.mjs --help
 ```
+
+Port 0 picks a different port on every launch, so a bookmark or a pasted MCP
+address stops working when Zelos restarts.
 
 The subcommands from Path 1 work here too — `node zelos.mjs doctor`,
 `node zelos.mjs sweep`, `node zelos.mjs mcp`.
@@ -225,6 +228,43 @@ Press `Ctrl-C` in the terminal to stop it.
   down to do. It never launched hidden, and the code no longer implies it might.
 - No second copy of anything. The shell runs the Zelos core **inside its own
   process** — it does not launch a background Node.
+
+### When an AI client starts it
+
+Settings → **Share with another AI** → *For experts* prints the block to paste
+into the AI client's own config file. For the desktop app it runs the app's own
+binary as plain Node, on the small server file the installer puts beside the
+app:
+
+```json
+{
+  "mcpServers": {
+    "zelos": {
+      "command": "<the Zelos binary>",
+      "args": ["<the app's resources folder>/core/mcp-stdio.mjs"],
+      "env": { "ELECTRON_RUN_AS_NODE": "1", "ZELOS_HOME": "<your data folder>" }
+    }
+  }
+}
+```
+
+Copy it from Settings rather than typing it: the block there holds this copy's
+real paths. Claude Desktop and Cursor (`~/.cursor/mcp.json`) read it as
+written. VS Code's `mcp.json` keeps its servers under a top-level `"servers"`
+key instead of `"mcpServers"`, so put the inner `"zelos"` object there. Claude
+Code takes the same thing on its command line:
+
+```
+claude mcp add zelos -e ELECTRON_RUN_AS_NODE=1 -e "ZELOS_HOME=<your data folder>" -- "<the Zelos binary>" "<the app's resources folder>/core/mcp-stdio.mjs"
+```
+
+`ELECTRON_RUN_AS_NODE` is what keeps the channel clean. Started as the app,
+Electron writes a blank line to its output on Windows before any of Zelos runs,
+and that output is the channel the client reads. A config pasted before this
+change (`Zelos mcp`) still works, and says on the client's log that it is out
+of date. On a Mac, move Zelos to Applications first: Settings says so if macOS
+is running it from the disk image or a temporary copy, because that path stops
+existing when Zelos quits.
 
 ### Where a build comes from
 
@@ -450,7 +490,7 @@ solely administer, read it before you connect a mail account.
 |---|---|---|
 | Your data (database, config, logs) | `~/.zelos` | `C:\Users\<you>\.zelos` |
 | Window size and position | `~/.zelos/window.json` | same |
-| Logs | `~/.zelos/logs/desktop.log` — **desktop app only** | same |
+| Logs | `~/.zelos/logs/desktop.log` — **desktop app only**; set aside at launch when it is over 5 MB (desktop.log.1 keeps the previous one) | same |
 | Secrets | your login Keychain, service `com.zelos.app` (or `secrets.enc` + `.seed` in `~/.zelos` if there is no keychain) | `%LOCALAPPDATA%\Zelos\secrets`, DPAPI-encrypted |
 | Automatic-update choices (on or off, and a skipped version) | `~/.zelos/updates.json` — **desktop app only** | same |
 | The shell's browser profile (your theme choice, and a downloaded update waiting in `pending-update/` until you restart) | `~/Library/Application Support/Zelos` | `%APPDATA%\Zelos` |

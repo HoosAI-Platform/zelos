@@ -222,14 +222,24 @@ const TOKEN_PLACEHOLDER = 'PASTE-THE-TOKEN-YOU-MINTED';
  * built from the paths the server reported, so what is on screen is where this
  * copy of Zelos actually lives.
  */
-function stdioBlock(client) {
+export function stdioBlock(client) {
   const server = {
     command: typeof client.command === 'string' && client.command ? client.command : 'npx',
     args: Array.isArray(client.args) && client.args.length ? client.args : ['-y', 'zelos-app', 'mcp'],
   };
-  if (client.home) server.env = { ZELOS_HOME: client.home };
+  // The desktop app's block carries ELECTRON_RUN_AS_NODE: it starts the app's
+  // own binary as plain Node (QA, 2026-10-10, TT-3507).
+  const env = { ...(client.env && typeof client.env === 'object' ? client.env : {}) };
+  if (client.home) env.ZELOS_HOME = client.home;
+  if (Object.keys(env).length) server.env = env;
   return JSON.stringify({ mcpServers: { zelos: server } }, null, 2);
 }
+
+/** Said in place of "Ready to paste" when macOS is running Zelos from somewhere
+ *  that stops existing once it quits — a translocated copy or a read-only disk
+ *  image — so the command in the block would too (QA, 2026-10-10, TT-3507). */
+const MOVE_FIRST_TITLE = 'Move Zelos to Applications first';
+const MOVE_FIRST_NOTE = 'macOS is running this copy of Zelos from a temporary place or from the disk image, and that path stops existing when Zelos quits, so there is nothing here to copy yet. Move Zelos to your Applications folder, open it from there, and the settings to copy will be here.';
 
 /**
  * `token` is the value that was just minted, when there is one. Assembling the
@@ -272,6 +282,20 @@ function codeCard(title, text, note, onCopied) {
        a browser that does not focus scroll boxes itself leaves the end of
        each line out of keyboard reach (QA, 2026-10-10, TT-3473). */
     el('pre', { class: 'code', tabindex: '0' }, el('code', { text })),
+  ]);
+}
+
+/**
+ * The block a client that spawns Zelos needs — or, while macOS is running Zelos
+ * from a path that will not outlive it, the reason there is no block yet. Not a
+ * block with a warning beside it: a pasted command that stops working when
+ * Zelos quits fails later, in the other program, where nobody connects the two.
+ */
+export function spawnCard(client, title, note, onCopied) {
+  if (!client?.moveFirst) return codeCard(title, stdioBlock(client), note, onCopied);
+  return el('div', { class: 'ai-code' }, [
+    el('div', { class: 'ai-code-head' }, [el('span', { class: 'ai-code-title', text: MOVE_FIRST_TITLE })]),
+    el('p', { class: 'field-hint', text: MOVE_FIRST_NOTE }),
   ]);
 }
 
@@ -709,9 +733,9 @@ export function aiAccessPanel() {
           'This block already holds the key above. It is the whole of what that client needs, and it is only complete while this is on screen.',
           onCopied,
         ),
-        codeCard(
+        spawnCard(
+          v.client,
           'Ready to paste — a client that spawns Zelos itself',
-          stdioBlock(v.client),
           'No key appears in this one, and that is correct: a client that spawns Zelos runs it as you, so the switch and the scopes above are the whole of what holds it back.',
           onCopied,
         ),
@@ -863,9 +887,9 @@ export function aiAccessPanel() {
       // is all still here, one press away, and the person who only wanted to
       // know what the switch does never has to read it.
       fold('For experts: connecting it', [
-        codeCard(
+        spawnCard(
+          v.client,
           'Claude Desktop, and anything else that spawns a server',
-          stdioBlock(v.client),
           known
             ? 'Those are the real paths to this copy of Zelos. A client that spawns it this way runs it as you, so it presents no key — the switch above and the scopes below it are the whole of what holds.'
             : 'Generic form: this build did not report where it is installed. Replace the command with the path to your own copy.',

@@ -43,6 +43,7 @@ Zelos — a local-first second brain.
 Options:
   --port <n>      Port to listen on (default 7777, or $ZELOS_PORT).
                   If it is busy, Zelos walks up until it finds a free one.
+                  0 means any free port.
   --home <dir>    Where Zelos keeps its data (default ~/.zelos).
   --no-open       Do not open a browser; just print the URL.
   --sweep-now     Run a sweep immediately on start.
@@ -767,7 +768,9 @@ async function runWithData(flags) {
     model: modelLine,
     mailAccounts: enabledMail ? `${enabledMail} account${enabledMail === 1 ? '' : 's'}` : 'none yet',
     calendars: enabledCals ? `${enabledCals} calendar${enabledCals === 1 ? '' : 's'}` : 'none yet',
-    auto: scheduler ? `every ${config.sweep.intervalMinutes}m between ${config.sweep.activeHours[0]}:00 and ${config.sweep.activeHours[1]}:00` : 'manual',
+    // A scheduler is built whether or not sweeps are automatic (see above), so
+    // its existence says nothing about a schedule (QA, 2026-10-10, TT-3501).
+    auto: scheduler && config.sweep.auto ? `every ${config.sweep.intervalMinutes}m between ${config.sweep.activeHours[0]}:00 and ${config.sweep.activeHours[1]}:00` : 'manual',
     pasteNeeded: Boolean(plan) && !plan.handsOverToken,
   });
 
@@ -776,13 +779,30 @@ async function runWithData(flags) {
   // Started after the banner so the URL is the first thing on screen.
   scheduler?.start();
 
+  // Declared before the --sweep-now listener, which reads it.
+  let shuttingDown = false;
   if (flags.sweepNow) {
+    /* start() settles once the run is claimed, not when it ends, so its
+       rejection only ever meant "a sweep is already running" or "no engine".
+       A run that failed — a model that is unreachable or answered in prose —
+       reached the run record and the board and never this terminal. Its end
+       comes as the first done/failed frame after the claim: the supervisor
+       holds back the scheduler's own copy while ours is in flight
+       (QA, 2026-10-10, TT-3500). */
+    const unsubscribe = server.zelos.sweeps.subscribe((event, data) => {
+      if (event !== 'done' && event !== 'failed') return;
+      unsubscribe();
+      // A run that Ctrl-C aborted did not fail; "Stopping (SIGINT)." already
+      // said what happened.
+      if (event !== 'failed' || shuttingDown) return;
+      log.error('zelos: --sweep-now failed', data?.error ? { error: data.error } : undefined);
+    });
     server.zelos.sweeps.start('full').catch((err) => {
+      unsubscribe();
       log.error('zelos: --sweep-now failed', { error: err.message });
     });
   }
 
-  let shuttingDown = false;
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;

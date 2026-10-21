@@ -491,6 +491,12 @@ export function createUpdater({
   const attemptFile = downloadDir ? path.join(path.dirname(downloadDir), ATTEMPT_FILE) : '';
   let settings = readUpdateSettings(settingsFile);
   let supported = null;          // null until start() has decided
+  // Until start() has decided support and restored a kept update. The board
+  // asks once on load, and a reopen with an update ready was told "nothing"
+  // and waited 30 s for its next ask to show the banner (QA, 2026-10-10,
+  // TT-3482). `starting` tells it to ask again soon; `supported` alone cannot,
+  // since it reads false both before the decision and after a "no".
+  let starting = true;
   let reason = '';
   let status = 'idle';           // idle | checking | current | available | downloading | ready | installing | error
   let error = '';
@@ -563,6 +569,7 @@ export function createUpdater({
     const release = shown();
     return {
       supported: supported === true,
+      starting,
       reason,
       auto: settings.auto,
       status,
@@ -1281,37 +1288,47 @@ export function createUpdater({
 
   /* ------------------------------ API ------------------------------ */
 
+  /** start()'s work: decide whether this build can update itself, then arm the clock. */
+  async function begin() {
+    reason = await decideSupport();
+    supported = reason === '';
+    if (!supported) {
+      status = 'idle';
+      log('info', 'automatic updates are off for this build', { reason });
+      return;
+    }
+    const spent = readLastAttempt();
+    // What a restart was installing is not offered again; otherwise the
+    // kept update is found before anything is tidied, so it is kept.
+    if (!spent) await restoreReady();
+    // Then everything else goes — versions that did not win, what the old
+    // one-update-at-a-time layout left at the top, anything that is not a
+    // plain version folder, a copy beside the Mac app — in the background,
+    // so a large removal does not hold up the window.
+    tidyLater({ launch: true });
+    nextAttemptAt = now() + FIRST_CHECK_DELAY_MS;
+    first = setTimer(() => {
+      first = null;
+      if (leftovers) tidyLater();
+      // A check the person asked for in the first minute already counts.
+      const due = nextAttemptAt === null || now() + CHECK_SLACK_MS >= nextAttemptAt;
+      if (settings.auto && due && !working()) check({ download: true }).catch(() => {});
+    }, FIRST_CHECK_DELAY_MS);
+    first?.unref?.();
+    schedule();
+  }
+
   return {
     /** Decide whether this build can update itself, then arm the clock. */
     async start() {
-      reason = await decideSupport();
-      supported = reason === '';
-      if (!supported) {
-        status = 'idle';
-        log('info', 'automatic updates are off for this build', { reason });
+      try {
+        await begin();
+      } finally {
+        // Cleared whichever way start went — supported, not, or thrown — so a
+        // board never keeps asking fast for an updater that has settled.
+        starting = false;
         changed();
-        return snapshot();
       }
-      const spent = readLastAttempt();
-      // What a restart was installing is not offered again; otherwise the
-      // kept update is found before anything is tidied, so it is kept.
-      if (!spent) await restoreReady();
-      // Then everything else goes — versions that did not win, what the old
-      // one-update-at-a-time layout left at the top, anything that is not a
-      // plain version folder, a copy beside the Mac app — in the background,
-      // so a large removal does not hold up the window.
-      tidyLater({ launch: true });
-      nextAttemptAt = now() + FIRST_CHECK_DELAY_MS;
-      first = setTimer(() => {
-        first = null;
-        if (leftovers) tidyLater();
-        // A check the person asked for in the first minute already counts.
-        const due = nextAttemptAt === null || now() + CHECK_SLACK_MS >= nextAttemptAt;
-        if (settings.auto && due && !working()) check({ download: true }).catch(() => {});
-      }, FIRST_CHECK_DELAY_MS);
-      first?.unref?.();
-      schedule();
-      changed();
       return snapshot();
     },
 
@@ -1466,7 +1483,10 @@ export function createUpdater({
         log('info', 'installing update', { version: ready.version });
         return true;
       } catch (err) {
-        try { fs.rmSync(attemptFile, { force: true }); } catch { /* nothing was attempted */ }
+        // The attempt file stays. The shell relaunches after a failure here,
+        // and that launch reads it, says the update did not install and drops
+        // the download, rather than reopening on the same broken update with
+        // no word (QA, 2026-10-10, TT-3486).
         installFailed?.(err);
         return false;
       }

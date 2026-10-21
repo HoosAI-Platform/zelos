@@ -69,7 +69,8 @@ it('shutdown retries native quit after Electron clears its reentrant quit guard'
 it('a restart for an update hands off to the installer only after the core has stopped, then quits', async () => {
   /* The Windows installer and the macOS swap script both wait for this
      process to exit, so the shell quits after the hand-off — and quits just
-     the same when the hand-off is refused. */
+     the same when the hand-off is refused, asking first to be started again
+     so a restart with nothing to hand off still comes back (TT-3486). */
   const source = fs.readFileSync(path.join(REPO, 'desktop/main.js'), 'utf8');
   const shutdown = /function beginShutdown\(\) \{[\s\S]*?\n\}/.exec(source)?.[0];
   for (const installs of [true, false]) {
@@ -80,10 +81,46 @@ it('a restart for an update hands off to the installer only after the core has s
       let zelos = { stop: async () => { order.push('core-stop'); } };
       ${shutdown}
       beginShutdown();
-    `, { order, installs, setImmediate, clearTimeout, app: { quit: () => order.push('quit') } });
+    `, { order, installs, setImmediate, clearTimeout, app: { quit: () => order.push('quit'), relaunch: () => order.push('relaunch') } });
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(order, ['updater-stop', 'core-stop', 'install', 'quit'], `install ${installs}`);
+    assert.deepEqual(order, installs
+      ? ['updater-stop', 'core-stop', 'install', 'quit']
+      : ['updater-stop', 'core-stop', 'install', 'relaunch', 'quit'], `install ${installs}`);
+  }
+});
+
+it('an installer that cannot start brings Zelos back rather than leaving it closed', async () => {
+  /* (QA, 2026-10-10, TT-3486) The failure handler was empty, so Restart to
+     update with an installer that would not start quit and stayed quit. The
+     two ways it fails: a check that throws inside install(), and a spawn that
+     reports its error a tick later — after install() has returned true and
+     the quit has been asked for, but before the process has gone. */
+  const source = fs.readFileSync(path.join(REPO, 'desktop/main.js'), 'utf8');
+  const shutdown = /function beginShutdown\(\) \{[\s\S]*?\n\}/.exec(source)?.[0];
+  for (const when of ['at once', 'a tick later']) {
+    const order = [];
+    vm.runInNewContext(`
+      let shuttingDown = null, crashTimer = null, windowState = null, installAfterShutdown = true;
+      let updater = { stop: () => {}, install: ({ onFailure }) => {
+        order.push('install');
+        const fail = () => onFailure(new Error('spawn EACCES'));
+        if (when === 'at once') { fail(); return false; }
+        nextTick(fail);
+        return true;
+      } };
+      let zelos = { stop: async () => {} };
+      ${shutdown}
+      beginShutdown();
+    `, {
+      order, when, setImmediate, clearTimeout, nextTick: process.nextTick,
+      app: { quit: () => order.push('quit'), relaunch: () => order.push('relaunch') },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(order.filter((x) => x === 'relaunch').length, 1,
+      `${when}: relaunched ${order.filter((x) => x === 'relaunch').length} times, not once (${order}); each call starts a copy`);
+    assert.ok(order.includes('quit'), `${when}: it still has to leave for the relaunch to happen`);
   }
 });
 
@@ -2098,6 +2135,19 @@ describe('parseShellArgs', () => {
       assert.equal(parseShellArgs(bad).port, null, bad.join(' '));
     }
   });
+
+  it('reads $ZELOS_PORT as the CLI does: blank is unset, 0 is any free port (TT-3499)', async (t) => {
+    const { portFromEnv } = await import(pathToFileURL(path.join(REPO, 'desktop', 'main.js')).href);
+    const before = process.env.ZELOS_PORT;
+    t.after(() => {
+      if (before === undefined) delete process.env.ZELOS_PORT;
+      else process.env.ZELOS_PORT = before;
+    });
+    for (const [raw, want] of [['', null], ['  ', null], ['0', 0], ['7788', 7788], ['nope', null]]) {
+      process.env.ZELOS_PORT = raw;
+      assert.equal(portFromEnv(), want, JSON.stringify(raw));
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -2155,6 +2205,63 @@ describe('the lock on the data home', () => {
     held.setPort(51234);
     assert.equal(readHomeLock(home).port, 51234);
     held.release();
+  });
+
+  it('still records the port when the first replaces are refused, as Windows does while a scanner holds the file', async (t) => {
+    // (QA, 2026-10-10, TT-3511) A refused replace was swallowed once and for
+    // all, so the lock kept `port: null` and the next warning named no board.
+    const home = freshHome('port-retry');
+    const held = acquireHomeLock({ home, kind: 'desktop' });
+    t.after(() => held.release());
+    const rename = fs.renameSync;
+    let refusals = 2;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (refusals > 0) {
+        refusals -= 1;
+        throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+      }
+      return rename(from, to);
+    });
+
+    held.setPort(51235);
+    const deadline = Date.now() + 3_000;
+    while (readHomeLock(home).port !== 51235 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(readHomeLock(home).port, 51235, 'two refused replaces left the lock without its port');
+    assert.equal(readHomeLock(home).pid, process.pid);
+  });
+
+  it('a retried port write never recreates a lock that was deleted, or overwrites another holder', async (t) => {
+    // (QA, 2026-10-10, TT-3511) The retry runs after the file may have changed
+    // hands, so it writes only while the record on disk is still this one.
+    const rename = fs.renameSync;
+    let refuse = true;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (refuse) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+      return rename(from, to);
+    });
+    const settle = () => new Promise((r) => setTimeout(r, 200));
+
+    const deletedHome = freshHome('port-retry-deleted');
+    const deleted = acquireHomeLock({ home: deletedHome, kind: 'desktop' });
+    t.after(() => deleted.release());
+    deleted.setPort(51236);
+    fs.unlinkSync(path.join(deletedHome, 'zelos.lock'));
+    refuse = false;
+    await settle();
+    assert.equal(readHomeLock(deletedHome), null, 'a retry recreated a lock somebody deleted');
+
+    refuse = true;
+    const takenHome = freshHome('port-retry-taken');
+    const taken = acquireHomeLock({ home: takenHome, kind: 'desktop' });
+    t.after(() => taken.release());
+    taken.setPort(51237);
+    const other = { pid: process.pid + 1, kind: 'cli', port: 7777, startedAt: new Date().toISOString(), uid: null };
+    fs.writeFileSync(path.join(takenHome, 'zelos.lock'), JSON.stringify(other));
+    refuse = false;
+    await settle();
+    assert.deepEqual(readHomeLock(takenHome), other, "a retry overwrote another instance's lock");
   });
 
   it('reclaims a lock left behind by a crash rather than locking the user out', () => {
@@ -2613,11 +2720,11 @@ describe('planRendererRestart', () => {
 /* ------------------------------------------------------------------ *
  * The shell as a stdio MCP server
  *
- * The "Ready to paste" block in Settings names the packaged binary plus the
- * one word `mcp` (core/server.mjs mcpClientHints), because the build ships no
- * zelos.mjs for a client to spawn. That block is only true if the shell
- * actually serves JSON-RPC on stdio when spawned that way — this is the other
- * end of that contract, run with the streams a real client would own.
+ * The "Ready to paste" block in Settings once named the packaged binary plus
+ * the one word `mcp`; it now runs core/mcp-stdio.mjs in Node mode (TT-3507,
+ * test/mcp-stdio.test.mjs). Configs pasted before that still spawn the shell
+ * this way, so it still has to serve JSON-RPC on stdio — this is that end of
+ * the contract, run with the streams a real client would own.
  * ------------------------------------------------------------------ */
 
 describe('the shell as a stdio MCP server', () => {
@@ -2708,6 +2815,39 @@ describe('the shell as a stdio MCP server', () => {
     // A fresh home has AI access off, so the tool list is empty — proof the
     // server read its config from the home the flags named.
     assert.deepEqual(replies[1].result.tools, []);
+  });
+
+  it('the old way in says, on stderr only, that the client config is out of date, and refuses a home mid-restore', async () => {
+    /* (QA, 2026-10-10, TT-3507) Settings now prints a block that runs
+       core/mcp-stdio.mjs in Node mode; a config pasted before that still starts
+       the Electron app, whose start-up \r\n the client logs. And this path
+       checks maintenance as zelos.mjs and the Node entry do. */
+    const realWrite = process.stderr.write;
+    let errors = '';
+    process.stderr.write = (chunk, ...rest) => {
+      errors += chunk;
+      rest.find((r) => typeof r === 'function')?.();
+      return true;
+    };
+    const home = path.join(sandbox, 'legacy');
+    try {
+      const input = new PassThrough();
+      const output = new PassThrough();
+      let written = '';
+      output.on('data', (chunk) => { written += chunk; });
+      const serving = main.serveMcp(main.parseShellArgs(['mcp', `--home=${home}`]), { input, output });
+      input.end();
+      assert.equal((await serving).ok, true);
+      assert.ok(errors.includes(main.MCP_LEGACY_HINT), `no hint on stderr:\n${errors}`);
+      assert.equal(written, '', 'the hint reached the JSON-RPC stream');
+
+      fs.writeFileSync(path.join(home, '.restore-journal.json'), '{}');
+      const refused = await main.serveMcp(main.parseShellArgs(['mcp', `--home=${home}`]), { input: new PassThrough(), output: new PassThrough() });
+      assert.equal(refused.ok, false);
+      assert.match(errors, /interrupted restore needs recovery/);
+    } finally {
+      process.stderr.write = realWrite;
+    }
   });
 
   it('reads requests from file descriptor 0 on Windows, where Electron\'s stdin is an empty stream', () => {

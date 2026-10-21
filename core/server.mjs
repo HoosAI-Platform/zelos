@@ -109,6 +109,7 @@ import {
 import { parseICS } from './sources/ics.mjs';
 import { nowISO, toZonedISO, localTimezone, instant, offsetFor, addDaysToKey, todayKey } from './time.mjs';
 import { log } from './log.mjs';
+import { stdioLaunch } from './mcp-stdio.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -2829,20 +2830,19 @@ function handleSampleDelete(ctx) {
 /** The path of the launcher, so Settings can print a config block that works. */
 function mcpClientHints(ctx) {
   const port = ctx.req.socket?.localPort ?? null;
-  /* Inside the packaged desktop shell there is no launcher script to name: the
-     build ships `core/` but not `zelos.mjs`, and `process.execPath` is the app
-     itself. That binary answers `mcp` in its own right — desktop/main.js
-     serves stdio when spawned with the one word — so the hint there is the
-     binary plus `mcp`, and a script path would name a file the install does
-     not have, pasted under a heading that says it is ready. `versions.electron`
-     is how this process knows it is the shell; `process.defaultApp` marks a
-     dev shell run from a checkout, where the launcher exists and the script
-     form still holds. Plain Node — the CLI — is unchanged. */
-  const packagedShell = Boolean(process.versions.electron) && !process.defaultApp;
+  /* Inside the desktop shell the block runs the app's own binary in Node mode
+     on core/mcp-stdio.mjs, which the build copies beside the app. `Zelos mcp`
+     as an Electron app wrote a bare \r\n on stdout before any of our code ran
+     (QA, 2026-10-10, TT-3507); see stdioLaunch. ROOT is where this file's
+     core/ is, so the path names the file this install actually has. Plain
+     Node — the CLI — is unchanged. */
+  const launch = stdioLaunch({ root: ROOT });
   return {
     // How a desktop AI client spawns the stdio server (SPEC-v2 §2).
-    command: process.execPath,
-    args: packagedShell ? ['mcp'] : [path.join(ROOT, 'zelos.mjs'), 'mcp'],
+    command: launch.command,
+    args: launch.args,
+    env: launch.env,
+    moveFirst: launch.moveFirst,
     home: paths().home,
     // ...and the address for clients that would rather speak HTTP.
     httpUrl: port ? `http://${HOST}:${port}/api/mcp` : null,
@@ -3716,6 +3716,20 @@ export function createServer({
  * ------------------------------------------------------------------ */
 
 /**
+ * The port `$ZELOS_PORT` asks for, or DEFAULT_PORT when it is unset or not a
+ * port. 0 is a port here, "any free one", exactly as `--port 0` is and as the
+ * desktop shell reads the same variable; `Number(raw) || DEFAULT_PORT` used to
+ * turn it into 7777, so one setting meant two things depending on which way
+ * Zelos was launched (QA, 2026-10-10, TT-3499).
+ */
+function portFromEnv() {
+  const raw = process.env.ZELOS_PORT;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_PORT;
+  const port = Number(raw);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : DEFAULT_PORT;
+}
+
+/**
  * Bind 127.0.0.1, walking up from `port` until a free one is found. Resolves
  * `{port, host, url, tokenUrl}` — `url` is the bare origin; `tokenUrl` is the
  * one that carries the session token, and it is the only way into the app.
@@ -3723,7 +3737,7 @@ export function createServer({
  * a one-shot handoff), never the bare origin.
  */
 export function listen(server, {
-  port = Number(process.env.ZELOS_PORT) || DEFAULT_PORT,
+  port = portFromEnv(),
   host = HOST,
   attempts = 20,
 } = {}) {

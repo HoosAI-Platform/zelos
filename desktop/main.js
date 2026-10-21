@@ -204,9 +204,11 @@ export function parseShellArgs(argv = []) {
   return flags;
 }
 
-function portFromEnv() {
+/** `$ZELOS_PORT`, read as core/server.mjs's listen() reads it: blank is unset
+ *  (`Number(' ')` is 0, which would have meant "any free port"). */
+export function portFromEnv() {
   const raw = process.env.ZELOS_PORT;
-  if (raw === undefined || raw === '') return null;
+  if (raw === undefined || raw.trim() === '') return null;
   const port = Number(raw);
   return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : null;
 }
@@ -1186,9 +1188,23 @@ function beginShutdown() {
       // or an idle core can stop while the second app.quit is ignored.
       // A restart for an update first hands off to the installer (Windows)
       // or the swap script (macOS); both wait for this process to exit, so
-      // the quit follows either way.
+      // the quit follows either way. A restart whose installer or swap does
+      // not start, or that has nothing to hand off, brings Zelos back instead
+      // of leaving it closed with no word; the relaunch's check of the attempt
+      // file then says the update did not install (QA, 2026-10-10, TT-3486).
+      // A spawn reports its failure on a later tick, still before this quit
+      // has finished, which is all app.relaunch needs. Once only: each call
+      // starts another copy.
       setImmediate(() => {
-        if (installAfterShutdown) updater?.install({ onFailure: () => {} });
+        if (installAfterShutdown) {
+          let relaunched = false;
+          const relaunch = () => {
+            if (relaunched) return;
+            relaunched = true;
+            app.relaunch();
+          };
+          if (updater?.install({ onFailure: relaunch }) !== true) relaunch();
+        }
         app.quit();
       });
     }
@@ -1203,9 +1219,11 @@ function beginShutdown() {
 /**
  * `Zelos mcp` — the packaged app doubling as the stdio MCP server.
  *
- * The build ships `core/` but not `zelos.mjs` (see extraResources in
- * package.json), so the "Ready to paste" block in Settings names this binary
- * plus the one word — and this is the code that makes that block true. Three
+ * The old way in. The "Ready to paste" block in Settings used to name this
+ * binary plus the one word; it now runs the binary in Node mode on
+ * core/mcp-stdio.mjs, because Electron writes a bare \r\n to stdout before
+ * this code runs (TT-3507). Configs pasted before that still arrive here, so
+ * it keeps serving, and says on stderr that the config is out of date. Three
  * things are deliberately not done here: no window and no tray, and the dock
  * icon is hidden before anything can draw one, because this process is a pipe;
  * no single-instance lock, because the copy the person is using holds it and
@@ -1217,12 +1235,27 @@ function beginShutdown() {
  * `io` exists for the tests, which own both streams; a real spawn passes
  * nothing and reads the request stream from mcpInput().
  */
+/** Said on stderr by the old `Zelos mcp` way in; stdout stays JSON-RPC. */
+export const MCP_LEGACY_HINT = 'zelos mcp: this AI client config is from an older Zelos. Copy the new one from Settings → Share with another AI, under "For experts", so the client stops seeing a stray blank line.';
+
 export async function serveMcp(flags, io = {}) {
   if (flags.home) process.env.ZELOS_HOME = path.resolve(flags.home);
   app.dock?.hide?.();
   const load = (rel) => import(pathToFileURL(path.join(ROOT, 'core', rel)).href);
   try {
-    const [{ serveStdio }, { log }] = await Promise.all([load('mcp.mjs'), load('log.mjs')]);
+    const [{ serveStdio }, { log }, { assertRuntimeSupported }, { paths }, { assertNoMaintenance }] = await Promise.all(
+      [load('mcp.mjs'), load('log.mjs'), load('db.mjs'), load('config.mjs'), load('data-lease.mjs')],
+    );
+    // What zelos.mjs and core/mcp-stdio.mjs check first: the runtime before
+    // paths() makes the home, then a backup or restore in progress.
+    assertRuntimeSupported();
+    assertNoMaintenance(paths().home);
+    /* This is the old way in. Electron writes a bare \r\n to stdout before any
+       of this runs, on Windows, and clients log it as a corrupt line. Settings
+       now prints a block that runs core/mcp-stdio.mjs in Node mode instead;
+       say so where the client's log will show it, whatever the log level
+       (QA, 2026-10-10, TT-3507). */
+    process.stderr.write(`${MCP_LEGACY_HINT}\n`);
     await serveStdio({ logger: log, ...io, input: io.input ?? mcpInput() });
     // app.exit does not wait for stdout. On macOS and Linux a pipe write is
     // asynchronous, so the last replies of a client that sent a burst and hung
