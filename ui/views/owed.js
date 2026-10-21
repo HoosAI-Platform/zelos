@@ -218,8 +218,11 @@ function draftCard(draft, itemsById) {
       button('Copy the text', {
         class: 'btn solid',
         onClick: async (e) => {
-          const ok = await copyText(area.value);
+          // Before the await: a browser resets currentTarget to null once the
+          // event has finished dispatching, so read after it the label never
+          // changed and the page threw (QA, 2026-10-10, TT-3452).
           const btn = e.currentTarget;
+          const ok = await copyText(area.value);
           btn.textContent = ok ? 'Copied' : 'Copy failed';
           setTimeout(() => { btn.textContent = 'Copy the text'; }, 1_600);
         },
