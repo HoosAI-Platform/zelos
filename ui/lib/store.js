@@ -191,9 +191,13 @@ export function notify(message, { tone = 'info', action = null } = {}) {
 export const DEFAULT_ACCENT = '#5b8cff';
 
 /** Six digit hex only. Anything else is refused rather than written to a CSS
- *  custom property, where a hostile string would land unescaped in a style. */
+ *  custom property, where a hostile string would land unescaped in a style.
+ *  The same rule as core/config.mjs's isAccent, which the server applies to
+ *  a save; test/ui.test.mjs pins the two to agree (TT-3491). Not trimmed:
+ *  the server refuses " #5b8cff ", and this used to pass it through with its
+ *  spaces into the stylesheet. */
 export function isAccent(value) {
-  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value.trim());
+  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
 }
 
 export function currentAccent() {
@@ -463,8 +467,24 @@ export function watchSweeps() {
             emit();
           },
         });
-      } catch {
-        // Transport failure; the retry below is the whole recovery story.
+      } catch (err) {
+        // A 401 is not a dropped connection: this tab's key is read once, at
+        // load, and no retry can make the server take it again. Stop asking,
+        // and say so in the boot path's words (QA, 2026-10-10, TT-3495). It
+        // replaces any other screen: "not answering", raised while the server
+        // was down, is wrong once it is back with a new key, and with the
+        // stream stopped nothing else would take it down. Anything else is a
+        // transport failure, and the retry below is the whole recovery story.
+        if (err instanceof ApiError && err.status === 401) {
+          stopped = true;
+          const lost = fatalFor(err);
+          if (state.fatal?.title !== lost.title) {
+            state.fatal = lost;
+            state.phase = 'down';
+            emit();
+          }
+          return;
+        }
       }
       if (stopped) return;
       await new Promise((r) => setTimeout(r, delay));

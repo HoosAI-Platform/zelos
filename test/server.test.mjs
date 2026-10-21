@@ -2218,6 +2218,41 @@ test('a config patch with a malformed section is a 400 that says which', async (
 });
 
 /**
+ * PUT /api/config saves first and reports second, so a half-filled setup form
+ * can come back — and so it kept `ui.accent: "rebeccapurple"`, reported it as
+ * an error, and never applied it (QA, 2026-10-10, TT-3491). No form sends half
+ * an accent, so a bad one is now refused before anything is written. A hex
+ * still saves, and a patch that says nothing about the accent is untouched.
+ */
+test('a config patch with an accent that is not a hex is a 400, and nothing is written', async (t) => {
+  const ctx = await startServer(t);
+  const file = path.join(HOME, 'config.json');
+  const start = (await call(ctx, 'GET', '/api/config')).json.config;
+  const before = start.ui.accent;
+  const hex = await call(ctx, 'PUT', '/api/config', { body: { ui: { accent: '#3a7d44' } } });
+  assert.equal(hex.status, 200, 'a hex accent must still save');
+  assert.equal(hex.json.config.ui.accent, '#3a7d44');
+  const saved = fs.readFileSync(file, 'utf8');
+
+  for (const accent of ['rebeccapurple', '#fff', ' #3a7d44', 'red;}body{display:none', null, 5]) {
+    const res = await call(ctx, 'PUT', '/api/config', { body: { identity: { name: 'Nemo' }, ui: { accent } } });
+    assert.equal(res.status, 400, `${JSON.stringify(accent)}: saved first, reported second, never applied`);
+    assert.equal(res.json.error, 'ui.accent must be a six-digit hex colour like #5b8cff — nothing was written');
+    assert.equal(fs.readFileSync(file, 'utf8'), saved, `${JSON.stringify(accent)}: config.json must be untouched, the name with it`);
+  }
+  assert.equal((await call(ctx, 'GET', '/api/config')).json.config.ui.accent, '#3a7d44', 'GET must still show the accent that was saved');
+
+  // A patch that names no accent is not this rule's business.
+  for (const body of [{ ui: {} }, { identity: { name: start.identity.name } }]) {
+    const res = await call(ctx, 'PUT', '/api/config', { body });
+    assert.equal(res.status, 200, `${JSON.stringify(body)} names no accent`);
+    assert.equal(res.json.config.ui.accent, '#3a7d44');
+  }
+  // This home is shared with the rest of the file: leave it as it was found.
+  assert.equal((await call(ctx, 'PUT', '/api/config', { body: { ui: { accent: before } } })).status, 200);
+});
+
+/**
  * REGRESSION. A patch whose `mail`, `calendars` or `sources` was not a list —
  * a string, null, an object — came back 200 with `errors: []` and `mail: []`,
  * and config.json on disk had been rewritten to match: every account deleted

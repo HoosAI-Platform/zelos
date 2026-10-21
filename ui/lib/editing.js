@@ -17,7 +17,10 @@
  *     things it can read, the same cards onboarding's email step shows;
  *   - `[data-editing-region]` — a panel whose Save sits in a plain div
  *     rather than an editor: You, AI, Schedule and Privacy mark themselves,
- *     and the AI panel carries the mark into onboarding with it.
+ *     and the AI panel carries the mark into onboarding with it. So does the
+ *     question Remove asks in Email, Calendars and Other things it can read
+ *     (TT-3487): a redraw while focus is on "Remove it" would rebuild the
+ *     row and drop the keyboard user's place.
  *
  * The marker goes on those panels and NOT on every Settings panel. Focus
  * stays on a clicked button, so marking Your data, About, Colour or "Share
@@ -30,7 +33,12 @@
  * handler removes its own focused button — AI's "Forget the stored key"
  * saves, then redraws its form — leaves the redraw that save queued waiting
  * until the next focusout or pointerup, because no focus move announces that
- * the button is gone. The redraw is held, not lost.
+ * the button is gone. The redraw is held, not lost. Remove's question has the
+ * same edge: "Keep it" swaps its own focused button for the row's Remove and
+ * focuses that, and a focus moved from a removed node fires no focusout. A
+ * mouse press still runs the held redraw on its pointerup; from the keyboard
+ * it waits for the next focusout. "Remove it" needs none of this — its save
+ * redraws the panel itself.
  */
 
 export const EDITING_SELECTOR = 'form, .account-form, [data-editing-region]';
