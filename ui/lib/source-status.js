@@ -155,7 +155,7 @@ export function readingStatus(navigate) {
     },
   }, [
     el('span', { text: 'Reading status' }),
-    el('span', { class: 'mono worth-count', text: failed ? `${failed} need attention` : String(reports.length) }),
+    el('span', { class: 'mono worth-count', text: failed ? `${failed} ${failed === 1 ? 'needs' : 'need'} attention` : String(reports.length) }),
   ]);
   return el('section', { class: 'section worth' }, [toggle, meander(), panel]);
 }
