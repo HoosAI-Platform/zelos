@@ -761,7 +761,10 @@ export function dropDraft(id) {
 
 export async function setItemState(id, next, { until = undefined, silent = false } = {}) {
   const before = state.board.items;
-  const prior = before.find((i) => i.id === id) || null;
+  // A row under Finished is not on the board, but its undo matters as much:
+  // settling an item whose task left the selection had no other way back
+  // (QA, 2026-10-10, TT-3519).
+  const prior = before.find((i) => i.id === id) || finishedItems().find((i) => i.id === id) || null;
   // Optimistic: the board is the user's own decision surface, and a round-trip
   // of latency on "done" makes it feel broken. A failure puts the row back.
   // `snoozed_until` follows the server's rule locally too: it exists only while

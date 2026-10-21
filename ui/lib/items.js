@@ -38,17 +38,27 @@ function linkFor(item) {
   return url.href;
 }
 
+/**
+ * An item whose tasks all left the task selection, still open: listed under
+ * Finished for the person to settle (QA, 2026-10-10, TT-3519). It can be marked
+ * done or dismissed; reopening means nothing for an item that is already open,
+ * and bringing it back to the board is the source selection's job.
+ */
+const leftSelection = (item) => item.sourceInactive === true && item.state === 'open';
+
 function tick(item, { label = null } = {}) {
   const done = item.state === 'done';
+  const locked = item.sourceInactive === true && !leftSelection(item);
   const node = el('button', {
     type: 'button',
     class: 'tick',
     role: 'checkbox',
-    disabled: item.sourceInactive === true,
-    title: item.sourceInactive ? 'Include this task in your source selection again to bring it back.' : null,
+    disabled: locked,
+    title: locked ? 'Include this task in your source selection again to bring it back.'
+      : leftSelection(item) ? 'Mark done — finished in your task app, most likely' : null,
     'aria-checked': done ? 'true' : 'false',
     'aria-label': `${label || (done ? 'Reopen' : 'Mark done')}: ${item.headline || 'item'}`,
-    onclick: () => { if (!item.sourceInactive) setItemState(item.id, done ? 'open' : 'done'); },
+    onclick: () => { if (!locked) setItemState(item.id, done ? 'open' : 'done'); },
   }, el('span', { class: 'tick-mark', 'aria-hidden': 'true' }));
   return node;
 }
@@ -238,10 +248,15 @@ function moreControls(item) {
   const history = itemHistory(item);
   const panel = el('div', { class: 'row-more', hidden: true }, [
     snooze?.toggle,
-    !item.sourceInactive ? button('Not a thing', {
+    // For a task that left the selection the tick is the answer: dismissing
+    // tells the next sweep it was never worth surfacing, which is the wrong
+    // lesson about work that was done.
+    !item.sourceInactive || leftSelection(item) ? button('Not a thing', {
       class: 'btn quiet',
       onClick: () => setItemState(item.id, 'dismissed'),
-      title: 'Dismiss — it stays in the database, it just leaves the board',
+      title: leftSelection(item)
+        ? 'Dismiss — only if it was never something to do; if you did it, tick it instead'
+        : 'Dismiss — it stays in the database, it just leaves the board',
     }) : null,
     !item.sourceInactive && item.state === 'snoozed'
       ? button('Wake', { class: 'btn quiet', onClick: () => setItemState(item.id, 'open') })

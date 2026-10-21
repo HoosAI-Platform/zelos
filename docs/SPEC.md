@@ -192,7 +192,9 @@ means `not_in_current_selection`, not proof that a task was completed or deleted
 
 Inactive task messages and items supported entirely by inactive task references are
 excluded from the active board, counts, default drafts, message lists, and sweep
-context. Their text and user decisions remain stored. Search can include them with
+context. Such an item that is still open is listed under Finished, "No longer in task
+selection", where it can be marked done or dismissed. Their text and user decisions
+remain stored. Search can include them with
 `includeInactive:true`; those hits and resolved items carry `sourceInactive:true`.
 Resolved messages expose `task_activity`, `task_observed_at`, and
 `task_inactive_reason`. Reappearance restores source activity without reopening an

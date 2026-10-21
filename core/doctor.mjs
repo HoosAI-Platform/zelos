@@ -751,6 +751,12 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
   const label = `Mail · ${name}`;
   const guess = guessImapHost(account.user || '');
   const oauth = account.auth === 'xoauth2';
+  // Absent is Microsoft: the field postdates the first connected accounts.
+  // Every line below names this provider; several were written for Microsoft
+  // alone and told a Google mailbox to sign in with Microsoft
+  // (QA, 2026-10-10, TT-3439).
+  const provider = String(account.oauth?.provider ?? '').trim().toLowerCase() || 'microsoft';
+  const who = provider === 'google' ? 'Google' : 'Microsoft';
 
   if (!account.host) {
     return check(id, label, 'fail', 'No IMAP server is set for this account.',
@@ -761,7 +767,7 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
   try {
     stored = account.keyRef ? await deps.getSecret(account.keyRef) : null;
   } catch (err) {
-    return check(id, label, 'fail', `Zelos could not read the stored ${oauth ? 'Microsoft sign-in' : 'password'}: ${errorText(err)}`,
+    return check(id, label, 'fail', `Zelos could not read the stored ${oauth ? `${who} sign-in` : 'password'}: ${errorText(err)}`,
       `See the secret store line above. ${oauth ? 'Signing in again' : 'Re-entering the password'} in Settings → Email usually settles it.`);
   }
 
@@ -783,8 +789,8 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
        sign in successfully. */
     return check(
       id, label, 'fail',
-      `${name} holds a Microsoft sign-in but is set to send a password, so Zelos would offer the stored token as one.`,
-      'Open Settings → Email and set "How Zelos signs in" to "Sign in with Microsoft", or enter a password to replace the stored sign-in.',
+      `${name} holds a ${who} sign-in but is set to send a password, so Zelos would offer the stored token as one.`,
+      `Open Settings → Email and set "How Zelos signs in" to "Sign in with ${who}", or enter a password to replace the stored sign-in.`,
     );
   }
 
@@ -804,8 +810,7 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
     auth: oauth ? 'xoauth2' : 'password',
     oauth: oauth
       ? {
-        // Absent is Microsoft: the field postdates the first connected accounts.
-        provider: String(account.oauth?.provider ?? '').trim().toLowerCase() || 'microsoft',
+        provider,
         clientId: String(account.oauth?.clientId ?? '').trim(),
         tenantId: String(account.oauth?.tenantId ?? '').trim() || 'common',
         tokenRef: account.keyRef,
@@ -821,12 +826,14 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
     // the sign-in advice below, because its wording mentions the password and
     // would otherwise be read as a rejected credential. Nothing was rejected:
     // nothing was sent, on purpose, and the fix is a port rather than a
-    // different password.
+    // different password. The port is named on the account's own server: the
+    // host guessed from the address sent a nemo@example.test account on
+    // 127.0.0.1 to imap.example.test (QA, 2026-10-10, TT-3517).
     if (/still in the clear/i.test(reason)) {
       return check(
         id, label, 'fail',
         `${account.host}: ${reason}`,
-        `Zelos stopped before your password left this machine. Use the TLS port in Settings → Email — ${guess.host ? `${guess.host}:${guess.port}` : 'usually 993'} — and if this host really is a local bridge that cannot do TLS, turn requireTls off for this account.`,
+        `Zelos stopped before your password left this machine. Use the TLS port for ${account.host} in Settings → Email — usually 993 — and if this host really is a local bridge that cannot do TLS, turn requireTls off for this account.`,
       );
     }
     // A certificate nobody vouches for. Not the network and not the password:
@@ -850,6 +857,18 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
        sets for "this grant is dead and retrying will not revive it", which is the
        one case worth telling somebody to do something about. */
     if (oauth) {
+      if (provider === 'google') {
+        return check(
+          id, label, 'fail',
+          `${account.host}: ${reason}`,
+          result?.reconnect
+            ? 'The Google sign-in for this mailbox is no longer good — a changed password or access removed from your Google Account both do this. '
+              + 'Open Settings → Email, edit this account and press "Sign in with Google" again.'
+            : 'If this says the server does not offer AUTH=XOAUTH2, the host is wrong — Google’s is imap.gmail.com:993. '
+              + 'If it names a scope, the sign-in did not grant mail access — sign in again and allow it when Google asks. '
+              + 'Everything else is worth trying again: an unreachable sign-in endpoint is not a broken account.',
+        );
+      }
       return check(
         id, label, 'fail',
         `${account.host}: ${reason}`,
@@ -905,10 +924,9 @@ async function checkMailAccount(account, deps, { timeoutMs }) {
      whole check exists because a config can say one thing while the sweep does
      another, and "Signed in" without saying HOW is the sentence that let that go
      unnoticed for a release. */
-  const signedWith = String(account.oauth?.provider ?? '').toLowerCase() === 'google' ? ' with Google' : ' with Microsoft';
   return check(
     id, label, 'pass',
-    `Signed in to ${account.host}${oauth ? signedWith : ''} · ${names.size} folder${names.size === 1 ? '' : 's'} · reading ${wanted.join(', ')}${sent ? '' : ' · no sent folder is set, so nothing you wrote is read'}`,
+    `Signed in to ${account.host}${oauth ? ` with ${who}` : ''} · ${names.size} folder${names.size === 1 ? '' : 's'} · reading ${wanted.join(', ')}${sent ? '' : ' · no sent folder is set, so nothing you wrote is read'}`,
   );
 }
 

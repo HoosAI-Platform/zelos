@@ -331,6 +331,87 @@ describe('the mail check and the sent folder', () => {
     assert.equal(check.status, 'pass', check.detail);
     assert.match(check.detail, /no sent folder is set, so nothing you wrote is read/);
   });
+
+  test('a revoked Google sign-in is told to sign in with Google, not Microsoft (TT-3439)', async () => {
+    const google = account({
+      host: 'imap.gmail.com',
+      user: 'me@gmail.com',
+      auth: 'xoauth2',
+      oauth: { provider: 'google', clientId: 'client-1' },
+    });
+    freshHome({ config: { mail: [google, { ...google, id: 'm_2', keyRef: 'mail.m_2', oauth: { clientId: 'client-2' } }] } });
+    const report = await diagnose({
+      deps: {
+        ...SILENT_DEPS,
+        getSecret: async () => JSON.stringify({ kind: 'xoauth2', accessToken: 'a', refreshToken: 'r' }),
+        testImap: async () => ({ ok: false, capabilities: [], mailboxes: [], error: 'Reconnect the account', reconnect: true }),
+      },
+    });
+    const revoked = byId(report, 'mail.m_1');
+    assert.equal(revoked.status, 'fail', revoked.detail);
+    assert.match(revoked.action, /"Sign in with Google" again/);
+    assert.doesNotMatch(revoked.action, /Microsoft/);
+    // An account with no provider is still Microsoft's, as it always was.
+    assert.match(byId(report, 'mail.m_2').action, /"Sign in with Microsoft" again/);
+  });
+
+  test('every other line about a Google mailbox names Google too (TT-3439)', async () => {
+    const google = (over = {}) => account({
+      host: 'imap.gmail.com', user: 'me@gmail.com', auth: 'xoauth2', oauth: { provider: 'google', clientId: 'client-1' }, ...over,
+    });
+    const grant = JSON.stringify({ kind: 'xoauth2', accessToken: 'a', refreshToken: 'r' });
+
+    // A failure that is not a dead grant: Google's host and Google's scope.
+    freshHome({ config: { mail: [google()] } });
+    let report = await diagnose({
+      deps: {
+        ...SILENT_DEPS,
+        getSecret: async () => grant,
+        testImap: async () => ({ ok: false, capabilities: [], mailboxes: [], error: 'AUTHENTICATE failed: insufficient scope', reconnect: false }),
+      },
+    });
+    let check = byId(report, 'mail.m_1');
+    assert.match(check.action, /imap\.gmail\.com:993/);
+    assert.match(check.action, /did not grant mail access/);
+    assert.doesNotMatch(check.action, /Microsoft|IMAP\.AccessAsUser\.All/);
+
+    // A secret store that will not answer.
+    freshHome({ config: { mail: [google()] } });
+    report = await diagnose({ deps: { ...SILENT_DEPS, getSecret: async () => { throw new Error('locked'); } } });
+    assert.match(byId(report, 'mail.m_1').detail, /stored Google sign-in/);
+
+    // A Google grant under an account switched back to a password.
+    freshHome({ config: { mail: [google({ auth: 'password' })] } });
+    report = await diagnose({ deps: { ...SILENT_DEPS, getSecret: async () => grant } });
+    check = byId(report, 'mail.m_1');
+    assert.match(check.detail, /holds a Google sign-in/);
+    assert.match(check.action, /"Sign in with Google"/);
+
+    // And the pass line reads the provider the same way, padding and all.
+    freshHome({ config: { mail: [google({ oauth: { provider: ' Google ', clientId: 'client-1' } })] } });
+    report = await diagnose({
+      deps: { ...SILENT_DEPS, getSecret: async () => grant, testImap: async () => ({ ok: true, capabilities: [], mailboxes: [{ name: 'INBOX' }, { name: 'Sent' }], error: null }) },
+    });
+    assert.match(byId(report, 'mail.m_1').detail, /^Signed in to imap\.gmail\.com with Google ·/);
+  });
+
+  test('the TLS-port advice names the account’s server, not one guessed from the address (TT-3517)', async () => {
+    freshHome({ config: { mail: [account({ host: '127.0.0.1', port: 1143, secure: false, user: 'nemo@example.test', requireTls: true })] } });
+    const report = await diagnose({
+      deps: {
+        ...SILENT_DEPS,
+        getSecret: async () => 'app-password',
+        testImap: async () => ({
+          ok: false, capabilities: [], mailboxes: [],
+          error: 'IMAP 127.0.0.1:1143 — this connection is still in the clear and the server never offered STARTTLS, so your password was not sent.',
+        }),
+      },
+    });
+    const check = byId(report, 'mail.m_1');
+    assert.equal(check.status, 'fail', check.detail);
+    assert.match(check.action, /TLS port for 127\.0\.0\.1/);
+    assert.doesNotMatch(check.action, /imap\.example\.test/);
+  });
 });
 
 /* ================================================================== *

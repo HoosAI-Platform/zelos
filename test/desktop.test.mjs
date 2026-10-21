@@ -1190,6 +1190,324 @@ describe('the shell, booted against a stub Electron', () => {
     finish({ canceled: true }); assert.equal((await first).cancelled, true);
   });
 
+  it('suggests a backup file named for the local date, not the UTC one (TT-3505)', async () => {
+    const offered = [];
+    const handlers = main.backupHandlers({
+      isBoard: () => true, getCore: () => ({ paths: { home } }), getWindow: () => ({ isDestroyed: () => false }), appVersion: '1.8.0', flush: async () => {}, restart: async () => {},
+      // 22:00 on 14 March in New York, which is already the 15th in UTC.
+      now: () => new Date('2025-03-15T02:00:00Z'),
+      dialogs: { showSaveDialog: async (_win, options) => { offered.push(options.defaultPath); return { canceled: true }; } },
+    });
+    const tz = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      assert.equal((await handlers.createBackup({})).cancelled, true);
+    } finally {
+      if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
+    }
+    assert.deepEqual(offered, ['Zelos-2025-03-14.zelos-backup']);
+  });
+
+  /* A quit during a backup or restore (QA, 2026-10-10, TT-3504). The waiting is
+     wired here the way installBackups wires it — setBusy feeds phase/settle,
+     restart consumes — because finishing a quit would stop the booted shell
+     the rest of this suite runs against. The shell's own wiring is checked
+     after, on the one path that leaves it running: "Don't quit". */
+  function quitHarness({ failBackup = false, failRestore = false, leaveOk = true } = {}) {
+    const log = [];
+    const ticks = [];
+    let answer;
+    const pq = main.quitAfterMaintenance({
+      showWindow: () => log.push('show'),
+      ask: (options) => { log.push(`ask:${options.message}`); return new Promise((resolve) => { answer = resolve; }); },
+      leave: async () => { log.push('leave'); return leaveOk; },
+      nextTick: (fn) => ticks.push(fn),
+    });
+    const core = {
+      paths: { home }, closed: false,
+      stageBackup: async () => ({ manifest: { createdAt: '2026-09-10T12:00:00Z', appVersion: '1.8.0', counts: { messages: 0, events: 0, items: 0, drafts: 0, captures: 0, runs: 0, item_history: 0 } }, cleanup: () => {} }),
+      createBackup: async () => { log.push('backup'); if (failBackup) throw new Error('fixture failure'); },
+      restoreBackup: async () => { log.push('restore'); core.closed = true; if (failRestore) throw new Error('fixture failure'); },
+    };
+    let pick;
+    const handlers = main.backupHandlers({
+      isBoard: () => true, getCore: () => core, getWindow: () => ({ isDestroyed: () => false, webContents: {} }), appVersion: '1.8.0',
+      flush: async () => log.push('flush'),
+      setBusy: (value, info) => (value ? pq.phase(info) : pq.settle(info)),
+      quitPending: () => pq.pending,
+      quitBegun: () => pq.begun,
+      restart: async () => log.push(pq.consume() ? 'quit' : 'relaunch'),
+      dialogs: {
+        showSaveDialog: () => new Promise((resolve) => { pick = resolve; }),
+        showOpenDialog: () => new Promise((resolve) => { pick = resolve; }),
+        showMessageBox: async (_win, options) => { log.push(`box:${options.message}`); if (options.detail) log.push(options.detail); return { response: 1 }; },
+      },
+    });
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
+    return { pq, log, ticks, handlers, core, turn, answer: (response) => answer({ response }), pick: (result) => pick(result) };
+  }
+
+  it('a quit during a backup waits for it, says so, and then leaves the usual way (TT-3504)', async () => {
+    for (const cancel of [false, true]) {
+      const h = quitHarness();
+      const running = h.handlers.createBackup({});
+      await h.turn();
+      h.pq.defer();
+      assert.deepEqual(h.log, ['show', 'ask:Zelos will quit when you finish or cancel the backup.'], 'the window first, then what the quit waits for');
+      h.pq.defer();
+      assert.deepEqual(h.log.slice(2), ['show'], 'a second quit while the box is up is the same quit: the window comes forward, no second box');
+      h.pick(cancel ? { canceled: true } : { canceled: false, filePath: '/chosen.zelos-backup' });
+      await running;
+      assert.ok(!h.log.includes('leave'), 'not inside the operation that is ending');
+      assert.equal(h.ticks.length, 1);
+      await h.ticks.shift()();
+      assert.equal(h.log.at(-1), 'leave', cancel ? 'a cancelled save dialog still quits' : 'a finished backup quits');
+    }
+  });
+
+  it('a quit repeated after the box was closed shows it again, so a hung backup never goes silent (TT-3504)', async () => {
+    const h = quitHarness();
+    const running = h.handlers.createBackup({});
+    await h.turn();
+    h.pick({ canceled: false, filePath: '/chosen.zelos-backup' });
+    h.pq.phase({ restore: false, choosing: false }); // as if the worker were still copying
+    h.pq.defer();
+    h.answer(0);
+    await h.turn();
+    assert.equal(h.pq.pending, true, 'OK keeps the quit waiting');
+    h.pq.defer();
+    assert.deepEqual(h.log.slice(-2), ['show', 'ask:Zelos will quit when the backup finishes.']);
+    h.pq.defer({ quiet: true });
+    assert.equal(h.log.at(-1), 'ask:Zelos will quit when the backup finishes.', 'a signal never brings up a box');
+    await running;
+  });
+
+  it('"Quit now" while the save dialog is open quits at once, and a file chosen on the way out starts nothing (TT-3504)', async () => {
+    const h = quitHarness();
+    const running = h.handlers.createBackup({});
+    await h.turn();
+    assert.equal(h.pq.releasing, false);
+    h.pq.defer();
+    h.answer(2);
+    await h.turn();
+    assert.equal(h.log.at(-1), 'leave', 'the quit went ahead without waiting for the dialog');
+    assert.equal(h.pq.releasing, true, 'before-quit lets this one through');
+    h.pick({ canceled: false, filePath: '/chosen.zelos-backup' });
+    assert.equal((await running).cancelled, true);
+    assert.ok(!h.log.includes('backup') && !h.log.includes('flush'), 'nothing was written');
+    assert.equal(h.ticks.length, 0, 'and the quit is not run a second time');
+  });
+
+  it('"Quit now" is offered only while the file dialog is open, and pressed too late it brings the box back without it (TT-3504)', async () => {
+    const asked = [];
+    const answers = [];
+    const pq = main.quitAfterMaintenance({
+      showWindow() {},
+      ask: (o) => { asked.push(o); return new Promise((resolve) => answers.push(resolve)); },
+      leave: async () => { asked.push('leave'); return true; },
+      nextTick: () => {},
+    });
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
+    pq.phase({ restore: true, choosing: true });
+    pq.defer();
+    assert.deepEqual(asked[0].buttons, ['OK', 'Don’t quit', 'Quit now']);
+    pq.phase({ restore: true, choosing: false }); // the file was chosen; staging runs
+    answers[0]({ response: 2 });
+    await turn();
+    assert.ok(!asked.includes('leave'), '"Quit now" cannot quit through a running restore');
+    assert.equal(asked.length, 2, 'the late answer is not dropped: the box comes back');
+    assert.deepEqual(asked[1].buttons, ['OK', 'Don’t quit']);
+    assert.equal(pq.releasing, false);
+
+    // The box on screen is closed when the operation settles, so a quit that
+    // begins is not left waiting behind it.
+    assert.equal(asked[1].signal.aborted, false);
+    pq.settle({ outcome: 'done' });
+    assert.equal(asked[1].signal.aborted, true);
+    answers[1]({ response: 0 });
+    await turn();
+    assert.equal(pq.pending, true, 'an aborted box withdraws nothing');
+  });
+
+  it('a signal while only the file dialog is open quits at once; later it waits without a box (TT-3504)', async () => {
+    const log = [];
+    const pq = main.quitAfterMaintenance({ showWindow: () => log.push('show'), ask: () => { log.push('ask'); return new Promise(() => {}); }, leave: async () => { log.push('leave'); return true; } });
+    pq.phase({ restore: false, choosing: false });
+    pq.defer({ quiet: true });
+    assert.deepEqual(log, [], 'the worker is copying: wait, and say nothing');
+    pq.phase({ restore: false, choosing: true });
+    pq.defer({ quiet: true });
+    assert.deepEqual(log, ['leave'], 'nothing holds the data while the dialog is open');
+    assert.equal(pq.releasing, true);
+  });
+
+  it('a failed backup with a quit waiting stays open and says why (TT-3504)', async () => {
+    const h = quitHarness({ failBackup: true });
+    const running = h.handlers.createBackup({});
+    await h.turn();
+    h.pq.defer();
+    h.pick({ canceled: false, filePath: '/chosen.zelos-backup' });
+    await running;
+    assert.match(h.log.join('\n'), /kept the current board open instead of quitting/);
+    assert.equal(h.ticks.length, 0, 'no quit is scheduled after a failure');
+    assert.equal(h.pq.pending, false);
+  });
+
+  it('a quit during a restore is honoured with no relaunch, and never flushes drafts against the closed core (TT-3504)', async () => {
+    for (const failRestore of [false, true]) {
+      const h = quitHarness({ failRestore });
+      const running = h.handlers.restoreBackup({});
+      await h.turn();
+      h.pq.defer();
+      assert.ok(h.log.includes('ask:Zelos will quit when you finish or cancel the restore.'), h.log.join('\n'));
+      h.pick({ canceled: false, filePaths: ['/chosen.zelos-backup'] });
+      await running;
+      assert.equal(h.log.at(-1), 'quit', 'restart consumed the quit instead of relaunching');
+      assert.ok(!h.log.includes('relaunch'));
+      assert.ok(!h.log.includes('leave'), 'leaveBoard would flush drafts against a closed core');
+      assert.equal(h.log.filter((entry) => entry === 'flush').length, 1, 'only the flush before the restore');
+      if (failRestore) assert.match(h.log.join('\n'), /quit now, and recover or load its data the next time you open it/);
+      assert.equal(h.ticks.length, 0);
+    }
+  });
+
+  it('"Don’t quit" withdraws a waiting quit, but not one that has begun (TT-3504)', async () => {
+    const h = quitHarness();
+    let running = h.handlers.createBackup({});
+    await h.turn();
+    h.pq.defer();
+    h.answer(1);
+    await h.turn();
+    assert.equal(h.pq.pending, false);
+    h.pick({ canceled: true });
+    await running;
+    assert.equal(h.ticks.length, 0, 'nothing left to quit');
+
+    running = h.handlers.createBackup({});
+    await h.turn();
+    h.pq.defer();
+    h.pick({ canceled: true });
+    await running;
+    const leaving = h.ticks.shift()();
+    h.answer(1);
+    await h.turn();
+    await leaving;
+    assert.equal(h.log.at(-1), 'leave', 'the answer came after the quit began');
+  });
+
+  it('a backup asked for between the end of one and the quit it held is refused (TT-3504)', async () => {
+    const h = quitHarness({ leaveOk: false });
+    const running = h.handlers.createBackup({});
+    await h.turn();
+    h.pq.defer();
+    h.pick({ canceled: true });
+    await running;
+    assert.equal(h.ticks.length, 1, 'the quit is one tick away');
+    assert.deepEqual(await h.handlers.restoreBackup({}), { ok: false, error: 'Zelos is quitting.' });
+    await h.ticks.shift()();
+    assert.equal(h.pq.pending, false, 'a leave that failed (drafts would not save) lets go of the quit');
+    const again = h.handlers.createBackup({});
+    await h.turn();
+    h.pick({ canceled: true });
+    assert.equal((await again).cancelled, true, 'and backups work again');
+  });
+
+  /** A backup in the real shell, its save dialog held open until `pick`. */
+  async function heldShellBackup() {
+    const board = recorded.windows[0].webContents;
+    const frame = { url: booted.zelos.url };
+    board.mainFrame = frame;
+    let pick;
+    electron.dialog.showSaveDialog = () => new Promise((resolve) => { pick = resolve; });
+    const running = recorded.ipcHandlers.get(main.CREATE_BACKUP_CHANNEL)({ sender: board, senderFrame: frame });
+    await new Promise((resolve) => setImmediate(resolve));
+    return {
+      running,
+      finish: async () => {
+        pick({ canceled: true });
+        delete electron.dialog.showSaveDialog;
+        assert.equal((await running).cancelled, true);
+        for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      },
+    };
+  }
+
+  const asLinux = (t) => {
+    // Off macOS the close button is a quit, which is the path being tested.
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    t.after(() => Object.defineProperty(process, 'platform', platform));
+  };
+
+  it('the shell holds a quit asked for during a backup — by menu, close button or signal — and "Don’t quit" keeps it open (TT-3504)', async (t) => {
+    asLinux(t);
+    const quits = recorded.quits;
+    const boxes = recorded.messageBoxes.length;
+    recorded.messageBoxResponse = 1;
+    const held = await heldShellBackup();
+    try {
+      // A signal while only the save dialog is open has nothing to wait for:
+      // it goes straight to leaving, with no box. Held here at the draft save,
+      // which then fails, so the shell stays up for the rest of the suite.
+      let failSave;
+      const save = t.mock.method(recorded.windows[0].webContents, 'executeJavaScript', () => new Promise((_resolve, reject) => { failSave = reject; }));
+      const signal = process.listeners('SIGTERM').find((fn) => /quitHeld/.test(String(fn)));
+      assert.ok(signal, 'the shell has no SIGTERM handler of its own');
+      signal();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(save.mock.callCount(), 1, 'the signal began leaving at once');
+      assert.equal(recorded.quits, quits);
+      assert.equal(recorded.messageBoxes.length, boxes, 'nobody at a terminal would see a dialog');
+      failSave(new Error('synthetic save failure'));
+      for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.match(recorded.messageBoxes.at(-1).message, /draft edits open/);
+      save.mock.restore();
+
+      // A quit from the menu brings up the box, "Quit now" included.
+      electron.app.quit();
+      assert.equal(recorded.quits, quits + 1);
+      assert.equal(recorded.messageBoxes.length, boxes + 2, 'the refused quit is explained');
+      assert.equal(recorded.messageBoxes.at(-1).message, 'Zelos will quit when you finish or cancel the backup.');
+      assert.deepEqual(recorded.messageBoxes.at(-1).buttons, ['OK', 'Don’t quit', 'Quit now']);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // The close button is a quit too, held the same way.
+      let prevented = false;
+      recorded.windows[0].emit('close', { preventDefault() { prevented = true; } });
+      assert.equal(prevented, true);
+      assert.equal(recorded.messageBoxes.length, boxes + 3, 'closing the window during a backup is explained, not ignored');
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      recorded.messageBoxResponse = 0;
+      await held.finish();
+    }
+    assert.equal(recorded.quits, quits + 1, 'no quit followed the ones withdrawn');
+    assert.equal((await fetch(booted.zelos.url)).status, 200, 'the shell is still serving');
+  });
+
+  it('a quit refused by a backup that began while drafts were saving does not leave the close button waved through (TT-3504)', async (t) => {
+    asLinux(t);
+    const win = recorded.windows[0];
+    let saved;
+    t.mock.method(win.webContents, 'executeJavaScript', () => new Promise((resolve) => { saved = resolve; }));
+    recorded.messageBoxResponse = 1;
+    electron.app.quit(); // waits on the draft save
+    await new Promise((resolve) => setImmediate(resolve));
+    const held = await heldShellBackup();
+    try {
+      saved(true); // the leave action now sets quitting and asks again, into the backup
+      for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      let prevented = false;
+      win.emit('close', { preventDefault() { prevented = true; } });
+      assert.equal(prevented, true, 'a refused quit must reset quitting, or the window would close under the backup');
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      recorded.messageBoxResponse = 0;
+      await held.finish();
+    }
+    assert.equal((await fetch(booted.zelos.url)).status, 200, 'the shell is still serving');
+  });
+
   it('serves the board and refuses the API without the token', async () => {
     const base = booted.zelos.url;
 

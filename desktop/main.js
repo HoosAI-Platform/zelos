@@ -336,6 +336,7 @@ function createWindow() {
     if (quitting) return;
     event.preventDefault();
     if (staysResidentOnClose()) win.hide();
+    else if (quitHeld()) pendingQuit.defer();
     else leaveBoard(() => { quitting = true; app.quit(); }, { quit: true });
   });
   win.on('closed', () => { mainWindow = null; });
@@ -567,8 +568,12 @@ export const RESTORE_BACKUP_CHANNEL = 'zelos:restore-backup';
  * dependency boundary also lets tests exercise cancellation and failure without
  * opening an OS dialog or loading any real user data.
  */
-export function backupHandlers({ isBoard, getCore, getWindow, dialogs, flush, appVersion, restart, setBusy = () => {} }) {
+export function backupHandlers({ isBoard, getCore, getWindow, dialogs, flush, appVersion, restart, setBusy = () => {}, now = () => new Date(), quitPending = () => false, quitBegun = () => false }) {
   let busy = false;
+  // The date a person reads on their own calendar. toISOString() named the file
+  // by UTC, so an evening backup in the Americas offered tomorrow's date
+  // (QA, 2026-10-10, TT-3505).
+  const localDate = (at) => `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`;
   const safeError = (err) => {
     if (err?.code === 'ZELOS_DATA_BUSY' || err?.code === 'ZELOS_RESTORE_PENDING' || err?.message?.startsWith('Backup: ')) return err.message;
     return 'Zelos could not finish this operation. Check that other Zelos and AI clients are closed, finish any active request, and try again. Your recovery copies are kept in the data folder’s backups folder.';
@@ -578,19 +583,29 @@ export function backupHandlers({ isBoard, getCore, getWindow, dialogs, flush, ap
     // a filesystem action merely because it lives in the same webContents.
     if (args.length || !isBoard(event)) return { ok: false, error: 'This action is only available in the Zelos desktop board.' };
     if (busy) return { ok: false, error: 'A backup or restore is already in progress.' };
+    // Between the end of one operation and the quit it was holding back, a
+    // second one would hold it back again (QA, 2026-10-10, TT-3504).
+    if (quitPending()) return { ok: false, error: 'Zelos is quitting.' };
     const core = getCore();
     const win = getWindow();
     if (!core || !win || win.isDestroyed()) return { ok: false, error: 'The Zelos board is not ready.' };
-    busy = true; setBusy(true);
+    // setBusy says which operation, and whether its file dialog is still up, so a quit
+    // asked for meanwhile can say what it is waiting for; at the end it says
+    // how it went, because a failure is no time to close the window.
+    busy = true; setBusy(true, { restore, choosing: true });
     let staged;
     let success = false;
+    let outcome = 'cancelled';
     let disabled = false;
     try {
       const selected = restore
         ? await dialogs.showOpenDialog(win, { title: 'Restore a Zelos backup', properties: ['openFile'], filters: [{ name: 'Zelos backup', extensions: ['zelos-backup'] }] })
-        : await dialogs.showSaveDialog(win, { title: 'Create a Zelos backup', defaultPath: `Zelos-${new Date().toISOString().slice(0, 10)}.zelos-backup`, filters: [{ name: 'Zelos backup', extensions: ['zelos-backup'] }], message: 'This file contains private archive data and may include credentials. Keep it in a safe location.' });
+        : await dialogs.showSaveDialog(win, { title: 'Create a Zelos backup', defaultPath: `Zelos-${localDate(now())}.zelos-backup`, filters: [{ name: 'Zelos backup', extensions: ['zelos-backup'] }], message: 'This file contains private archive data and may include credentials. Keep it in a safe location.' });
       const selectedPath = restore ? selected.filePaths?.[0] : selected.filePath;
-      if (selected.canceled || !selectedPath) return { ok: false, cancelled: true };
+      // "Quit now" while the dialog was open: Zelos is on its way out, and a
+      // file chosen as it went must not start anything.
+      if (selected.canceled || !selectedPath || quitBegun()) return { ok: false, cancelled: true };
+      setBusy(true, { restore, choosing: false });
       win.setEnabled?.(false);
       disabled = true;
       if (restore) {
@@ -621,20 +636,140 @@ export function backupHandlers({ isBoard, getCore, getWindow, dialogs, flush, ap
       if (restore) await core.restoreBackup(staged, { appVersion });
       else await core.createBackup(selectedPath, { appVersion });
       success = true;
+      outcome = 'done';
       return { ok: true };
     } catch (err) {
+      outcome = 'failed';
       const error = safeError(err);
-      await dialogs.showMessageBox(win, { type: 'warning', buttons: ['OK'], message: restore ? 'Restore could not finish' : 'Backup could not finish', detail: `${error}${core.closed ? '\nZelos will reopen to recover or load its data.' : '\nZelos kept the current board open. If a draft could not save, copy its text before leaving.'}` }).catch(() => {});
+      const quitWaits = quitPending();
+      const next = core.closed
+        ? (quitWaits ? '\nZelos will quit now, and recover or load its data the next time you open it.' : '\nZelos will reopen to recover or load its data.')
+        : `\nZelos kept the current board open${quitWaits ? ' instead of quitting' : ''}. If a draft could not save, copy its text before leaving.`;
+      await dialogs.showMessageBox(win, { type: 'warning', buttons: ['OK'], message: restore ? 'Restore could not finish' : 'Backup could not finish', detail: `${error}${next}` }).catch(() => {});
       return { ok: false, error };
     } finally {
       // Never remove a transaction whose journal is needed by startup recovery.
       if (staged && !fs.existsSync(path.join(core.paths.home, '.restore-journal.json'))) staged.cleanup();
       if (disabled && !win.isDestroyed()) win.setEnabled?.(true);
-      busy = false; setBusy(false);
+      busy = false; setBusy(false, { restore, outcome, closed: Boolean(restore && core.closed) });
       if (restore && core.closed) await restart({ restored: success });
     }
   };
   return { createBackup: run(false), restoreBackup: run(true) };
+}
+
+/**
+ * A quit asked for while a backup or restore holds the data. before-quit has to
+ * refuse it — the worker is mid-copy, or the data is mid-replacement — and it
+ * used to refuse it silently: Zelos stayed open with no word, and the quit was
+ * never retried (QA, 2026-10-10, TT-3504). Now the quit waits, says what it is
+ * waiting for, and happens when the operation ends.
+ *
+ * - `defer()` is the refused quit. A box, after showWindow(), with a
+ *   "Don't quit" that withdraws it — unless the quit has already begun. A
+ *   second quit while it waits brings the window and the box back: an operation
+ *   that hangs must not turn every later Cmd+Q into silence.
+ * - While the file dialog is still open (`choosing`) nothing holds the data yet,
+ *   so the box also offers "Quit now": the quit goes ahead at once, `releasing`
+ *   tells before-quit to let it through, and the dialog goes with the window.
+ *   A signal in that window quits the same way. "Quit now" answered after the
+ *   dialog closed brings the box back without it.
+ * - The box is closed (its `signal` aborted) when the operation settles or the
+ *   quit begins, so nothing waits behind an app-modal box nobody dismissed.
+ * - `settle()` is the end of the operation. Done or cancelled: leave the usual
+ *   way, drafts flushed, on the next tick. Failed: stay open, because the person
+ *   has a failure to read and maybe a retry to make. A restore that closed the
+ *   core is not settled here at all — `consume()` in its restart decides, since
+ *   a draft flush against a closed core can only fail.
+ * - `pending` holds until the leave runs, or fails; the backup channels refuse
+ *   new work while it does, so nothing slips into the gap.
+ */
+export function quitAfterMaintenance({ showWindow, ask, leave, nextTick = setImmediate }) {
+  let waiting = null; // { begun } while a quit waits; the identity is the ticket
+  let phase = null;   // { restore, choosing } while an operation runs
+  let box = null;     // the AbortController of the box on screen, if one is
+  // The box is app-modal on macOS; a quit that begins with it still up could
+  // wait behind it until someone dismissed it. Aborting reads as its cancel.
+  const closeBox = () => { box?.abort(); box = null; };
+  // Leave now, while the file dialog is the only thing open.
+  const quitNow = (ticket) => {
+    ticket.begun = true;
+    closeBox();
+    Promise.resolve(leave()).then((left) => { if (!left && waiting === ticket) waiting = null; }, () => { if (waiting === ticket) waiting = null; });
+  };
+  const explain = (ticket) => {
+    const controller = new AbortController();
+    box = controller;
+    const what = phase?.restore ? 'restore' : 'backup';
+    const choosing = phase?.choosing === true;
+    const done = () => { if (box === controller) box = null; };
+    Promise.resolve(ask({
+      type: 'info', buttons: choosing ? ['OK', 'Don’t quit', 'Quit now'] : ['OK', 'Don’t quit'], defaultId: 0, cancelId: 0, noLink: true,
+      signal: controller.signal,
+      message: choosing ? `Zelos will quit when you finish or cancel the ${what}.` : `Zelos will quit when the ${what} finishes.`,
+      detail: choosing
+        ? `Nothing has been ${phase?.restore ? 'replaced' : 'written'} yet. Quit now closes the file dialog and quits.`
+        : phase?.restore
+          ? 'Quitting now could leave your data half replaced. After the restore Zelos quits instead of reopening, and the restored data loads the next time you open it.'
+          : 'Quitting now would leave the backup unfinished. If it fails, Zelos stays open so you can read why.',
+    })).then(({ response } = {}) => {
+      done();
+      if (controller.signal.aborted || waiting !== ticket || ticket.begun) return;
+      if (response === 1) waiting = null;
+      else if (response === 2) {
+        if (phase?.choosing) quitNow(ticket);
+        else { showWindow(); explain(ticket); } // the dialog closed meanwhile: there is no "now" any more
+      }
+    }, done);
+  };
+  return {
+    get pending() { return Boolean(waiting); },
+    get begun() { return Boolean(waiting?.begun); },
+    get releasing() { return Boolean(waiting?.begun && phase?.choosing); },
+    phase(info) { phase = info ?? null; },
+    defer({ quiet = false } = {}) {
+      if (waiting?.begun) return;
+      const ticket = waiting ?? { begun: false };
+      waiting = ticket;
+      // A signal gets no box. While only the file dialog is open nothing holds
+      // the data, so it has nothing to wait for either.
+      if (quiet) { if (phase?.choosing) quitNow(ticket); return; }
+      showWindow();
+      if (!box) explain(ticket);
+    },
+    settle({ outcome, closed } = {}) {
+      phase = null;
+      closeBox();
+      if (!waiting || closed || waiting.begun) return;
+      if (outcome === 'failed') { waiting = null; return; }
+      const ticket = waiting;
+      nextTick(async () => {
+        if (waiting !== ticket || ticket.begun) return; // "Don't quit" got there first
+        ticket.begun = true;
+        let left = false;
+        try { left = await leave(); } finally { if (!left && waiting === ticket) waiting = null; }
+      });
+    },
+    consume() {
+      const had = Boolean(waiting);
+      if (waiting) waiting.begun = true;
+      waiting = null;
+      closeBox();
+      return had;
+    },
+  };
+}
+
+const pendingQuit = quitAfterMaintenance({
+  showWindow: () => showWindow(),
+  ask: (options) => dialog.showMessageBox(options),
+  leave: () => leaveBoard(() => { quitting = true; app.quit(); }, { quit: true }),
+});
+
+/** A backup or restore holds a quit, unless the person chose "Quit now" while
+ * only its file dialog was open. */
+function quitHeld() {
+  return maintenanceActive && !pendingQuit.releasing;
 }
 
 function installBackups() {
@@ -643,12 +778,21 @@ function installBackups() {
       && event?.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame
       && classifyTarget(event.senderFrame?.url, { port: zelos?.port ?? 0 }).action === 'internal',
     getCore: () => zelos, getWindow: () => mainWindow, dialogs: dialog,
-    flush: flushDraftsInPage, appVersion: app.getVersion(), setBusy: (value) => { maintenanceActive = value; },
+    flush: flushDraftsInPage, appVersion: app.getVersion(),
+    setBusy: (value, info) => {
+      maintenanceActive = value;
+      if (value) pendingQuit.phase(info);
+      else pendingQuit.settle(info);
+    },
+    quitPending: () => pendingQuit.pending,
+    quitBegun: () => pendingQuit.begun,
     restart: async () => {
       // Geometry is outside the portable data set. Preserve it once, then stop
-      // the shell cleanly and let a fresh process load restored configuration.
+      // the shell cleanly and let a fresh process load restored configuration —
+      // unless a quit was asked for during the restore, which is honoured: the
+      // data is on disk, or its journal is, and the next launch loads it.
       windowState?.capture();
-      app.relaunch();
+      if (!pendingQuit.consume()) app.relaunch();
       quitting = true;
       app.quit();
     },
@@ -977,7 +1121,7 @@ export async function flushDraftsInPage(contents, { timeoutMs = 10_000 } = {}) {
 }
 
 function leaveBoard(action, { quit = false } = {}) {
-  if (maintenanceActive) return Promise.resolve(false);
+  if (quitHeld()) return Promise.resolve(false);
   // Repeated shortcuts share one save. Quit takes precedence over a reload
   // already waiting for the same edits, so a second request is not lost.
   if (leaving) {
@@ -1181,8 +1325,15 @@ async function bootstrap() {
     app.quit();
   });
 
+  /* A backup or restore holds the quit until it ends (quitAfterMaintenance).
+     An OS logout or shutdown cannot be held: the system ends the process
+     whatever this answers. That is what the restore journal is for — startup
+     finishes or rolls back an interrupted replacement — and an interrupted
+     backup never replaced the file it was writing. A refused quit also resets
+     `quitting`, which a leave action may have set just before maintenance
+     began, so the window's close is not waved through afterwards. */
   app.on('before-quit', (event) => {
-    if (maintenanceActive) { event.preventDefault(); return; }
+    if (quitHeld()) { event.preventDefault(); quitting = false; pendingQuit.defer(); return; }
     if (quitting || !mainWindow || mainWindow.isDestroyed()) { quitting = true; return; }
     event.preventDefault();
     leaveBoard(() => { quitting = true; app.quit(); }, { quit: true });
@@ -1193,7 +1344,10 @@ async function bootstrap() {
     beginShutdown();
   });
   for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => app.quit());
+    // A signal waits for a backup or restore like any quit, without a dialog
+    // nobody at a terminal would see — or, while only a file dialog is open,
+    // quits at once.
+    process.on(signal, () => { if (quitHeld()) pendingQuit.defer({ quiet: true }); else app.quit(); });
   }
 
   // whenReady() is called before the first await so its listener is attached

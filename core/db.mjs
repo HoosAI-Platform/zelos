@@ -1086,19 +1086,33 @@ export function bucketCounts(db, { states = ['open'], includeInactive = false } 
 
 /**
  * What was finished recently — the done and dismissed rows, newest decision
- * first. The query is core/sweep.mjs's RECENTLY_RESOLVED_SQL without the
+ * first, after any open item whose tasks all left the selection (below); up to
+ * `limit` of each. The query is core/sweep.mjs's RECENTLY_RESOLVED_SQL without the
  * window: `state_at` is when the user decided, and both the guard and the
  * ORDER BY go through datetime() for the reason given there — the stored
  * timestamps carry the user's offset, and character order would misplace two
  * decisions made either side of a timezone change.
  */
 export function listFinished(db, { limit = 20 } = {}) {
+  const cap = Math.max(1, Number(limit) || 20);
+  /* First, the open items every task behind which has left the task selection
+     — ticked off in Todoist, most often. They stay off the board, its counts
+     and the badge, because absence is not proof the work was done; but with
+     nowhere else to appear they simply vanished, so they are listed here, for
+     the person to mark done or dismiss (QA, 2026-10-10, TT-3519). Newest to
+     leave first: observed_at is when the selection was read without them. */
+  const left = prep(db, `
+    SELECT items.*, 1 AS source_inactive FROM items
+    WHERE state = 'open' AND ${INACTIVE_ITEM_SQL}
+    ORDER BY (SELECT MAX(datetime(task.observed_at)) FROM json_each(${ITEM_REFS_SQL}) AS refs
+      JOIN task_activity AS task ON task.message_id = substr(refs.value, 5)) DESC, datetime(first_seen) DESC
+    LIMIT ?`).all(cap).map(hydrateItem);
   const sql = `
     SELECT items.*, ${INACTIVE_ITEM_SQL} AS source_inactive FROM items
     WHERE state IN ('done', 'dismissed') AND state_at IS NOT NULL
     ORDER BY datetime(state_at) DESC
     LIMIT ?`;
-  return prep(db, sql).all(Math.max(1, Number(limit) || 20)).map(hydrateItem);
+  return [...left, ...prep(db, sql).all(cap).map(hydrateItem)];
 }
 
 /* ---------------------------------------------------------------- drafts */
@@ -1206,18 +1220,36 @@ export function getRun(db, id) {
   return hydrateRun(prep(db, 'SELECT * FROM runs WHERE id = ?').get(str(id)));
 }
 
+/*
+ * started_at is stamped in whole seconds, so two runs can share one. rowid is
+ * insertion order and breaks the tie: a failed check followed at once by a
+ * successful retry was reported as the last check, and failed
+ * (QA, 2026-10-10, TT-3454). VACUUM (and a backup's VACUUM INTO) may renumber
+ * rowids, but it copies rows in rowid order, so in practice they keep their
+ * order here.
+ *
+ * The shapes below keep runs_started_at in use. lastRun runs on every board
+ * GET, and a plain `ORDER BY started_at DESC, rowid DESC` scanned the whole
+ * table into a temporary B-tree, because the index stores equal started_at
+ * values in ascending rowid order. Finding the newest second through MAX() and
+ * then ordering only that second's rows by rowid is two index searches.
+ */
 /** The most recent run, optionally of a kind and optionally only successful ones. */
 export function lastRun(db, { kind = null, okOnly = false } = {}) {
   const where = [];
   const args = [];
   if (kind) { where.push('kind = ?'); args.push(str(kind)); }
   if (okOnly) where.push('ok = 1');
-  const sql = `SELECT * FROM runs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY started_at DESC LIMIT 1`;
-  return hydrateRun(prep(db, sql).get(...args));
+  const filter = where.length ? where.join(' AND ') : '1';
+  const sql = `SELECT * FROM runs WHERE ${filter}
+    AND started_at = (SELECT MAX(started_at) FROM runs WHERE ${filter})
+    ORDER BY rowid DESC LIMIT 1`;
+  return hydrateRun(prep(db, sql).get(...args, ...args));
 }
 
+/** Newest first. Only runs that share a second are sorted outside the index. */
 export function listRuns(db, { limit = 20 } = {}) {
-  return prep(db, 'SELECT * FROM runs ORDER BY started_at DESC LIMIT ?').all(Math.max(1, Number(limit) || 20)).map(hydrateRun);
+  return prep(db, 'SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?').all(Math.max(1, Number(limit) || 20)).map(hydrateRun);
 }
 
 /* -------------------------------------------------------------------- kv */

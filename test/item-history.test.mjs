@@ -329,9 +329,15 @@ test('rows and hero expose history, while inactive rows keep only history contro
     assert.ok(buttonNamed(node, 'What changed?'));
     assert.ok(walk(node).find((child) => child.attributes.title === 'More'));
   }
-  const inactive = itemRow({ ...item, sourceInactive: true }, { tz: 'UTC' });
+  const inactive = itemRow({ ...item, state: 'done', sourceInactive: true }, { tz: 'UTC' });
   assert.ok(buttonNamed(inactive, 'What changed?'));
   for (const label of ['Snooze', 'Wake', 'Not a thing', 'Restore', 'Reopen']) assert.equal(buttonNamed(inactive, label), undefined);
+  // Still open, it is listed under Finished to be settled: dismissing is the
+  // one extra control (TT-3519).
+  const left = itemRow({ ...item, sourceInactive: true }, { tz: 'UTC' });
+  assert.ok(buttonNamed(left, 'What changed?'));
+  assert.ok(buttonNamed(left, 'Not a thing'));
+  for (const label of ['Snooze', 'Wake', 'Restore', 'Reopen']) assert.equal(buttonNamed(left, label), undefined);
 });
 
 test('history deadlines preserve the source wall clock and day-only dates like the item card', async (t) => {

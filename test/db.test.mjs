@@ -13,7 +13,7 @@ const {
   SCHEMA_VERSION, BUCKETS, ITEM_STATES,
   open, close, migrate, withTransaction,
   messageRowId, eventRowId, itemRowId,
-  upsertMessage, upsertMessages, getMessage, listMessages, messagesInThread, countMessagesFetchedSince,
+  upsertMessage, upsertMessages, getMessage, listMessages, messagesInThread, countMessagesFetchedSince, reconcileTaskActivity,
   upsertEvent, upsertEvents, getEvent, listEvents, countEventsFetchedSince,
   upsertItem, getItem, getItemByKey, setItemState, listBoard, bucketCounts, listFinished,
   upsertDraft, getDraft, listDrafts, updateDraft,
@@ -474,6 +474,32 @@ test('listFinished() is the done and dismissed rows, newest decision first, capp
   assert.equal(listFinished(db).length, 20, 'the default cap holds however much has been finished');
 });
 
+test('listFinished() lists an open item whose tasks all left the selection, and the board still does not (TT-3519)', () => {
+  const db = fresh();
+  const task = (n) => upsertMessage(db, { sourceId: 'todoist', uid: n, messageId: `todoist:${n}`, subject: `Task ${n}`, sentAt: '2026-08-01T10:00:00Z' }).id;
+  const [one, two, kept] = [task(1), task(2), task(3)];
+  const mk = (key, refs) => upsertItem(db, { ...ITEM, key, headline: key, bucket: 'now', sourceRefs: refs }, { now: '2026-08-01T10:00:00Z' }).id;
+  mk('ticked-early', [`msg:${one}`]);
+  mk('ticked-late', [`msg:${two}`]);
+  mk('still-selected', [`msg:${kept}`]);
+  setItemState(db, mk('done-before', ['msg:elsewhere']), 'done', { now: '2026-08-02T10:00:00Z' });
+  // Task 1 leaves first, then task 2: each complete read lacks it.
+  const read = (ids, now) => reconcileTaskActivity(db, {
+    sourceId: 'todoist', prefix: 'todoist:', selection: 's', complete: true, now,
+    rows: ids.map((n) => ({ sourceId: 'todoist', uid: n, messageId: `todoist:${n}` })),
+  });
+  read([2, 3], '2026-08-03T10:00:00Z');
+  read([3], '2026-08-04T10:00:00Z');
+
+  const finished = listFinished(db);
+  assert.deepEqual(finished.map((i) => i.headline), ['ticked-late', 'ticked-early', 'done-before'],
+    'the ones that left the selection, newest to leave first, then what was decided');
+  assert.deepEqual(finished.slice(0, 2).map((i) => [i.state, i.sourceInactive]), [['open', true], ['open', true]]);
+  // Still off the board, its counts and so the badge.
+  assert.deepEqual(listBoard(db).map((i) => i.headline), ['still-selected']);
+  assert.equal(bucketCounts(db).now, 1);
+});
+
 /* ------------------------------------------------------------------ snooze */
 
 test('the wake compares instants, not strings — mixed offsets cannot mislead it', () => {
@@ -625,6 +651,21 @@ test('runs record what happened and lastRun() finds the newest', () => {
 
   const open_ = startRun(db, { now: '2026-08-05T12:00:00-04:00' });
   assert.equal(getRun(db, open_).ok, null, 'an unfinished run is neither ok nor failed');
+});
+
+test('of two runs started in the same second, the later one is the last (TT-3454)', () => {
+  const db = fresh();
+  // started_at is stamped in whole seconds: a failed check and the retry the
+  // person pressed at once carry the same one.
+  const at = '2026-08-05T10:00:00-04:00';
+  const failed = startRun(db, { now: at });
+  finishRun(db, failed, { ok: false, error: 'imap.example refused the connection', now: at });
+  const retry = startRun(db, { now: at });
+  finishRun(db, retry, { ok: true, now: at });
+
+  assert.equal(lastRun(db).id, retry, 'the retry, not the failure it replaced');
+  assert.equal(lastRun(db, { kind: 'full' }).id, retry, 'and the same when filtered by kind');
+  assert.deepEqual(listRuns(db).map((r) => r.id), [retry, failed]);
 });
 
 /* ---------------------------------------------------------------------- kv */
