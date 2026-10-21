@@ -15,7 +15,9 @@
 //
 // Routes to a LAN address are tried when the runner has one; on a CI runner it
 // may be a link-local stand-in nothing routes to, so one the control run cannot
-// hear is reported as untested rather than failed.
+// hear is reported as untested rather than failed. On Windows, loopback TURN
+// over UDP and STUN are never heard, and count only when the LAN address heard
+// them: scripts/webrtc-verdict.mjs says why, and what that no longer proves.
 //
 // Usage: node scripts/check-webrtc.mjs   (needs `npm ci` in desktop/)
 import fs from 'node:fs';
@@ -25,6 +27,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { judge } from './webrtc-verdict.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = createRequire(path.join(ROOT, 'desktop', 'package.json'))('electron');
@@ -87,30 +90,12 @@ function run(mode, scratch) {
 const label = (route) => `${route.key} → ${route.host}`;
 
 async function check(scratch) {
-  const failures = [];
-  const untested = [];
-
   const control = await run('control', scratch);
-  if (!control.netlog) failures.push('control: no readable net log, so DNS cannot be checked');
-  else if (!control.canaryLookedUp) failures.push('control: the canary hostname was never looked up with the lock off — the DNS check cannot see');
-  const live = new Set();
-  for (const route of control.routes) {
-    if (route.hits > 0) live.add(label(route));
-    else if (route.required) failures.push(`control: nothing arrived on ${label(route)} with the lock off — that route is untested`);
-    else untested.push(label(route));
-  }
   console.log(`control:  ${control.routes.map((r) => `${label(r)} ${r.hits}`).join(', ')}; canary looked up: ${control.canaryLookedUp}`);
-
   const hardened = await run('hardened', scratch);
   console.log(`hardened: ${hardened.routes.map((r) => `${label(r)} ${r.hits}`).join(', ')}; canary looked up: ${hardened.canaryLookedUp}; lock: ${hardened.lock}`);
-  if (hardened.lock !== 'ok') failures.push(`hardened: the lock refused to take: ${hardened.lock}`);
-  for (const route of hardened.routes) {
-    if (route.hits) failures.push(`hardened: ${label(route)} received ${route.hits} from the window`);
-  }
-  if (!hardened.netlog) failures.push('hardened: no readable net log, so DNS was not checked');
-  else if (hardened.canaryLookedUp) failures.push('hardened: the canary hostname was looked up — data can leave through DNS');
-  if (!hardened.page || hardened.page.tried === 0) failures.push('hardened: the page never ran its attempts');
 
+  const { failures, untested, live } = judge({ platform: process.platform, control, hardened });
   if (untested.length) console.log(`\nUntested on this machine (silent even with the lock off): ${untested.join(', ')}`);
   if (failures.length) {
     console.error(`\nThe board's window can reach the network, or the check cannot tell:\n- ${failures.join('\n- ')}`);
