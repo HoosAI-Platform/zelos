@@ -122,6 +122,19 @@ test('the week obeys the board rules the engine would enforce', () => {
   }
 });
 
+test('the week files a debt the right way round: nobody is "waiting on" you under They owe you (TT-3529)', () => {
+  const week = sampleWeek();
+  // `waiting` is "They owe you". An item saying someone is waiting on the
+  // user is a debt the user owes, and the board would file it backwards.
+  for (const i of week.items.filter((x) => x.bucket === 'waiting')) {
+    assert.doesNotMatch(i.headline, /is waiting on|waiting for you|wants? a (yes or no|reply)/i, i.headline);
+  }
+  // Delphine asked for a yes or no and has not had one: a reply you owe.
+  const referral = week.items.find((i) => i.key === 'sample-delphine-referral');
+  assert.equal(referral.bucket, 'soon');
+  assert.equal(referral.kind, 'reply');
+});
+
 test('there is a genuine double-booking: two events that really overlap', () => {
   const week = sampleWeek();
   const overlaps = [];

@@ -329,11 +329,14 @@ export function sampleWeek({ now = null, timezone = null } = {}) {
       sourceRefs: [],
       payload: { sample: true },
     },
+    // Delphine asked and you have not answered, so the debt is yours: a reply
+    // due later this week, not "They owe you", which is what `waiting` means
+    // (QA, 2026-10-09, TT-3529).
     {
       key: 'sample-delphine-referral',
-      kind: 'waiting',
-      bucket: 'waiting',
-      headline: `${SAMPLE_MARK}Delphine Sallow is waiting on a yes or no about the clinic`,
+      kind: 'reply',
+      bucket: 'soon',
+      headline: `${SAMPLE_MARK}Give Delphine Sallow a yes or no about the clinic`,
       why: 'She said end of the week and that she will pass it along either way.',
       person: delphine.name,
       personEmail: delphine.email,
