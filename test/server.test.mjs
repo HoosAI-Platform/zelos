@@ -524,6 +524,8 @@ test('the model probes never send a stored secret a caller names (TT-3430)', asy
   assert.equal(viaSource.status, 400, 'a config naming a source ref let the calendar Test send its token');
 });
 
+// Ten routes, by hand. Every route in the table is hunted in
+// test/credential-hunt.test.mjs (QA, 2026-10-10, TT-3527).
 test('no route returns a stored secret', async (t) => {
   const upstream = await startMockUpstream(t);
   const ctx = await startServer(t, {

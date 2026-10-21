@@ -30,7 +30,7 @@
 
 import { SECRET_KEYS } from '../config.mjs';
 
-import imap from './imap.mjs';
+import imap, { oauthFor } from './imap.mjs';
 import ics from './ics.mjs';
 import caldav from './caldav.mjs';
 import file from './file.mjs';
@@ -358,6 +358,58 @@ export function enabledSources(config) {
   for (const c of arr(config?.calendars)) push(get(c?.kind) ? c?.kind : 'ics', c);
   for (const s of arr(config?.sources)) push(s?.type, s);
   return out;
+}
+
+/**
+ * Every stored credential that reading `source` can put on the wire, read now:
+ * its own ref, and for a Google mail sign-in the client secret its refresh
+ * spends. Used only to strike them out of error text before it is stored or
+ * shown (QA, 2026-10-10, TT-3527) — never sent anywhere. The reads run
+ * together, since on some platforms each one is a process.
+ */
+export async function credentialsOf(source, config, getSecret) {
+  const refs = new Set();
+  if (typeof source?.keyRef === 'string' && source.keyRef) refs.add(source.keyRef);
+  try {
+    const clientSecretRef = oauthFor(source, config)?.clientSecretRef;
+    if (clientSecretRef) refs.add(clientSecretRef);
+  } catch { /* no sign-in block this can read; the source's own ref still counts */ }
+  const values = await Promise.all([...refs].map(async (ref) => {
+    try { return await getSecret(ref); } catch { return null; }
+  }));
+  return values.filter((value) => typeof value === 'string' && value);
+}
+
+/**
+ * How long `heldCredentials` waits on the secret store. A store that never
+ * answers must not hold a sweep's report back for ever.
+ */
+export const HELD_TIMEOUT_MS = 10_000;
+
+/**
+ * Every credential a sweep of `config` could quote back: each enabled source's
+ * (`credentialsOf`) and the model key, which only the caller knows how to read
+ * for its address. All read together. A store that has not answered within
+ * `timeoutMs` is an error rather than a wait, and the caller then shows a plain
+ * failure instead of text it could not screen (QA, 2026-10-10, TT-3527).
+ */
+export async function heldCredentials(config, getSecret, readModelKey = async () => null, { timeoutMs = HELD_TIMEOUT_MS } = {}) {
+  let sources = [];
+  try { sources = enabledSources(config); } catch { /* a config the sweep could not read either */ }
+  const reading = Promise.all([
+    Promise.all(sources.map(({ source }) => credentialsOf(source, config, getSecret).catch(() => []))),
+    Promise.resolve().then(readModelKey).catch(() => null),
+  ]).then(([perSource, key]) => [...perSource.flat(), ...(typeof key === 'string' && key ? [key] : [])]);
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`the secret store did not answer within ${timeoutMs} ms`)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([reading, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

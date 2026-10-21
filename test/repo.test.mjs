@@ -1011,6 +1011,105 @@ test('no tracked source file carries a carriage return', () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * Skips the run can count
+ *
+ * QA, 2026-10-10, TT-3527. Node's runner reports a skipped describe as one
+ * suite and none of its tests: "skipped 0" for a block of twelve. Three
+ * Windows-gated describes held nineteen tests that way, so the Windows legs
+ * never showed them among their skips. A gate goes on each test, where the run
+ * reports it with its reason.
+ *
+ * So no describe (or suite) takes options at all: its name is followed by the
+ * function, nothing else. That is stricter than "no skip", on purpose. An
+ * options object can carry a skip behind a variable, a spread, a nested brace
+ * or a `todo`, and no pattern reads all of those; none of today's describes
+ * needs one. `.skip` and `.todo` on the call itself are the same thing spelled
+ * shorter.
+ * ------------------------------------------------------------------ */
+
+/** -> the 1-based lines of every describe/suite call that is not name-then-function. */
+function describesWithOptions(src) {
+  // Comments and string contents are blanked, so prose that quotes a call,
+  // and a name with a comma or a quote in it, are not read as code.
+  const { mask } = maskSource(src);
+  const found = [];
+  // Not after `.` or an identifier character: core/connectors' describe() is
+  // imported by three test files and called as `describe()` or `x.describe()`,
+  // and it takes no name.
+  const CALL = /(?<![.\w$])(?:describe|suite)(?:\.(\w+))?\s*\(/g;
+  for (const m of mask.matchAll(CALL)) {
+    const line = mask.slice(0, m.index).split('\n').length;
+    if (m[1] === 'skip' || m[1] === 'todo') { found.push(line); continue; }
+    let i = m.index + m[0].length;
+    while (/\s/.test(mask[i])) i += 1;
+    if (!`'"\``.includes(mask[i])) continue; // no name: not a test suite
+    // The first argument runs to the first comma at depth 0, so a name built
+    // by concatenation or a call is read whole.
+    let depth = 0;
+    for (; i < mask.length; i += 1) {
+      const c = mask[i];
+      if ('([{'.includes(c)) depth += 1;
+      else if (')]}'.includes(c)) { if (depth === 0) break; depth -= 1; }
+      else if (c === ',' && depth === 0) break;
+    }
+    if (mask[i] !== ',') { found.push(line); continue; } // a name and nothing else
+    const rest = mask.slice(i + 1).trimStart();
+    if (!/^(?:\(|async\b|function\b)/.test(rest)) found.push(line);
+  }
+  return found;
+}
+
+test('the describe-options guard sees every way of skipping a describe whole', () => {
+  const caught = [
+    "describe('x', { skip: true }, () => {});",
+    "describe('x', { skip }, () => {});",
+    "describe('x', OPTIONS, () => {});",
+    "describe('x', { timeout: { ms: 5 }, skip: 'why' }, () => {});",
+    "describe('x', { todo: 'later' }, () => {});",
+    "describe('it\\'s, a name', { skip: true }, () => {});",
+    "describe('a ' + platform + ' name', { skip: true }, () => {});",
+    "describe(`on ${process.platform}`, { skip: true }, () => {});",
+    "describe('a' + name('x', 1), { skip: true }, () => {});",
+    "describe.skip('x', () => {});",
+    "describe.todo('x', () => {});",
+    "suite('x', { skip: true }, () => {});",
+    "suite.skip('x', () => {});",
+    "describe(\n  'x',\n  { skip: true },\n  () => {},\n);",
+    "describe('x');",
+  ];
+  for (const src of caught) assert.deepEqual(describesWithOptions(src), [1], `missed: ${src}`);
+
+  const fine = [
+    "describe('x', () => {});",
+    "describe('x', async () => {});",
+    "describe('x', function () {});",
+    "describe('x', (t) => {});",
+    "suite('x', () => {});",
+    "describe(\n  'a long name, with a comma',\n  () => {},\n);",
+    'const manifests = describe();',
+    'const manifests = registry.describe();',
+    "// describe('x', { skip: true }, () => {});",
+    "const s = \"describe('x', { skip: true }, () => {})\";",
+    "test('x', { skip: true }, () => {});",
+  ];
+  for (const src of fine) assert.deepEqual(describesWithOptions(src), [], `flagged: ${src}`);
+});
+
+test('no describe is skipped whole, because node does not count what it holds', () => {
+  const offenders = [];
+  let describes = 0;
+  for (const name of testFiles()) {
+    const src = fs.readFileSync(path.join(ROOT, 'test', name), 'utf8');
+    describes += (src.match(/\bdescribe\(/g) || []).length;
+    for (const line of describesWithOptions(src)) offenders.push(`test/${name}:${line}`);
+  }
+  assert.ok(describes > 50, `only ${describes} describes found, so the scan is not reading the suite`);
+  assert.deepEqual(offenders, [],
+    'these describes take options or a .skip/.todo, so a skip there hides their tests from the skip count; '
+    + `put the gate on each test instead:\n  ${offenders.join('\n  ')}`);
+});
+
+/* ------------------------------------------------------------------ *
  * Personal data in a public repository
  * ------------------------------------------------------------------ */
 

@@ -21,10 +21,11 @@
  */
 
 import { loadConfig } from './config.mjs';
-import { complete as llmComplete, extractJSON, isLocalAddress } from './llm.mjs';
+import { complete as llmComplete, extractJSON, isLocalAddress, withoutSecrets } from './llm.mjs';
 import { getSecret as realGetSecret, setSecret as realSetSecret, deleteSecret as realDeleteSecret } from './secrets.mjs';
 import { readModelKey, isModelKeyRef } from './model-key.mjs';
 import {
+  credentialsOf,
   enabledSources,
   get as connectorFor,
   originsFor,
@@ -533,9 +534,17 @@ function screenedError(text) {
  */
 const ERROR_CHARS = 500;
 
-/** `errorText`, bounded. Every path that stores or serves a failure uses this. */
-function storedError(err) {
-  return cap(errorText(err), ERROR_CHARS);
+/**
+ * `errorText`, bounded. Every path that stores or serves a failure uses this.
+ * Key-shaped text is masked in all of them, and `held` is what the failing
+ * source could have sent: its reader strips that itself, and this strikes it
+ * again, in every spelling, before the text reaches the run record and the
+ * page (QA, 2026-10-10, TT-3527). Struck before the cap, so the cap cannot
+ * leave the front half of one behind.
+ */
+function storedError(err, held = []) {
+  const text = withoutSecrets(errorText(err), held);
+  return cap(text, ERROR_CHARS);
 }
 
 /**
@@ -729,6 +738,13 @@ export async function runSweep({
       return nothing;
     }
     let secret = null;
+    /* What this source's error text is screened against, read only once there
+       is some: the credential read below, and whatever the store holds by
+       then, since a sign-in refreshed mid-run replaces it — plus a Google
+       sign-in's client secret. */
+    let heldPromise = null;
+    const held = () => (heldPromise ??= credentialsOf(source, config, getSecret)
+      .then((now) => [secret, ...now].filter(Boolean), () => [secret].filter(Boolean)));
     try {
       secret = source.keyRef ? await getSecret(source.keyRef) : null;
     } catch (err) {
@@ -832,8 +848,9 @@ export async function runSweep({
         if (part.error) {
           snapshotComplete = false;
           if (taskSnapshot) taskSnapshot.complete = false;
-          slog.warn(`${connector.family} source failed: ${at}`, { error: storedError(part.error) });
-          sources.push({ kind: connector.family, id: source.id, label: at, ok: false, count: 0, error: storedError(part.error) });
+          const error = storedError(part.error, await held());
+          slog.warn(`${connector.family} source failed: ${at}`, { error });
+          sources.push({ kind: connector.family, id: source.id, label: at, ok: false, count: 0, error });
           continue;
         }
         let kept = Array.isArray(part.rows) ? part.rows : [];
@@ -854,7 +871,7 @@ export async function runSweep({
           label: at,
           ok: !note,
           count: kept.length,
-          error: note ? storedError(note) : null,
+          error: note ? storedError(note, await held()) : null,
         });
       }
 
@@ -867,8 +884,9 @@ export async function runSweep({
       record(read ? { lastOkAt: startedMs, notBefore: 0, authBlockedUntil: 0, secretHash: null } : {});
       return { sink: connector.sink, rows, cursor: result?.cursor, sourceId: source.id, snapshotComplete, taskSnapshot };
     } catch (err) {
-      slog.warn(`${connector.family} source failed: ${label}`, { error: storedError(err) });
-      sources.push({ kind: connector.family, id: source.id, label, ok: false, count: 0, error: storedError(err) });
+      const error = storedError(err, await held());
+      slog.warn(`${connector.family} source failed: ${label}`, { error });
+      sources.push({ kind: connector.family, id: source.id, label, ok: false, count: 0, error });
       /* The only two failures Zelos reacts to rather than merely reports.
          Everything else is "try again next sweep", which is today's behaviour
          and is right: an unreachable host is the case this product is built
@@ -1639,8 +1657,14 @@ export class Scheduler {
       }
       return result;
     } catch (err) {
-      slog.error('scheduled sweep threw', { error: storedError(err) });
-      this.#lastResult = { ok: false, error: storedError(err) };
+      /* This text is `lastResult`, which /api/health serves and the supervisor
+         relays, and an engine that throws said whatever it liked. Key-shaped
+         text is masked here; the held credentials are struck where it is
+         served (core/server.mjs), since reading them would hold this tick on
+         the secret store (QA, 2026-10-10, TT-3527). */
+      const error = storedError(err);
+      slog.error('scheduled sweep threw', { error });
+      this.#lastResult = { ok: false, error };
       return this.#lastResult;
     } finally {
       this.#busy = false;

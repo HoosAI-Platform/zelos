@@ -5,6 +5,7 @@ import os from 'node:os';
 import net from 'node:net';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 process.env.ZELOS_LOG_LEVEL = 'silent';
 const HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-sweep-'));
@@ -151,19 +152,27 @@ async function startMockImap({ capability = 'IMAP4rev1' } = {}) {
 }
 
 /**
- * Whether this machine routes 0.0.0.0 to a listener bound on loopback. macOS and
- * Linux do; Windows refuses the connect outright. It is the only address that is
+ * Why the off-loopback tests cannot run on this machine, or false when they can.
+ * They need 0.0.0.0 to reach a listener bound on loopback: macOS and Linux route
+ * it; Windows refuses the connect outright. It is the only address that is
  * reachable in a test and is *not* loopback as far as core/sources/imap.mjs is
- * concerned, which is what a non-loopback case needs — so where it does not
- * work, that half of the test is skipped rather than faked.
+ * concerned, so where it does not work the test is skipped rather than faked.
+ *
+ * The answer is a reason for `t.skip`, never a bare false. These tests used to
+ * `return` early instead, and node's runner records a test that returns as a
+ * pass — so the Windows leg reported the cleartext rule green having asserted
+ * nothing (QA, 2026-10-10, TT-3476).
  */
-async function nonLoopbackAliasReaches(port) {
+async function offLoopbackSkipReason(port) {
   // Windows does not route it, and the probe itself is not free there: a
   // connect to 0.0.0.0 can sit without ever refusing, which turns a skipped
   // test into a hung CI job. So the answer is known in advance rather than
-  // measured, and no socket is opened at all.
-  if (process.platform === 'win32') return false;
-  return new Promise((resolve) => {
+  // measured, and no socket is opened at all. A LAN address is no way round it:
+  // see the Windows skip on the loopback-NAME test in test/imap.test.mjs.
+  if (process.platform === 'win32') {
+    return 'Windows will not connect to 0.0.0.0, and no other address a test can reach is one core/sources/imap.mjs calls non-loopback';
+  }
+  const reaches = await new Promise((resolve) => {
     const socket = net.connect({ host: '0.0.0.0', port });
     let settled = false;
     const done = (ok) => {
@@ -180,6 +189,7 @@ async function nonLoopbackAliasReaches(port) {
     socket.on('connect', () => done(true));
     socket.on('error', () => done(false));
   });
+  return reaches ? false : `0.0.0.0 did not reach a listener on 127.0.0.1:${port} on this machine, so there is no non-loopback address to test against`;
 }
 
 function icsDocument(startMs) {
@@ -1043,12 +1053,49 @@ test('a loopback bridge with nothing set still reads its mail in the clear', asy
   imap.destroy();
 });
 
-test('an explicit permission to use cleartext is honoured off loopback too', async () => {
+test('the off-loopback tests skip out loud where they cannot run, and run where they can', async () => {
+  /* QA, 2026-10-10, TT-3476. The two tests below used to `return` when 0.0.0.0
+     did not reach, which the runner counts as a pass: the Windows leg showed
+     the off-loopback cleartext rule green having checked nothing. A skip has to
+     carry a reason, and macOS and Linux must not quietly start skipping too. */
+  const unreachable = await offLoopbackSkipReason(await closedPort());
+  assert.equal(typeof unreachable, 'string', 'an address that cannot be reached must give a reason to skip, not a bare false');
+  assert.ok(unreachable.length > 0);
+  if (process.platform === 'win32') return;
   const imap = await startMockImap({ capability: 'IMAP4rev1' });
-  if (!await nonLoopbackAliasReaches(imap.port)) {
-    // Windows will not connect to 0.0.0.0, and there is no other address a test
-    // can reach that this code calls non-loopback. Skipped rather than pretended.
+  try {
+    assert.equal(await offLoopbackSkipReason(imap.port), false,
+      'macOS and Linux route 0.0.0.0 to loopback, so the off-loopback tests must run there, not skip');
+  } finally {
     imap.destroy();
+  }
+});
+
+test('no off-loopback test can go back to returning before it asserts, without a skip', () => {
+  // The other half of the test above (QA, 2026-10-10, TT-3476): the probe gives
+  // a reason, and this holds the tests to using it. Read from this file's own
+  // source, because a `return` that skips every assertion looks like a pass.
+  const src = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  const offLoopback = src.split(/\n(?=test\()/).filter((body) => body.startsWith('test(') && /host: '0\.0\.0\.0'/.test(body));
+  assert.ok(offLoopback.length >= 2, 'the off-loopback tests are gone, so this guard is guarding nothing');
+  for (const body of offLoopback) {
+    const name = /^test\('([^']*)'/.exec(body)?.[1];
+    const code = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const firstAssert = code.search(/\bassert\./);
+    const beforeAsserting = firstAssert < 0 ? code : code.slice(0, firstAssert);
+    for (const m of beforeAsserting.matchAll(/\breturn\b/g)) {
+      assert.ok(beforeAsserting.slice(0, m.index).includes('t.skip('),
+        `"${name}" can return before asserting anything without calling t.skip, which the runner reports as a pass`);
+    }
+  }
+});
+
+test('an explicit permission to use cleartext is honoured off loopback too', async (t) => {
+  const imap = await startMockImap({ capability: 'IMAP4rev1' });
+  const skip = await offLoopbackSkipReason(imap.port);
+  if (skip) {
+    imap.destroy();
+    t.skip(skip);
     return;
   }
 
@@ -1070,10 +1117,12 @@ test('an explicit permission to use cleartext is honoured off loopback too', asy
   imap.destroy();
 });
 
-test('off loopback, an account that says nothing is still protected', async () => {
+test('off loopback, an account that says nothing is still protected', async (t) => {
   const imap = await startMockImap({ capability: 'IMAP4rev1' });
-  if (!await nonLoopbackAliasReaches(imap.port)) {
+  const skip = await offLoopbackSkipReason(imap.port);
+  if (skip) {
     imap.destroy();
+    t.skip(skip);
     return;
   }
 
@@ -1497,6 +1546,52 @@ test('a source\'s error is screened before it is stored (TT-3453)', async () => 
   assert.match(source.error, /NO login refused/, 'the server\'s own words around the markup should survive');
   const stored = getRun(db, result.runId).stats.sources.find((s) => s.ok === false);
   assert.doesNotMatch(stored.error, /<script/i);
+});
+
+test('a source\'s error that quotes its own credential is stored without it', async () => {
+  /* QA, 2026-10-10, TT-3527. The readers strip what they send, and the run
+     record trusted them to: a reader that quoted the password back put it in
+     runs.stats_json and /api/state. The sweep strikes the source's credential
+     again, in each spelling, before the row is stored. */
+  const db = fresh();
+  const pass = 'q7Vt2-mail/pass+Kp8=';
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64').replace(/=+$/, '');
+  const result = await runSweep({
+    db,
+    config: baseConfig({ mail: [mailAccount()] }),
+    mode: 'light',
+    deps: {
+      getSecret: async () => pass,
+      fetchMail: async () => {
+        throw new Error(`NO login "${pass}" refused; PLAIN ${b64(`\0u\0${pass}`)}, echoed ${b64(`nemo@example.com:${pass}`)}, also ${encodeURIComponent(pass)}`);
+      },
+    },
+  });
+  const source = result.stats.sources.find((s) => s.kind === 'mail' && s.ok === false);
+  assert.ok(source, 'the failed mailbox should still be reported');
+  assert.match(source.error, /NO login .* refused/, 'the server\'s own words around the password should survive');
+  const stored = JSON.stringify(getRun(db, result.runId));
+  for (const form of [pass, encodeURIComponent(pass), b64(pass), b64(`\0u\0${pass}`), b64(`nemo@example.com:${pass}`)]) {
+    assert.ok(!source.error.includes(form), `the stored error kept the password as "${form}": ${source.error}`);
+    assert.ok(!stored.includes(form), `the run record kept the password as "${form}"`);
+  }
+
+  // A sign-in refreshed during the run is struck too: the grant is read again,
+  // and the token inside it, however deep, is what the error quotes.
+  const refreshed = 'at-2b9c8d7e6f5a4';
+  let reads = 0;
+  const second = await runSweep({
+    db: fresh(),
+    config: baseConfig({ mail: [mailAccount()] }),
+    mode: 'light',
+    deps: {
+      getSecret: async () => (reads++ === 0 ? pass : JSON.stringify({ kind: 'xoauth2', grant: { access_token: refreshed }, tokenType: 'Bearer' })),
+      fetchMail: async () => { throw new Error(`NO token ${refreshed} expired`); },
+    },
+  });
+  const after = second.stats.sources.find((s) => s.kind === 'mail' && s.ok === false);
+  assert.ok(!after.error.includes(refreshed), `a token refreshed mid-run was stored: ${after.error}`);
+  assert.match(after.error, /NO token .* expired/);
 });
 
 test('a run that fails on a huge error stores a bounded reason', async () => {

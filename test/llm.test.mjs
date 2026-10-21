@@ -37,6 +37,7 @@ import {
   listModels,
   probeLocal,
   stream,
+  withoutSecrets,
 } from '../core/llm.mjs';
 
 // The adapter never touches disk, but no test in this project is allowed near
@@ -1840,6 +1841,48 @@ test('REGRESSION: a 200 catalogue carrying an error body is a failure, not an em
   );
 });
 
+test('withoutSecrets strikes a short password from inside any base64 it is wrapped in', () => {
+  /* QA, 2026-10-10, TT-3527. Matching base64 as text left a 5 to 8 character
+     password whole, or at its edges, inside a Basic `user:pass` — the run
+     "YWJjZDpodW50M3IA…" decoded to "abcd:hunt3r". Every shift a value can sit
+     at in a base64 group, and every length that was leaking. */
+  const decodes = (text, value) => {
+    if (text.includes(value)) return true;
+    for (const run of text.match(/[A-Za-z0-9+/_-]{4,}={0,2}/g) || []) {
+      for (let offset = 0; offset < 4; offset += 1) {
+        for (const encoding of ['base64', 'base64url']) {
+          if (Buffer.from(run.slice(offset), encoding).includes(Buffer.from(value))) return true;
+        }
+      }
+    }
+    return false;
+  };
+  for (const value of ['hunt3', 'hunt3r', 'hunt3r!', 'hunt3r!/']) {
+    for (const prefix of ['', 'a:', 'ab:', 'abcd:', '\0nemo\0']) {
+      for (const encoding of ['base64', 'base64url']) {
+        const blob = Buffer.from(`${prefix}${value}`, 'utf8').toString(encoding);
+        const said = `refused: AUTH ${blob} (try again)`;
+        const out = withoutSecrets(said, [value]);
+        const shift = Buffer.byteLength(prefix) % 3;
+        assert.ok(!decodes(out, value), `${value.length} chars at shift ${shift} (${encoding}) survived: ${out}`);
+        assert.match(out, /^refused: AUTH .*\(try again\)$/, 'the words around it were lost');
+      }
+    }
+  }
+  // A grant is unpacked however deep the token sits, and short values are left alone.
+  const grant = JSON.stringify({
+    kind: 'xoauth2', tokenType: 'Bearer', scope: 'https://mail.google.com/', obtainedAt: '2026-10-19T09:00:00Z',
+    user: 'nemo@example.com', grant: { refresh_token: 'rt-9f8e7d6c5b', accessToken: 'ya29.at-1a2b3c4d' },
+  });
+  assert.equal(withoutSecrets('bad refresh rt-9f8e7d6c5b', [grant]), 'bad refresh <key withheld>');
+  assert.equal(withoutSecrets('spent ya29.at-1a2b3c4d', [grant]), 'spent <key withheld>');
+  assert.equal(withoutSecrets('the password was rejected', ['was']), 'the password was rejected');
+  // Only a grant's credentials are held, not the words around them: its token
+  // type, scope, timestamps and address are what the sentence is made of.
+  const said = 'google said: Bearer token expired for nemo@example.com at 2026-10-19T09:00:00Z (https://mail.google.com/, xoauth2)';
+  assert.equal(withoutSecrets(said, [grant]), said, 'a grant\'s harmless fields were struck');
+});
+
 test('probeLocal returns runtimes that answer and stays silent about ones that do not', async () => {
   const deadPort = await unusedPort();
   const found = await probeLocal({
@@ -1860,8 +1903,30 @@ test('probeLocal returns runtimes that answer and stays silent about ones that d
 });
 
 test('probeLocal with no arguments probes the four documented ports and never throws', async () => {
+  // The name promised the ports and nothing checked them: a default list that
+  // lost LM Studio, or probed somewhere off this machine, still passed (QA,
+  // 2026-10-10, TT-3527). The fetch is watched, not replaced, so the real
+  // probe still runs against whatever is or is not listening.
+  const asked = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    asked.push(String(input?.url ?? input));
+    return original(input, init);
+  };
   const started = Date.now();
-  const found = await probeLocal();
+  let found;
+  try {
+    found = await probeLocal();
+  } finally {
+    globalThis.fetch = original;
+  }
+  // README.md and docs/SPEC.md name these four: Ollama, LM Studio, llama.cpp, vLLM.
+  assert.deepEqual(asked.sort(), [
+    'http://127.0.0.1:11434/v1/models',
+    'http://127.0.0.1:1234/v1/models',
+    'http://127.0.0.1:8000/v1/models',
+    'http://127.0.0.1:8080/v1/models',
+  ].sort(), 'probeLocal asked somewhere other than the four documented local runtimes');
   assert.ok(Array.isArray(found), 'probeLocal always resolves to an array');
   assert.ok(Date.now() - started < 5000, 'the probe is time-boxed');
   for (const entry of found) {
