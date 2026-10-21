@@ -1379,6 +1379,48 @@ test('inactive task history is opt-in for Search and explicitly historical in As
   assert.match(prompt, /Absence does not prove completion/);
 });
 
+test('/api/state, Search and Ask say which source a message came from, without changing the ref (TT-3515)', async (t) => {
+  const upstream = await startMockUpstream(t);
+  const ctx = await startServer(t, { config: baseConfig({
+    model: { protocol: 'openai', baseUrl: upstream.baseUrl, model: 'mock-model' },
+    mail: [{ ...baseConfig().mail?.[0], id: 'm_work', label: 'Work mail', enabled: false }],
+    sources: [{ id: 'hn', type: 'rss', label: 'Hacker News', enabled: true, settings: {} }],
+  }) });
+  const feed = db.upsertMessage(ctx.db, { sourceId: 'hn', messageId: 'hn:1', subject: 'Zeppelin parts shortage', text: 'Zeppelin parts are scarce.', date: '2026-09-01T12:00:00Z' });
+  const mail = db.upsertMessage(ctx.db, { sourceId: 'm_work', messageId: '<a@example.com>', subject: 'Quarterly numbers', text: 'The numbers.', date: '2026-09-01T12:00:00Z' });
+  const gone = db.upsertMessage(ctx.db, { sourceId: 'removed', messageId: '<b@example.com>', subject: 'Old thing', text: 'Old.', date: '2026-09-01T12:00:00Z' });
+  const runId = db.startRun(ctx.db, { kind: 'full' });
+  db.upsertItem(ctx.db, { key: 'from-feed', kind: 'mail', bucket: 'today', headline: 'Read the parts story', sourceRefs: [`msg:${feed.id}`] }, { runId });
+  db.upsertItem(ctx.db, { key: 'from-mail', kind: 'mail', bucket: 'today', headline: 'Answer the numbers', sourceRefs: [`msg:${mail.id}`] }, { runId });
+  db.upsertItem(ctx.db, { key: 'from-gone', kind: 'mail', bucket: 'today', headline: 'The old thing', sourceRefs: [`msg:${gone.id}`] }, { runId });
+  const done = db.upsertItem(ctx.db, { key: 'done-feed', kind: 'mail', bucket: 'today', headline: 'Read the follow-up', sourceRefs: [`msg:${feed.id}`, 'msg:no-such-message'] }, { runId });
+  db.setItemState(ctx.db, done.id, 'done');
+
+  const state = await call(ctx, 'GET', '/api/state');
+  const byKey = (headline) => state.json.items.find((i) => i.headline === headline);
+  assert.deepEqual(byKey('Read the parts story').origins, [{ family: 'rss', kind: 'Feed', label: 'Hacker News' }]);
+  assert.deepEqual(byKey('Answer the numbers').origins, [{ family: 'mail', kind: 'Mail', label: 'Work mail' }]);
+  assert.equal(byKey('The old thing').origins, undefined, 'a source no longer configured makes no claim');
+  assert.deepEqual(byKey('Read the parts story').sourceRefs, [`msg:${feed.id}`], 'the msg: ref is unchanged');
+  assert.equal(byKey('Read the parts story').kind, 'mail', 'the stored kind is unchanged');
+  // The finished tail is drawn with the same rows, so it wears the same stamp.
+  const finished = state.json.finished.find((i) => i.headline === 'Read the follow-up');
+  assert.deepEqual(finished.origins, [{ family: 'rss', kind: 'Feed', label: 'Hacker News' }]);
+
+  const found = await call(ctx, 'GET', '/api/search?q=Zeppelin');
+  const hit = found.json.results.find((r) => r.ref === `msg:${feed.id}`);
+  assert.equal(hit.kind, 'message');
+  assert.deepEqual(hit.origin, { family: 'rss', kind: 'Feed', label: 'Hacker News' });
+
+  const response = await fetch(`${ctx.base}/api/ask`, {
+    method: 'POST', headers: { 'X-Zelos-Token': ctx.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: 'What about the Zeppelin parts?' }),
+  });
+  const frames = (await readStream(response, null, { until: (f) => f.startsWith('event: done') })).map(parseFrame);
+  const source = frames.find((f) => f.event === 'sources').data.find((x) => x.ref === `msg:${feed.id}`);
+  assert.deepEqual(source.origin, { family: 'rss', kind: 'Feed', label: 'Hacker News' });
+});
+
 test('/api/state exposes durable source health without losing the last successful read', async (t) => {
   const { recordSourceResults } = await import('../core/source-status.mjs');
   const ctx = await startServer(t, { config: baseConfig({

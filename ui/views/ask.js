@@ -20,6 +20,7 @@ import { el, button, meander, copyText } from '../lib/dom.js';
 import { emptyState } from '../lib/items.js';
 import { openStream, ApiError } from '../lib/api.js';
 import { state } from '../lib/store.js';
+import { messageLabel } from '../lib/format.js';
 
 let root = null;
 let transcript = null;
@@ -39,7 +40,7 @@ function sourceList(sources) {
   return el('div', { class: 'sources' }, [
     el('p', { class: 'sources-title mono', text: 'read from' }),
     el('ul', { class: 'sources-list' }, sources.map((s) => el('li', { class: 'source' }, [
-      el('span', { class: 'source-kind mono', text: KIND_LABEL[s.kind] || s.kind || 'source' }),
+      el('span', { class: 'source-kind mono', text: s.kind === 'message' ? messageLabel(s.origin) : KIND_LABEL[s.kind] || s.kind || 'source' }),
       el('span', { class: 'source-title', text: s.title || s.ref }),
       s.sourceInactive ? el('span', { class: 'source-excerpt', text: 'No longer in task selection' }) : null,
       s.excerpt ? el('span', { class: 'source-excerpt', text: s.excerpt }) : null,

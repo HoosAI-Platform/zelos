@@ -57,14 +57,14 @@ import { CALENDAR_DEFAULTS, loadConfig, saveConfig, validateConfig, privacyLimit
 /* The registry, so the two places below that used to name source kinds by hand
    ask it instead. It costs this process nothing new: every module it pulls in —
    core/sources/imap.mjs, caldav.mjs, ics.mjs — is already imported below. */
-import { describe as describeConnectors, typesFor, sourceStateKey, heldCredentials } from './connectors/index.mjs';
+import { describe as describeConnectors, typesFor, sourceStateKey, heldCredentials, get as connectorFor } from './connectors/index.mjs';
 import { readSourceStatus } from './source-status.mjs';
 import { createUpdateChecker } from './updates.mjs';
 import { getSecret, setSecret, deleteSecret, listRefs, backend } from './secrets.mjs';
 import { readModelKey, modelKeyRef, isModelKeyRef, LEGACY_MODEL_REF, UNPLACED_MODEL_REF } from './model-key.mjs';
 import {
   listBoard, bucketCounts, listEvents, listDrafts, updateDraft, lastRun,
-  setItemState, insertCapture, search, getKV, setKV, getItem, resolveRef,
+  setItemState, insertCapture, search, getKV, setKV, getItem, resolveRef, messageSourceIds,
   listFinished, dataCounts, databaseSizes, listItemHistory,
 } from './db.mjs';
 import {
@@ -1098,6 +1098,52 @@ function monthGridStartKey(key) {
   return addDaysToKey(first, -new Date(at).getUTCDay()) || first;
 }
 
+/**
+ * Where a stored message came from, by its source_id: the family, the
+ * connector's own name for it ("Feed", "Slack") and the label the person gave
+ * the source. Every connector that stores messages lands in the same table,
+ * so a feed entry, a Slack post and an email all used to be called "mail"
+ * (QA, 2026-10-10, TT-3515). This is read-side only: nothing is stored, and
+ * the `msg:` prefix and MCP's `kind` stay as they are. A source_id no longer
+ * in the config (a removed account, the sample week) answers null, and the
+ * screen keeps its old word for it.
+ */
+function messageOrigins(cfg) {
+  const byId = new Map();
+  for (const a of cfg.mail || []) {
+    if (a?.id) byId.set(a.id, { family: 'mail', kind: 'Mail', label: a.label || '' });
+  }
+  for (const src of cfg.sources || []) {
+    const connector = connectorFor(src?.type);
+    if (src?.id && connector?.sink === 'messages') {
+      byId.set(src.id, { family: connector.family, kind: connector.label, label: src.label || '' });
+    }
+  }
+  return (sourceId) => byId.get(sourceId) ?? null;
+}
+
+const msgIds = (refs) => (refs || [])
+  .filter((ref) => typeof ref === 'string' && ref.startsWith('msg:'))
+  .map((ref) => ref.slice(4));
+
+/**
+ * Each item with the origins of the messages it cites, one per source; items
+ * citing none go out as they are. One query for the whole list, which reads
+ * two columns and no bodies.
+ */
+function withOrigins(db, items, originOf) {
+  const sourceOf = messageSourceIds(db, items.flatMap((item) => msgIds(item.sourceRefs)));
+  return items.map((item) => {
+    const bySource = new Map();
+    for (const id of msgIds(item.sourceRefs)) {
+      const sourceId = sourceOf.get(id);
+      const origin = sourceId === undefined ? null : originOf(sourceId);
+      if (origin && !bySource.has(sourceId)) bySource.set(sourceId, origin);
+    }
+    return bySource.size ? { ...item, origins: [...bySource.values()] } : item;
+  });
+}
+
 async function handleState(ctx) {
   const { db } = ctx;
   const cfg = ctx.config();
@@ -1137,13 +1183,14 @@ async function handleState(ctx) {
 
   const tokens = tokenCounter(db);
 
+  const originOf = messageOrigins(cfg);
   sendJSON(ctx.res, 200, {
-    items,
+    items: withOrigins(db, items, originOf),
     counts: bucketCounts(db, { states: ['open'] }),
     // The done and dismissed tail the Now view folds, dimmed, under the board —
     // newest decision first, at most 20. Not board rows: search and the rail
     // keep reading items[] alone.
-    finished: listFinished(db),
+    finished: withOrigins(db, listFinished(db), originOf),
     events: listEvents(db, { from, to, limit: 1000 }),
     drafts: listDrafts(db, { states: ['pending', 'edited'], limit: 200 }),
     runs: { last: lastRun(db) },
@@ -2535,7 +2582,7 @@ function groundingHits(db, question, limit) {
 }
 
 /** Build the grounding block for a question out of the FTS5 index. */
-function askContext(db, question, privacy) {
+function askContext(db, question, privacy, originOf = () => null) {
   /* "Most items per check" caps how much of the user's email, calendar and
      notes each AI request carries, Ask's included, as the Privacy panel says. Ask used to send up to 12 whatever it said
      (QA, 2026-10-10, TT-3446). */
@@ -2577,7 +2624,8 @@ function askContext(db, question, privacy) {
       facts.push(`noted: ${row.created_at}`, cap(row.text, ASK_CONTEXT_CHARS));
     }
 
-    sources.push({ ref: hit.ref, kind: hit.kind, title: cap(title, 120), excerpt: cap(hit.excerpt, 200), ...(hit.sourceInactive ? { sourceInactive: true } : {}) });
+    const origin = hit.kind === 'message' ? originOf(row.source_id) : null;
+    sources.push({ ref: hit.ref, kind: hit.kind, title: cap(title, 120), excerpt: cap(hit.excerpt, 200), ...(hit.sourceInactive ? { sourceInactive: true } : {}), ...(origin ? { origin } : {}) });
     /* The title is as untrusted as the facts under it — a subject or an event
        title is whatever the sender typed — so it is scrubbed the same way. It
        used to go in raw: `<|im_start|>` in an event title reached the model
@@ -2660,7 +2708,7 @@ async function handleAsk(ctx) {
     throw new HttpError(409, 'no model is configured yet — pick one in Settings');
   }
 
-  const { sources, context } = askContext(ctx.db, question, privacyLimits(cfg.privacy));
+  const { sources, context } = askContext(ctx.db, question, privacyLimits(cfg.privacy), messageOrigins(cfg));
   const apiKey = await modelKeyFor(cfg.model.baseUrl, cfg);
 
   // Headers go out only once we know the request itself is good, so a setup
@@ -2759,7 +2807,15 @@ function handleSearch(ctx) {
   if (q.length > 200) throw new HttpError(400, 'q is too long');
   const limit = Math.min(50, Math.max(1, Number(ctx.url.searchParams.get('limit')) || 20));
   const includeInactive = ctx.url.searchParams.get('includeHistory') === '1';
-  sendJSON(ctx.res, 200, { q, results: search(ctx.db, q, { limit, includeInactive }) });
+  const originOf = messageOrigins(ctx.config());
+  const hits = search(ctx.db, q, { limit, includeInactive });
+  const sourceOf = messageSourceIds(ctx.db, msgIds(hits.map((hit) => hit.ref)));
+  const results = hits.map((hit) => {
+    const sourceId = hit.kind === 'message' ? sourceOf.get(hit.ref.slice(4)) : undefined;
+    const origin = sourceId === undefined ? null : originOf(sourceId);
+    return origin ? { ...hit, origin } : hit;
+  });
+  sendJSON(ctx.res, 200, { q, results });
 }
 
 /**
