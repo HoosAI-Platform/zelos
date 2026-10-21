@@ -391,6 +391,15 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   overflow-wrap: anywhere;
 }
 .sweepline.is-bad .sweepline-text { color: var(--accent-text); }
+/* On a phone the idle line ("Last checked … · next check at …") wraps to two
+   lines and a running check's fits on one, so the sticky topbar grew and
+   shrank by a line at every check and the page jumped 18 px each way (QA,
+   2026-10-10, TT-3492). Two lines are kept either way. */
+@media (max-width: 34rem) {
+  /* The em line is for a browser without lh (Safari before 16.4): two lines
+     at the line-height of 1.5 it inherits. */
+  .sweepline-text { min-height: 3em; min-height: 2lh; }
+}
 
 /* The day's token spend. Quieter than the sweep text beside it by size alone —
    an opacity here took the dim ink under 4.5:1. When the database has
@@ -1073,6 +1082,12 @@ textarea.input, .draft-body, .ask-field, .capture-field {
 }
 
 .cal-scroll { max-height: min(70dvh, 44rem); overflow-y: auto; overflow-x: hidden; }
+/* The scroller is a tab stop (TT-3472), but its ring can show on neither side
+   of its edge: .cal-grid's overflow: hidden clips one outside, and the
+   positioned columns, chips and now-line paint over one inside. So the
+   grid around it wears the ring instead. */
+.cal-scroll:focus-visible { outline: none; }
+.cal-grid:has(.cal-scroll:focus-visible) { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .cal-body { display: grid; grid-template-columns: var(--gutter) minmax(0, 1fr); }
 
 .cal-gutter { position: relative; height: calc(1440 * var(--min-h)); }
@@ -1208,8 +1223,12 @@ textarea.input, .draft-body, .ask-field, .capture-field {
   padding: 0 0.35rem;
 }
 /* min-width: 0 on the row, or the flag's min-content width blows the cell
-   open on a phone and "clash" lands on top of the neighbouring date. */
-.month-num-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.3rem; min-width: 0; }
+   open on a phone and "clash" lands on top of the neighbouring date. And it
+   wraps: a phone's cell gave the flag 19 px for 29 px of text, cut it to
+   "CL…", and the title that names it never shows on a touch screen, so the
+   flag takes a line of its own under the date instead (QA, 2026-10-10,
+   TT-3528). The ellipsis stays for a cell too narrow even for that. */
+.month-num-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 0.3rem; min-width: 0; }
 .month-num { font-size: 0.8125rem; flex: none; }
 .month-flag {
   font-family: var(--mono);

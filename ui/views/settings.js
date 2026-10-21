@@ -2303,6 +2303,16 @@ export function simpleMailForm({ onSaved, onCancel }) {
   card.hidden = true;
   // The full form opens here, under the card, and closes back to nothing.
   const expertSlot = el('div', { class: 'editor' });
+  /* Each button that opens the full form says whether it is open, as the
+     fold() drawers do; they had no aria-expanded at all (QA, 2026-10-10,
+     TT-3490). The card's buttons are rebuilt with each guess, and so is
+     this list. */
+  let expertToggles = [];
+  function syncExpert() {
+    const open = expertSlot.children.length ? 'true' : 'false';
+    for (const toggle of expertToggles) toggle.setAttribute('aria-expanded', open);
+  }
+  const expertToggle = (toggle) => { expertToggles.push(toggle); syncExpert(); return toggle; };
   // The "Stuck?" line: about email in general until the guess lands, then
   // about the provider it named — its label, never the address.
   const helpSlot = el('div', {}, [askClaude({ step: 'email' })]);
@@ -2339,7 +2349,7 @@ export function simpleMailForm({ onSaved, onCancel }) {
    * outcomes and not a wrong one. Pressing the button again closes it.
    */
   async function openAdvanced() {
-    if (expertSlot.children.length) { expertSlot.replaceChildren(); return; }
+    if (expertSlot.children.length) { expertSlot.replaceChildren(); syncExpert(); return; }
     microsoft?.stop();
     google?.stop();
     if (storedHere.size) await loadConfig().catch(() => {});
@@ -2361,9 +2371,10 @@ export function simpleMailForm({ onSaved, onCancel }) {
       ...prefill(),
     }, {
       onSaved,
-      onCancel: () => expertSlot.replaceChildren(),
+      onCancel: () => { expertSlot.replaceChildren(); syncExpert(); },
     }));
     if (expertNote) expertSlot.appendChild(expertNote);
+    syncExpert();
   }
 
   async function lookUp() {
@@ -2438,7 +2449,7 @@ export function simpleMailForm({ onSaved, onCancel }) {
     }
   }
 
-  const formAdvanced = button('Server settings (for experts)', { class: 'link', onClick: openAdvanced });
+  const formAdvanced = expertToggle(button('Server settings (for experts)', { class: 'link', onClick: openAdvanced }));
 
   function paintCard() {
     microsoft?.stop();
@@ -2449,6 +2460,8 @@ export function simpleMailForm({ onSaved, onCancel }) {
     revealPassword = () => {};
     expertNote = null;
     expertSlot.replaceChildren();
+    expertToggles = [formAdvanced];
+    syncExpert();
     card.hidden = !guess;
     // One route to the full form at a time: before a guess it is the link under
     // the address; once a card is up, the card carries its own. Two expert
@@ -2487,18 +2500,18 @@ export function simpleMailForm({ onSaved, onCancel }) {
 
     if (guess.auth === 'bridge') {
       replace(card, [head, note, el('div', { class: 'row-inline' }, [
-        button('Continue with Bridge settings', { class: 'btn solid', onClick: openAdvanced }),
+        expertToggle(button('Continue with Bridge settings', { class: 'btn solid', onClick: openAdvanced })),
       ])]);
       return;
     }
 
-    const advanced = button('Server settings (for experts)', {
+    const advanced = expertToggle(button('Server settings (for experts)', {
       // Prominent where the guess is only a guess: the full form is where a
       // wrong host gets corrected, and a user whose provider is unknown is
       // the user most likely to need it.
       class: guess.known ? 'btn quiet' : 'btn',
       onClick: openAdvanced,
-    });
+    }));
     const experts = el('div', { class: 'row-inline' }, [advanced]);
 
     if (guess.auth === 'xoauth2') {
@@ -3358,6 +3371,17 @@ function sweepPanel() {
   const fromSelect = select(HOUR_CHOICES, { value: String(cfg.activeHours?.[0] ?? 6) });
   const toSelect = select(END_HOUR_CHOICES, { value: String(cfg.activeHours?.[1] ?? 23) });
   let auto = cfg.auto !== false;
+  /* field() pointed a <label for> at the div around the two pickers, which
+     names nothing, so each select read as a bare "6 am, combobox" (QA,
+     2026-10-10, TT-3421). Now "Between" names a group and each picker has
+     its own name. */
+  fromSelect.setAttribute('aria-label', 'Start hour');
+  toSelect.setAttribute('aria-label', 'End hour');
+  const betweenId = nextId('f');
+  const betweenField = el('div', { class: 'field', role: 'group', 'aria-labelledby': betweenId }, [
+    el('span', { class: 'field-label', id: betweenId, text: 'Between' }),
+    el('div', { class: 'row-inline' }, [fromSelect, el('span', { text: 'and' }), toSelect]),
+  ]);
 
   // An editing region, as on You (TT-3465): Save is in a plain div.
   return el('div', { class: 'panel', 'data-editing-region': true }, [
@@ -3365,7 +3389,7 @@ function sweepPanel() {
     checkbox('Check my mail automatically', { checked: auto, onChange: (v) => { auto = v; } }),
     el('div', { class: 'grid-2' }, [
       field('Check my mail every (minutes)', intervalInput),
-      field('Between', el('div', { class: 'row-inline' }, [fromSelect, el('span', { text: 'and' }), toSelect])),
+      betweenField,
     ]),
     el('div', { class: 'row-inline' }, [
       button('Save', {
@@ -3684,9 +3708,10 @@ function dataPanel() {
       el('p', { class: 'quiet-note', text: plainSecretNotes(backendName).data }),
       fold('For experts', [
         el('p', { class: 'quiet-note', text: 'Zelos deliberately has no route that wipes your data — a local server that can destroy the database on request is a local server a stray web page can point at. Done by hand, with the app closed, it is one command:' }),
-        el('pre', { class: 'code' }, el('code', { text: erase.command(home) })),
+        // A tab stop: a long folder path scrolls it sideways on a phone (TT-3473).
+        el('pre', { class: 'code', tabindex: '0' }, el('code', { text: erase.command(home) })),
         el('p', { class: 'quiet-note', text: secretStoreNotes(state.health?.backend?.name).data }),
-        backendName === 'windows-dpapi' ? el('pre', { class: 'code' }, el('code', { text: erase.secrets })) : null,
+        backendName === 'windows-dpapi' ? el('pre', { class: 'code', tabindex: '0' }, el('code', { text: erase.secrets })) : null,
       ], { id: 'data.experts' }),
     ]),
     status.node,

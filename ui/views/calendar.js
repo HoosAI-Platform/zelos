@@ -459,7 +459,16 @@ function timeGrid(keys, { wasOnScreen }) {
   const days = el('div', { class: 'cal-days', style: { '--cols': String(keys.length) } },
     keys.map((key) => dayColumn(key, { todayKeyStr, nowMinutes, compact })));
 
-  const scroller = el('div', { class: 'cal-scroll' }, [
+  /* The hours scroll in a box with nothing focusable inside, and WebKit does
+     not make a scroll box focusable by itself, so the hours out of view could
+     not be reached by keyboard (QA, 2026-10-10, TT-3472). A tab stop, with a
+     name to announce when it takes focus, lets the arrow keys scroll it. */
+  const scroller = el('div', {
+    class: 'cal-scroll',
+    tabindex: '0',
+    role: 'region',
+    'aria-label': view.mode === 'day' ? 'Day schedule' : 'Week schedule',
+  }, [
     el('div', { class: 'cal-body' }, [hours, days]),
   ]);
 

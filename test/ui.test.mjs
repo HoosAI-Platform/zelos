@@ -1279,6 +1279,20 @@ test('the clash flag cannot escape its month cell', () => {
   assert.match(row[1], /min-width:\s*0/);
 });
 
+test('at phone width the clash flag wraps under the date instead of being cut to "CL…" (TT-3528)', () => {
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
+  // A phone's month cell gave the flag 19 px for 29 px of "clash", and its
+  // title never shows on a touch screen. Wrapping gives it the cell's width.
+  const row = /^\.month-num-row \{([^}]*)\}/m.exec(css);
+  assert.ok(row, '.month-num-row rule is missing');
+  assert.match(row[1], /flex-wrap:\s*wrap/, 'the flag shares a line with the date, where a phone cuts it short');
+  for (const narrow of css.matchAll(/@media \(max-width:[^)]*\) \{([\s\S]*?)\n\}/g)) {
+    assert.ok(!/\.month-num-row[^{}]*\{[^{}]*flex-wrap:\s*nowrap/.test(narrow[1]), 'a narrow rule takes the wrap back');
+  }
+  const cal = fs.readFileSync(path.join(UI, 'views/calendar.js'), 'utf8');
+  assert.match(cal, /el\('span', \{ class: 'month-flag', title: 'Overlapping events', text: 'clash' \}\)/, 'the flag no longer says "clash"');
+});
+
 test('a sweep that lost one source says so, and does not call the run failed', () => {
   const src = fs.readFileSync(path.join(UI, 'views/now.js'), 'utf8');
   // A run that lost ONE source comes back ok:true. The banner returned null
@@ -1633,6 +1647,14 @@ test('the sweep line and the toast can actually be heard', () => {
   assert.match(paintToast[0], /announce\(built\.text, state\.toast\.message\)/);
 });
 
+test('on a phone the sweep line keeps two lines, so the sticky topbar does not jump at every check (TT-3492)', () => {
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
+  // Idle, the line wraps to two lines on a phone; running, it fits on one.
+  // The topbar is sticky, so each change moved the whole page by a line.
+  const phone = [...css.matchAll(/@media \(max-width: 34rem\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('\n');
+  assert.match(phone, /\.sweepline-text \{[^}]*min-height: 2lh;/, 'the sweep line is free to change height on a phone');
+});
+
 test('the page declares the one theme it actually has', () => {
   const html = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
   // "light dark" on an app with a single black theme makes a light-mode OS draw
@@ -1771,6 +1793,29 @@ test('the calendar opens where the day is, not at midnight', async () => {
   assert.equal(cal.shouldOpenAtTarget({ signature: sig, lastSignature: sig, wasOnScreen: true }), false);
   assert.equal(cal.shouldOpenAtTarget({ signature: sig, lastSignature: sig, wasOnScreen: false }), true);
   assert.equal(cal.shouldOpenAtTarget({ signature: sig, lastSignature: 'week|x|y', wasOnScreen: true }), true);
+});
+
+test('the calendar\'s scrolling hours are a named tab stop, so a keyboard can scroll them (TT-3472)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({ calls: [] });
+  // The plain DOM runs a frame at once; the grid measures in its second.
+  globalThis.getComputedStyle = () => ({ lineHeight: 'normal', getPropertyValue: () => '' });
+  t.after(() => { delete globalThis.fetch; delete globalThis.getComputedStyle; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const cal = await import(fileUrl(UI, 'views/calendar.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [{ id: 'home', label: 'Home' }], sources: [] };
+  const view = cal.renderCalendar({ sub: null, navigate() {}, rerender() {} });
+  const scroller = plainWalk(view).find((n) => (n.attributes.class || '').split(/\s+/).includes('cal-scroll'));
+  assert.ok(scroller, 'the week grid has no scroller');
+  // WebKit does not focus a scroll box on its own, and nothing inside this one
+  // takes focus, so without a tabindex the hours out of view are out of reach.
+  assert.equal(scroller.getAttribute('tabindex'), '0');
+  assert.equal(scroller.getAttribute('role'), 'region');
+  assert.match(scroller.getAttribute('aria-label'), /^(Day|Week) schedule$/);
+  // Its focus ring is the grid's: .cal-grid clips one outside the scroller,
+  // and the positioned columns and chips paint over one inside it.
+  const css = fs.readFileSync(path.join(UI, 'app.css'), 'utf8');
+  assert.match(css, /\.cal-grid:has\(\.cal-scroll:focus-visible\)\s*\{[^}]*outline:/, 'nothing shows that the hours have focus');
 });
 
 test('the tab bar does not keep a second copy of how many views there are', () => {
@@ -2866,8 +2911,8 @@ test('Add an email account opens the simple form, and the simple form reaches th
   assert.ok(open, 'openAdvanced is missing');
   assert.match(open[0], /expertSlot\.replaceChildren\(mailForm\(\{/, 'the expert form does not open beneath the card');
   assert.match(open[0], /\.\.\.prefill\(\),/, 'what the guess found never reaches the full form');
-  assert.match(open[0], /onCancel: \(\) => expertSlot\.replaceChildren\(\),/, 'closing the full form must leave the card, not the editor, behind');
-  assert.match(open[0], /if \(expertSlot\.children\.length\) \{ expertSlot\.replaceChildren\(\); return; \}/, 'pressing the expert button again must close the drawer');
+  assert.match(open[0], /onCancel: \(\) => \{ expertSlot\.replaceChildren\(\); syncExpert\(\); \},/, 'closing the full form must leave the card, not the editor, behind');
+  assert.match(open[0], /if \(expertSlot\.children\.length\) \{ expertSlot\.replaceChildren\(\); syncExpert\(\); return; \}/, 'pressing the expert button again must close the drawer');
   const prefill = /const prefill = \(\) => \(\{[\s\S]*?\}\);/m.exec(simple[0]);
   assert.ok(prefill, 'prefill is missing');
   assert.match(prefill[0], /keyRef,/, 'the full form opens on a different keyRef, so the stored password is lost');
@@ -3943,9 +3988,9 @@ for (const { sub, find, typed, event = 'input', sent } of TAB_TO_SAVE_PANELS) {
       await checkFinishes();
       assert.equal(main().firstChild, view, 'a redraw while a field has focus must queue, not run');
 
-      // The nearest ancestor with a role is the tabpanel (the plain DOM's
-      // closest() matches attribute names, not values).
-      const save = plainWalk(control.closest('[role]')).filter(n => n.tag === 'button' && textOf(n) === 'Save').pop();
+      // The panel is the editing region around the control (not the nearest
+      // role: Schedule's hour pickers sit in a role="group", TT-3421).
+      const save = plainWalk(control.closest('[data-editing-region]')).filter(n => n.tag === 'button' && textOf(n) === 'Save').pop();
       assert.ok(save, 'the panel has a Save button');
       await tabTo(save);
       assert.equal(main().firstChild, view, 'Tab to Save must not flush the queued redraw');
@@ -4896,6 +4941,8 @@ test('no screen in onboarding, and no mail card, shows a first-timer a protocol 
   seen = onScreen(view);
   assert.match(seen, /Your address stays on this computer\./);
   assert.ok(findButton(view, 'Server settings (for experts)'), 'no expert button under the address');
+  // It opens and closes the full form, and says which, as fold() does (TT-3490).
+  assert.equal(findButton(view, 'Server settings (for experts)').getAttribute('aria-expanded'), 'false', 'the expert button under the address has no aria-expanded');
   assert.doesNotMatch(seen, JARGON, `the empty email form: ${seen.match(JARGON)?.[0]}`);
   const emailInput = findInput(view, (n) => n.attributes.type === 'email');
   for (const [address, expect] of [
@@ -4916,12 +4963,15 @@ test('no screen in onboarding, and no mail card, shows a first-timer a protocol 
     assert.doesNotMatch(anywhere(view), /over IMAP|16 September 2024/, `${address}: the server's note is on screen before anyone asked`);
     const expert = findButtons(view, /^Server settings \(for experts\)$/).find((b) => !plainHidden(b));
     assert.ok(expert, `${address}: no expert button on the card`);
+    assert.equal(expert.getAttribute('aria-expanded'), 'false', `${address}: the card's expert button has no aria-expanded`);
     expert.fire('click');
     await settle();
+    assert.equal(expert.getAttribute('aria-expanded'), 'true', `${address}: the expert button does not say the form is open`);
     assert.match(anywhere(view), /over IMAP|16 September 2024/, `${address}: the server's own note is gone rather than folded`);
     assert.match(onScreen(view), new RegExp(GUESSES[address].host.replace(/\./g, '\\.')), `${address}: the expert form does not show the host`);
     expert.fire('click');
     await settle();
+    assert.equal(expert.getAttribute('aria-expanded'), 'false', `${address}: the expert button still says the form is open`);
     assert.doesNotMatch(onScreen(view), /IMAP host/, `${address}: the expert form did not close`);
     assert.equal(emailInput.value, address, `${address}: closing the expert form lost the address`);
     assert.match(onScreen(view), expect, `${address}: closing the expert form lost the card`);
@@ -6309,6 +6359,32 @@ test('the schedule speaks am/pm and stores the 24-hour numbers config validates'
   assert.equal(saved.intervalMinutes, 30);
 });
 
+test('the schedule\'s two hour pickers each have a name, in a group called "Between" (TT-3421)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({ calls: [] });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [], sweep: { intervalMinutes: 30, activeHours: [6, 23], auto: true } };
+  store.state.health = { model: { configured: false } };
+  store.state.configErrors = [];
+  const view = settings.renderSettings({ sub: 'sweep', navigate() {}, rerender() {} });
+  const nodes = plainWalk(view);
+  const idOf = (n) => n.id || n.getAttribute('id');
+  // A <label for> names only the control it points at; aimed at the div
+  // around the two selects, it named neither of them.
+  for (const label of nodes.filter((n) => n.tag === 'label' && n.getAttribute('for'))) {
+    const target = nodes.find((n) => idOf(n) === label.getAttribute('for'));
+    assert.ok(target && ['input', 'select', 'textarea'].includes(target.tag), `“${label.textContent}” is a label for a ${target?.tag}, which it cannot name`);
+  }
+  const selects = nodes.filter((n) => n.tag === 'select');
+  assert.equal(selects.length, 2);
+  assert.deepEqual(selects.map((n) => n.getAttribute('aria-label')), ['Start hour', 'End hour']);
+  const group = nodes.find((n) => n.getAttribute('role') === 'group' && selects.every((s) => plainWalk(n).includes(s)));
+  assert.ok(group, 'the two pickers are not in a group');
+  assert.equal(nodes.find((n) => idOf(n) === group.getAttribute('aria-labelledby'))?.textContent, 'Between');
+});
+
 test('Privacy refuses a blank or 0 cap instead of saving the default (TT-3424)', async (t) => {
   withPlainDom(t);
   const calls = [];
@@ -6458,6 +6534,32 @@ test('Your data shows the folder and says "drag it to the Trash"; the command is
   assert.doesNotMatch(settings.plainSecretNotes('macos-keychain').data, /keychain|com\.zelos/i);
   for (const name of ['encrypted-file', 'macos-keychain', undefined]) {
     assert.doesNotMatch(Object.values(settings.plainSecretNotes(name)).join(' '), JARGON, String(name));
+  }
+});
+
+test('a code block that can scroll sideways is a tab stop (TT-3473)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [] };
+  // A long folder path, and the Windows store, so both erase blocks are drawn.
+  store.state.health = { model: { configured: false }, home: 'C:\\Users\\Nemo Hale\\AppData\\Local\\Zelos\\a folder name long enough to overflow', backend: { name: 'windows-dpapi' } };
+  store.state.configErrors = [];
+  const view = settings.renderSettings({ sub: 'data', navigate() {}, rerender() {} });
+  const blocks = plainWalk(view).filter((n) => n.tag === 'pre');
+  assert.equal(blocks.length, 2);
+  // Nothing inside a block takes focus, and WebKit does not focus a scroll box
+  // by itself, so the end of a line wider than the phone was out of reach.
+  for (const block of blocks) assert.equal(block.getAttribute('tabindex'), '0', `a block is not a tab stop: ${anywhere(block)}`);
+
+  // The sharing panel's blocks (the settings files, and what the AI is told)
+  // are checked in the source: each line that builds a <pre> gives it a tabindex.
+  for (const file of ['views/ai-access.js', 'views/settings.js']) {
+    const lines = fs.readFileSync(path.join(UI, file), 'utf8').split('\n').filter((line) => line.includes("el('pre'"));
+    assert.ok(lines.length, `${file} has no code block to check`);
+    for (const line of lines) assert.match(line, /tabindex/, `${file}: ${line.trim()}`);
   }
 });
 
