@@ -695,6 +695,24 @@ test('anything filled with the raw accent states its own label colour', () => {
   assert.deepEqual(offenders, [], 'text on a filled accent must take --on-accent (or --ground)');
 });
 
+/**
+ * One rule for what an accent is (TT-3491). The server refuses a PUT whose
+ * accent fails core/config.mjs's isAccent; the page applies only what its own
+ * copy passes, and ui/boot.js paints the first frame by the same pattern. The
+ * page cannot import core/, so the copies are pinned to agree here. The UI's
+ * used to trim, and so took " #5b8cff " — spaces and all — into the stylesheet.
+ */
+test('the page and the server agree on what an accent is (TT-3491)', async () => {
+  stubBrowserGlobals();
+  const config = await import(fileUrl(ROOT, 'core/config.mjs'));
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  for (const value of ['#5b8cff', '#5B8CFF', ' #5b8cff', '#5b8cff ', '#fff', 'rebeccapurple', '5b8cff', '#5b8cff0', '', null, 5, undefined]) {
+    assert.equal(store.isAccent(value), config.isAccent(value), `the page and the server disagree about ${JSON.stringify(value)}`);
+  }
+  const boot = fs.readFileSync(path.join(UI, 'boot.js'), 'utf8');
+  assert.ok(boot.includes(`/${config.ACCENT_RE.source}/.test(stored)`), 'ui/boot.js paints the first frame by a different rule');
+});
+
 /* ------------------------------------------------- 4. store and item state */
 
 /**
@@ -1988,6 +2006,49 @@ test('a run of failed heartbeats says so, and one blip does not', async (t) => {
   assert.equal(store.state.phase, 'ready');
 });
 
+/**
+ * The sweep stream retried every failure with a backoff, a 401 included, so a
+ * tab without its key asked /api/sweep/stream every 30 seconds for as long as
+ * it stayed open. The key is read once, at load: no retry can fix it (TT-3495).
+ */
+test('the sweep stream stops at a 401 and says the tab has lost its key', async (t) => {
+  stubBrowserGlobals();
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const asked = [];
+  globalThis.fetch = async (reqPath) => {
+    asked.push(reqPath);
+    return { ok: false, status: 401, text: async () => '{"error":"missing or invalid session token"}' };
+  };
+  t.after(() => {
+    delete globalThis.fetch;
+    store.state.fatal = null;
+    store.state.phase = 'ready';
+  });
+
+  store.state.phase = 'ready';
+  store.state.fatal = null;
+  const stop = store.watchSweeps();
+  t.after(stop);
+  await settle();
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(30_000);
+    await settle();
+  }
+  assert.deepEqual(asked, ['/api/sweep/stream'], 'a refused key was offered again');
+  assert.equal(store.state.fatal?.title, 'This tab has lost its key');
+  assert.equal(store.state.phase, 'down');
+
+  // A server that was down long enough for the heartbeat to say so, and came
+  // back with a new key: "not answering" is now wrong, and nothing else would
+  // take it down once the stream has stopped.
+  store.state.fatal = { title: 'Zelos is not answering', detail: 'Zelos is not answering on localhost. Is it still running?' };
+  const again = store.watchSweeps();
+  t.after(again);
+  await settle();
+  assert.equal(store.state.fatal?.title, 'This tab has lost its key', 'a stale "not answering" outlived the server coming back');
+});
+
 test('the heartbeat states its failure in the same words the boot path uses', () => {
   const store = fs.readFileSync(path.join(UI, 'lib/store.js'), 'utf8');
   const watch = /export function watchBoard\([\s\S]*?\n\}/m.exec(store);
@@ -2775,11 +2836,39 @@ test('REGRESSION: the Now view sends a failed sweep to the terminal or desktop.l
   // give, and corrected there first.
   assert.doesNotMatch(src, /zelos\.log/);
   assert.doesNotMatch(src, /The log in your Zelos home/);
-  const failed = /title: 'The last check did not finish',\n\s*detail: ([^\n]+)/.exec(src);
-  assert.ok(failed, 'the failed-sweep empty state is missing');
+  const failed = /const NO_REASON = ([^\n]+)/.exec(src);
+  assert.ok(failed, 'the failed-sweep pointer is missing');
   assert.match(failed[1], /terminal/, 'the CLI case has to say the reason went to the terminal');
   assert.match(failed[1], /desktop\.log/, 'the desktop case has to name the file that exists');
   assert.match(failed[1], /no log file of its own/);
+});
+
+/**
+ * The pointer above lived on an empty state Now could never show: a failed
+ * last run always raises the whole-failure banner, and the banner said only
+ * "The last check failed." The banner is where it has to be (TT-3494).
+ */
+test('a failed check with no reason sends the reader to the terminal or desktop.log, on the banner', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const now = await import(fileUrl(UI, 'views/now.js'));
+  store.state.config = { identity: { timezone: 'UTC' }, model: {}, mail: [{ id: 'm1', label: 'Studio mail', user: 'sam@example.com' }], calendars: [], sources: [] };
+  store.state.health = { model: { configured: true } };
+  store.state.sweep = { running: false, error: null };
+  store.state.board = { ...store.state.board, items: [], notes: [], events: [], counts: {}, finished: [], sourceStatus: [],
+    runs: { last: { ok: false, started_at: '2026-09-09T18:00:00Z', ended_at: '2026-09-09T18:01:00Z' } } };
+  let seen = onScreen(now.renderNow({ tz: 'UTC', navigate() {} }));
+  assert.match(seen, /The last check failed/);
+  assert.match(seen, /the reason is in that terminal/, 'a CLI user is not told where the reason went');
+  assert.match(seen, /desktop\.log, under Board → Show logs/, 'a desktop user is not told where the reason went');
+  assert.ok(findButton(now.renderNow({ tz: 'UTC', navigate() {} }), 'Check again'), 'the banner lost its retry');
+  // A run that did say why says that instead.
+  store.state.board.runs.last.error = 'The AI did not answer in time.';
+  seen = onScreen(now.renderNow({ tz: 'UTC', navigate() {} }));
+  assert.match(seen, /The AI did not answer in time\./);
+  assert.doesNotMatch(seen, /desktop\.log/);
 });
 
 test('REGRESSION: the About panel names /api/mcp as the one call that does not carry the session token', () => {
@@ -4340,6 +4429,8 @@ for (const { sub, held, open, said, then } of OUTCOME_EDITORS) {
         const pressed = findButton(tabpanel(), label);
         assert.ok(pressed, 'the account card has ' + label);
         await press(pressed);
+        // Remove asks first (TT-3487); the outcome is the answer's.
+        if (label === 'Remove') await press(findButton(tabpanel(), 'Remove it'));
         await settle();
         await leave();
         assert.ok(seen().includes(next), label + ' must say what it did, saw: ' + seen());
@@ -4361,11 +4452,155 @@ test('a Remove whose save is refused says why on the panel line, and keeps the a
     // A refusal, not a crash: an unhandled rejection would end this process.
     api.saveConfig = async () => { throw new Error('The server refused the change.'); };
     await press(findButton(tabpanel(), 'Remove'));
+    await press(findButton(tabpanel(), 'Remove it'));
     await settle();
+    // Still asking, so the answer can be given again once the reason is fixed (TT-3487).
+    const again = findButton(tabpanel(), 'Remove it');
+    assert.ok(again, 'a refused Remove must leave the question up');
+    assert.equal(again.disabled, false, '"Remove it" must be pressable again');
+    assert.equal(document.activeElement, again, 'focus must be back on "Remove it"');
     await leave();
     assert.ok(seen().includes('The server refused the change.'), 'the refusal must be on the panel line, saw: ' + seen());
     assert.ok(!seen().includes('Removed'), 'nothing was removed, saw: ' + seen());
     assert.ok(seen().includes('Alder notices'), 'the account is still listed');
+  ` });
+});
+
+/**
+ * Remove took an account out and deleted what Zelos stored to sign in to it,
+ * in one click, with no question and no Undo (QA, 2026-10-10, TT-3487). It now
+ * asks, in the row, the way revoking a key does. Each panel: two rows, each
+ * with something stored behind it, driven through the real shell.
+ */
+const REMOVE_PANELS = [
+  { sub: 'mail', key: 'mail', add: 'Add an email account', rows: [
+    { id: 'm_1', keyRef: 'mail.m_1', enabled: true, label: 'Work mail', user: 'ann@work.example', host: 'imap.work.example', port: 993, secure: true, auth: 'password', mailboxes: ['INBOX'], lookbackDays: 14 },
+    { id: 'm_2', keyRef: 'mail.m_2', enabled: true, label: 'Home mail', user: 'ann@home.example', host: 'imap.home.example', port: 993, secure: true, auth: 'password', mailboxes: ['INBOX'], lookbackDays: 14 },
+  ] },
+  { sub: 'calendars', key: 'calendars', add: 'Google Calendar', rows: [
+    { id: 'c_1', keyRef: 'calendar.c_1', enabled: true, kind: 'caldav', label: 'iCloud', url: 'https://caldav.icloud.example/', user: 'ann@icloud.example' },
+    { id: 'c_2', keyRef: 'calendar.c_2', enabled: true, kind: 'caldav', label: 'Fastmail', url: 'https://caldav.fastmail.example/', user: 'ann@fastmail.example' },
+  ] },
+  { sub: 'sources', key: 'sources', add: 'Add a source', rows: [
+    { id: 's_1', keyRef: 'github.s_1', enabled: true, type: 'github', label: 'Repo alerts', settings: {} },
+    { id: 's_2', keyRef: 'github.s_2', enabled: true, type: 'github', label: 'Team issues', settings: {} },
+  ] },
+];
+
+const removeSetup = ({ sub, rows }) => `
+  config = { ...config, ${JSON.stringify(sub)}: ${JSON.stringify(rows)} };
+  const refs = ${JSON.stringify(rows.map((r) => r.keyRef))};
+  api.config = async () => ({ config, errors: [], secretRefs: refs });
+  const writes = [];
+  const realSave = api.saveConfig;
+  api.saveConfig = async (patch) => { writes.push(['save', patch]); return { ...(await realSave(patch)), secretRefs: refs }; };
+  api.deleteSecret = async (ref) => { writes.push(['delete', ref]); return { ok: true }; };
+`;
+
+for (const panel of REMOVE_PANELS) {
+  const [first, second] = panel.rows;
+  test(`Settings → ${panel.sub}: Remove asks first, and only "Remove it" removes (TT-3487)`, () => {
+    runAppScenario({ beforeBoot: EDITOR_SETUP + removeSetup(panel), scenario: `
+      ${OUTCOME_SETUP}
+      await openSettings(${JSON.stringify(panel.sub)});
+      const removes = () => plainWalk(tabpanel()).filter(n => n.tag === 'button' && textOf(n) === 'Remove');
+      assert.equal(removes().length, 2, 'each row has its Remove');
+      await press(removes()[0]);
+      await settle();
+      assert.deepEqual(writes, [], 'Remove alone must change nothing: ' + JSON.stringify(writes));
+
+      // The question names the row and what goes with it, and is what the
+      // buttons are described by.
+      const group = plainWalk(tabpanel()).find(n => n.getAttribute('role') === 'group' && (n.getAttribute('aria-label') || '').startsWith('Confirm removing'));
+      assert.ok(group, 'no question in the row');
+      assert.equal(group.getAttribute('aria-label'), 'Confirm removing ' + ${JSON.stringify(first.label)});
+      const question = plainWalk(group).find(n => n.tag === 'p');
+      assert.match(textOf(question), /^Remove ${first.label}\\? Zelos stops reading it, and what it stored to sign in to it is deleted/);
+      const yes = findButton(group, 'Remove it');
+      assert.ok(question.getAttribute('id'), 'the question has no id to be described by');
+      assert.equal(yes.getAttribute('aria-describedby'), question.getAttribute('id'));
+      assert.ok(!('aria-describedby' in group.attributes), 'described on the group too, the sentence is read twice');
+      assert.equal(document.activeElement, yes, 'focus must land on "Remove it"');
+      assert.equal(removes().length, 1, 'the other row keeps its Remove');
+
+      // A check finishing while the question is up: the redraw waits, and
+      // when it runs the row is still asking.
+      const view = main().firstChild;
+      await checkFinishes();
+      assert.equal(main().firstChild, view, 'a redraw while focus is on "Remove it" must queue');
+      assert.equal(document.activeElement, yes, 'and leave focus where it was');
+      document.activeElement = document.body;
+      fireDocument('focusout');
+      await afterTimers();
+      assert.notEqual(main().firstChild, view, 'the premise: the held redraw ran');
+      assert.ok(findButton(tabpanel(), 'Remove it'), 'the redraw dropped the question');
+
+      // Keep it: back to Remove, focus on it, still nothing written.
+      await press(findButton(tabpanel(), 'Keep it'));
+      assert.ok(!findButton(tabpanel(), 'Remove it'), 'Keep it left the question up');
+      assert.equal(document.activeElement, removes()[0], "focus must go back to the row's Remove");
+      // Escape is Keep it.
+      await press(removes()[0]);
+      const asking = plainWalk(tabpanel()).find(n => n.getAttribute('role') === 'group' && (n.getAttribute('aria-label') || '').startsWith('Confirm removing'));
+      let stopped = false;
+      for (const fn of asking.listeners.get('keydown') || []) fn({ key: 'Escape', preventDefault() {}, stopPropagation() { stopped = true; } });
+      assert.ok(!findButton(tabpanel(), 'Remove it'), 'Escape left the question up');
+      assert.ok(stopped, "the question's Escape must not reach the capture panel's");
+      assert.deepEqual(writes, [], 'nothing was removed: ' + JSON.stringify(writes));
+
+      // Remove it: the save, then the stored secret, then focus on the next
+      // row's Remove; the last row hands it to the way to add one.
+      await press(removes()[0]);
+      await press(findButton(tabpanel(), 'Remove it'));
+      await settle();
+      assert.deepEqual(writes.map(w => w[0]), ['save', 'delete']);
+      assert.equal(writes[1][1], ${JSON.stringify(first.keyRef)});
+      assert.ok(seen().includes('Removed ' + ${JSON.stringify(first.label)} + '.'), 'saw: ' + seen());
+      assert.equal(removes().length, 1);
+      assert.equal(document.activeElement, removes()[0], "focus must move to the next row's Remove");
+      await press(removes()[0]);
+      await press(findButton(tabpanel(), 'Remove it'));
+      await settle();
+      assert.equal(writes[3][1], ${JSON.stringify(second.keyRef)});
+      const add = plainWalk(tabpanel()).find(n => n.tag === 'button' && textOf(n).startsWith(${JSON.stringify(panel.add)}));
+      assert.equal(document.activeElement, add, 'with no row left, focus must go to the way to add one');
+    ` });
+  });
+}
+
+test('Edit, Disable and Add put an asking Remove away, and one row asks at a time (TT-3487)', () => {
+  const mail = REMOVE_PANELS[0];
+  runAppScenario({ beforeBoot: EDITOR_SETUP + removeSetup(mail), scenario: `
+    ${OUTCOME_SETUP}
+    await openSettings('mail');
+    const removes = () => plainWalk(tabpanel()).filter(n => n.tag === 'button' && textOf(n) === 'Remove');
+    const asking = () => plainWalk(tabpanel()).filter(n => n.getAttribute('role') === 'group' && (n.getAttribute('aria-label') || '').startsWith('Confirm removing')).map(n => n.getAttribute('aria-label'));
+    await press(removes()[0]);
+    await press(removes()[0]);
+    assert.deepEqual(asking(), ['Confirm removing Home mail'], 'arming a second row must put the first away');
+    for (const label of ['Edit', 'Disable', 'Add an email account']) {
+      if (!asking().length) await press(removes()[0]);
+      assert.equal(asking().length, 1);
+      await press(findButton(tabpanel(), label));
+      await settle();
+      assert.deepEqual(asking(), [], label + ' left the question up');
+    }
+  ` });
+});
+
+test('a Remove that is still saving cannot be pressed again (TT-3487)', () => {
+  const sources = REMOVE_PANELS[2];
+  runAppScenario({ beforeBoot: EDITOR_SETUP + removeSetup(sources), scenario: `
+    ${OUTCOME_SETUP}
+    await openSettings('sources');
+    const release = hold('saveConfig');
+    await press(findButton(tabpanel(), 'Remove'));
+    const yes = findButton(tabpanel(), 'Remove it');
+    await press(yes);
+    assert.equal(yes.disabled, true, '"Remove it" must be disabled while the save is in flight');
+    yes.fire('click');
+    await release();
+    assert.equal(writes.filter(w => w[0] === 'save').length, 1, 'a second press must not save twice');
   ` });
 });
 
@@ -6237,10 +6472,67 @@ test('removing a calendar deletes its stored password, as removing a mail accoun
 
   const panel = settings.calendarPanel({ rerender() {} });
   findButton(panel, 'Remove').fire('click');
+  findButton(panel, 'Remove it').fire('click');
   await settle();
   assert.ok(calls.some((c) => c.method === 'PUT' && c.path === '/api/config'), 'Remove did not save');
   assert.ok(calls.some((c) => c.method === 'DELETE' && c.path === '/api/secrets/calendar.c_1'),
     'the calendar is gone from config but its stored password stays in the secret store forever');
+});
+
+test('Remove asks in words true of a sign-in, and asks on the email step of first-run setup too (TT-3487)', async (t) => {
+  withPlainDom(t);
+  const calls = [];
+  globalThis.fetch = plainFetch({ presets: await llmPresets(), manifests: await connectorManifests(), calls });
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  const onboarding = await import(fileUrl(UI, 'views/onboarding.js'));
+  const account = {
+    id: 'm_9', keyRef: 'mail.m_9', enabled: true, label: 'Hotmail', host: 'outlook.office365.com',
+    port: 993, secure: true, user: 'frank@hotmail.com', auth: 'xoauth2',
+    oauth: { provider: 'microsoft', clientId: '', tenantId: 'common' }, mailboxes: ['INBOX'], lookbackDays: 14,
+  };
+  store.state.config = { identity: {}, model: {}, mail: [account], calendars: [], sources: [], sweep: { intervalMinutes: 30, activeHours: [6, 23], auto: true }, privacy: { sendBodies: true, bodyChars: 4000, maxItemsPerSweep: 150 } };
+  store.state.health = { model: { configured: false }, backend: { name: 'encrypted-file' } };
+  const question = (root) => textOf(plainWalk(root).find((n) => n.attributes.class === 'remove-confirm-q'));
+
+  // A Microsoft sign-in has no password: the sentence names what it is for.
+  settings.forgetOutcomes();
+  store.state.secretRefs = ['mail.m_9'];
+  let panel = settings.mailPanel({ rerender() {} });
+  findButton(panel, 'Remove').fire('click');
+  assert.match(question(panel), /^Remove Hotmail\? Zelos stops reading it, and what it stored to sign in to it is deleted/);
+  assert.doesNotMatch(question(panel), /password/);
+  // The delete runs whenever there is a keyRef, so the sentence says so even
+  // when the list of stored refs is empty (stale, or the store unlistable).
+  settings.forgetOutcomes();
+  store.state.secretRefs = [];
+  panel = settings.mailPanel({ rerender() {} });
+  findButton(panel, 'Remove').fire('click');
+  assert.match(question(panel), /what it stored to sign in to it is deleted/, 'an empty stored list hid the delete');
+  // No keyRef: nothing is deleted, and nothing is claimed.
+  settings.forgetOutcomes();
+  store.state.config = { ...store.state.config, mail: [{ ...account, keyRef: null }] };
+  panel = settings.mailPanel({ rerender() {} });
+  findButton(panel, 'Remove').fire('click');
+  assert.equal(question(panel), 'Remove Hotmail? Zelos stops reading it.');
+  store.state.config = { ...store.state.config, mail: [account] };
+
+  // First-run setup's email step is the same panel, compact, and asks the same way.
+  settings.forgetOutcomes();
+  store.state.secretRefs = ['mail.m_9'];
+  let view = null;
+  const ctx = { navigate() {}, rerender() { view = onboarding.renderOnboarding(ctx); } };
+  ctx.rerender();
+  plainWalk(view).filter((b) => b.tag === 'button' && (b.attributes.class || '').includes('ob-step-btn'))[2].fire('click');
+  assert.match(onScreen(view), /Connect your email\./, 'the premise: the email step is up');
+  findButton(view, 'Remove').fire('click');
+  await settle();
+  assert.ok(findButton(view, 'Remove it'), 'the email step removes without asking');
+  assert.ok(!calls.some((c) => c.method === 'PUT' || c.method === 'DELETE'), 'Remove alone changed something on the email step');
+  // Setup remembers its step for the session: leave it on Welcome, where the next test starts.
+  plainWalk(view).filter((b) => b.tag === 'button' && (b.attributes.class || '').includes('ob-step-btn'))[0].fire('click');
+  settings.forgetOutcomes();
 });
 
 test('Settings opens on Email, reads in plain words, keeps every route, and puts Colour last', async (t) => {
@@ -6563,6 +6855,31 @@ test('a code block that can scroll sideways is a tab stop (TT-3473)', async (t) 
   }
 });
 
+test('the "Still incomplete" banner names the tab in plain words; the config paths are under For experts (TT-3462)', async (t) => {
+  withPlainDom(t);
+  globalThis.fetch = plainFetch({});
+  t.after(() => { delete globalThis.fetch; });
+  const store = await import(fileUrl(UI, 'lib/store.js'));
+  const settings = await import(fileUrl(UI, 'views/settings.js'));
+  store.state.config = { identity: {}, model: {}, mail: [], calendars: [], sources: [] };
+  store.state.health = { model: { configured: false } };
+  store.state.configErrors = [{ path: 'sweep.intervalMinutes', message: 'must be an integer between 5 and 1440' }];
+  t.after(() => { store.state.configErrors = []; });
+
+  const view = settings.renderSettings({ sub: 'mail', navigate() {}, rerender() {} });
+  const seen = onScreen(view);
+  assert.match(seen, /Still incomplete/);
+  assert.match(seen, /Something under Schedule needs another look\./);
+  assert.doesNotMatch(seen, /intervalMinutes|must be an integer/, 'the engine\'s path is in the open');
+  assert.match(anywhere(view), /sweep\.intervalMinutes: must be an integer between 5 and 1440/, 'the detail is gone rather than folded');
+
+  assert.equal(settings.incompleteLead([{ path: 'mail[0].port', message: 'x' }, { path: 'identity.email', message: 'y' }, { path: 'mail[1].host', message: 'z' }]),
+    'Something under Email and You needs another look.');
+  assert.equal(settings.incompleteLead([{ path: 'oauth', message: 'x' }]), 'Something in your settings needs another look.');
+  assert.equal(settings.incompleteLead([{ path: 'sources[0].type', message: 'x' }, { path: 'ai.maxRows', message: 'y' }, { path: 'ui.accent', message: 'z' }]),
+    'Something under Other things it can read, Share with another AI and Colour needs another look.');
+});
+
 test('no user-facing failure names an address the person did not type, and the board speaks of checks and AIs', () => {
   // core/llm.mjs's empty-model error and core/sweep.mjs's stand-down reasons
   // reach the board's banner verbatim. Neither may interpolate the base URL.
@@ -6863,6 +7180,37 @@ test('the spawn block round-trips a Windows path with spaces and carries Node mo
   assert.match(seen, /Move Zelos to your Applications folder, open it from there/);
   assert.doesNotMatch(seen, /mcpServers|Ready to paste/, 'a block that will break is still on offer');
   assert.equal(findButton(moving, 'Copy'), undefined, 'a block that will break can still be copied');
+});
+
+test('"Try again" on the sharing panel\'s error banner reads the ordinary window, not the click (TT-3440)', async (t) => {
+  withPlainDom(t);
+  const asked = [];
+  let fail = true;
+  const aiPayload = {
+    enabled: false, scopes: {}, effectiveScopes: {}, maxRows: 50, tokens: [], access: [], accessMore: true, accessMax: 500,
+    client: { command: '/usr/local/bin/node', args: ['/opt/zelos/bin/zelos', 'mcp'], home: '/tmp/zelos-home', httpUrl: 'http://127.0.0.1:7777/api/mcp' },
+    scopeInfo: [{ id: 'board', label: 'Board', summary: 'Items.', tools: ['zelos_board'] }],
+  };
+  globalThis.fetch = async (reqPath) => {
+    if (reqPath === '/api/ai' || reqPath.startsWith('/api/ai?')) {
+      asked.push(reqPath);
+      if (fail) return { ok: false, status: 500, text: async () => JSON.stringify({ error: 'the database is locked' }) };
+      return { ok: true, status: 200, text: async () => JSON.stringify(aiPayload) };
+    }
+    throw new Error(`unexpected GET ${reqPath}`);
+  };
+  t.after(() => { delete globalThis.fetch; });
+  // A copy of its own: the panel's phase outlives a rebuild, so one another
+  // test has already loaded would never show the error banner.
+  const access = await import(`${fileUrl(UI, 'views/ai-access.js')}?retry-test`);
+  const panel = access.aiAccessPanel();
+  await settle();
+  assert.match(onScreen(panel), /This panel could not read its own settings/);
+  fail = false;
+  findButton(panel, 'Try again').fire('click');
+  await settle();
+  assert.deepEqual(asked, ['/api/ai', '/api/ai'], 'the retry asked for a log window nobody chose');
+  assert.ok(!findButton(panel, 'Show fewer'), '"Show fewer" is offered for a window nobody widened');
 });
 
 /* ------------------------------------------------ 8. "Stuck? Ask Claude" */

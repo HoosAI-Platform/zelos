@@ -45,6 +45,13 @@ function missingSetup() {
 const NO_AI_YET = 'Zelos can’t read anything yet because no AI has been chosen.';
 
 /**
+ * Where to look when a failed check gave no reason. The banner says it: a
+ * failed last run always raises the banner, so the empty state that used to
+ * carry this sentence could never show (QA, 2026-10-10, TT-3494).
+ */
+const NO_REASON = 'It failed without saying why. Run from a terminal, the reason is in that terminal — Zelos keeps no log file of its own. In the desktop app it is in desktop.log, under Board → Show logs.';
+
+/**
  * Why the board is empty is a different screen every time, and each one has to
  * say what to do next. "Nothing here" with no explanation is the failure mode
  * this function exists to avoid.
@@ -77,13 +84,6 @@ function emptyForContext(navigate) {
       title: 'Ready for the first check',
       detail: 'Zelos will fetch your recent mail and calendar, then ask the AI what actually needs you.',
       action: button('Check now', { class: 'btn solid', onClick: () => startSweep('full') }),
-    });
-  }
-  if (last.ok === false) {
-    return emptyState({
-      title: 'The last check did not finish',
-      detail: last.error || 'It failed without saying why. Run from a terminal, the reason is in that terminal — Zelos keeps no log file of its own. In the desktop app it is in desktop.log, under Board → Show logs.',
-      action: button('Try again', { class: 'btn solid', onClick: () => startSweep('full') }),
     });
   }
   return emptyState({
@@ -136,7 +136,7 @@ function failureBanner(trouble, navigate) {
   const counted = Math.max(failedSources.length, Number(last?.stats?.sourcesFailed) || 0);
   const whole = trouble === 'whole';
   const message = whole
-    ? (missing === 'model' ? NO_AI_YET : (live || last?.error || 'The last check failed.'))
+    ? (missing === 'model' ? NO_AI_YET : (live || last?.error || NO_REASON))
     : `${counted === 1 ? 'One account or calendar' : `${counted} accounts or calendars`} could not be read. Everything else on the board is from this check — whatever those hold is not.`;
 
   return el('div', { class: `banner ${whole ? 'banner-bad' : 'banner-warn'}`, role: 'status' }, [

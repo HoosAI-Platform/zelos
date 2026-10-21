@@ -1940,7 +1940,8 @@ textarea.input:focus,
 .ai-token-label { font-weight: 600; overflow-wrap: anywhere; }
 .ai-token-id { font-size: 0.75rem; color: var(--ink-3); }
 .ai-token-meta { font-size: 0.8125rem; color: var(--ink-3); }
-.ai-token-confirm {
+.ai-token-confirm,
+.remove-confirm {
   display: grid;
   gap: 0.6rem;
   padding: 0.75rem;
@@ -1948,7 +1949,8 @@ textarea.input:focus,
   border: 1px solid var(--accent-edge);
   border-radius: var(--radius);
 }
-.ai-token-confirm-q { font-size: 0.9375rem; max-width: 60ch; }
+.ai-token-confirm-q,
+.remove-confirm-q { font-size: 0.9375rem; max-width: 60ch; }
 
 /* The value, shown once. Wide, monospaced and selectable, because the only
    thing that matters in this box is getting it out intact. */

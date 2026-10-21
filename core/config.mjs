@@ -77,8 +77,15 @@ export const MAIL_AUTH_METHODS = Object.freeze(['password', 'xoauth2']);
 export const MAIL_OAUTH_PROVIDERS = Object.freeze(['google', 'microsoft']);
 /* One theme (black). The only appearance choice is the accent, and it is
    validated as a six-digit hex because it is written straight into a CSS
-   custom property — anything else must never reach the stylesheet. */
-const ACCENT_RE = /^#[0-9a-fA-F]{6}$/;
+   custom property — anything else must never reach the stylesheet. The one
+   definition: the validator, PUT /api/config's refusal and (by a test that
+   pins the agreement) ui/lib/store.js and ui/boot.js all mean this. */
+export const ACCENT_RE = /^#[0-9a-fA-F]{6}$/;
+
+/** A six-digit hex colour, exactly: no whitespace, no names, no shorthand. */
+export function isAccent(value) {
+  return typeof value === 'string' && ACCENT_RE.test(value);
+}
 
 /** Refs are opaque handles ("model.default", "mail.m_9f3a1c"). They end up as a
  *  keychain account name and as a filename, so the charset is deliberately tight. */
@@ -920,7 +927,7 @@ export function validateConfig(cfg) {
   }
 
   if (!isPlainObject(cfg.ui)) errors.push({ path: 'ui', message: 'must be an object' });
-  else if (!ACCENT_RE.test(String(cfg.ui.accent ?? ''))) errors.push({ path: 'ui.accent', message: 'must be a six-digit hex colour like #5b8cff' });
+  else if (!isAccent(cfg.ui.accent)) errors.push({ path: 'ui.accent', message: 'must be a six-digit hex colour like #5b8cff' });
 
   const p = cfg.privacy;
   if (!isPlainObject(p)) errors.push({ path: 'privacy', message: 'must be an object' });

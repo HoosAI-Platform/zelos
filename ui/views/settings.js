@@ -22,7 +22,7 @@
  * the expert who needs that field now opens one drawer to find it.
  */
 
-import { el, button, meander, section, copyText, replace } from '../lib/dom.js';
+import { el, button, meander, section, copyText, replace, focusQuietly } from '../lib/dom.js';
 /* `request` rather than a named method on `api`: this panel is the only reader
    of /api/connectors, and a one-line wrapper in ui/lib/api.js would be a second
    place to look for a call that has exactly one call site. */
@@ -55,6 +55,29 @@ const PANELS = [
   { id: 'about', label: 'About' },
   { id: 'appearance', label: 'Colour' },
 ];
+
+/**
+ * The "Still incomplete" banner's open line, in the tabs' own names. The
+ * engine reports each problem as a config path ("sweep.intervalMinutes: must
+ * be an integer between 5 and 1440"), and the banner printed exactly that, in
+ * the open (QA, 2026-10-10, TT-3462). A path's first part is a tab's id for
+ * every section a tab edits, so it says which tab to open; the paths themselves
+ * go one drawer down.
+ */
+export function incompleteLead(errors = []) {
+  const ids = { identity: 'you', ui: 'appearance' };
+  const tabs = [];
+  for (const e of errors) {
+    const top = String(e?.path || '').split(/[.[]/)[0];
+    const tab = PANELS.find((p) => p.id === (ids[top] || top));
+    // "(optional)" and "(advanced)" are for the tab strip, not for a sentence.
+    const name = tab?.label.replace(/\s*\([^)]*\)$/, '');
+    if (name && !tabs.includes(name)) tabs.push(name);
+  }
+  if (!tabs.length) return 'Something in your settings needs another look.';
+  const named = tabs.length === 1 ? tabs[0] : `${tabs.slice(0, -1).join(', ')} and ${tabs.at(-1)}`;
+  return `Something under ${named} needs another look.`;
+}
 
 /** Where Settings opens with no sub-route: the thing people come here to change. */
 export const DEFAULT_PANEL = 'mail';
@@ -368,6 +391,8 @@ function paintStatus(node, tone, text) {
 export function forgetOutcomes() {
   outcomes.clear();
   shownLines.clear();
+  armedRemovals.clear();
+  shownRemovals.clear();
   outcomeGeneration += 1;
 }
 
@@ -2639,6 +2664,7 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
   // The panel's line, under the list: where an editor's outcome is said once
   // the editor has closed (TT-3448). Kept across the redraw that closes it.
   const status = statusLine('mail');
+  const removal = removals('mail', { status, rerender });
   const saved = (text) => {
     status.good(text);
     onDone?.();
@@ -2658,10 +2684,13 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
       el('p', { class: 'quiet-note', text: `${account.user} · the last ${account.lookbackDays} days` }),
       sourceStatusLine(account.id, 'mail'),
       account.id === connectionId ? connectionRecovery(account.id, 'mail') : null,
-      el('div', { class: 'row-inline' }, [
-        button(account.enabled === false ? 'Enable' : 'Disable', {
+      removal.row(account, {
+        name: account.label || account.user,
+        remove: () => saveConfig({ mail: (state.config.mail || []).filter((m) => m.id !== account.id) }),
+        buttons: [button(account.enabled === false ? 'Enable' : 'Disable', {
           class: 'btn quiet',
           onClick: async () => {
+            removal.disarm();
             // Each of these says what it did on the panel's line, which the
             // redraw keeps: otherwise the line would go on saying what the
             // last save did, about an account that may now be gone (TT-3448).
@@ -2680,30 +2709,15 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
         button('Edit', {
           class: 'btn quiet',
           onClick: () => {
+            removal.disarm();
             status.clear();
             editor.replaceChildren(mailForm(account, {
               onSaved: (text) => { status.good(text); rerender?.(); },
               onCancel: () => editor.replaceChildren(),
             }));
           },
-        }),
-        button('Remove', {
-          class: 'btn quiet',
-          onClick: async () => {
-            status.working('Removing…');
-            try {
-              const next = (state.config.mail || []).filter((m) => m.id !== account.id);
-              await saveConfig({ mail: next });
-            } catch (err) {
-              status.bad(err.message);
-              return;
-            }
-            await api.deleteSecret(account.keyRef).catch(() => {});
-            status.good(`Removed ${account.label || account.user}.`);
-            rerender?.();
-          },
-        }),
-      ]),
+        })],
+      }),
     ]))
     : el('p', { class: 'quiet-note', text: 'No email account connected yet.' }));
 
@@ -2719,6 +2733,7 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
   const addButton = button('Add an email account', {
     class: 'btn solid',
     onClick: () => {
+      removal.disarm();
       status.clear();
       help.hidden = true;
       editor.replaceChildren(simpleMailForm({
@@ -2727,6 +2742,7 @@ export function mailPanel({ compact = false, onDone = null, rerender, connection
       }));
     },
   });
+  removal.add(addButton);
 
   wrap.appendChild(list);
   wrap.appendChild(status.node);
@@ -3043,6 +3059,7 @@ export function calendarPanel({ compact = false, onDone = null, rerender, connec
   const wrap = el('div', { class: 'panel panel-calendars' });
   const editor = el('div', { class: 'editor' });
   const status = statusLine('calendars');
+  const removal = removals('calendars', { status, rerender });
   // The "Stuck?" line, redrawn for the calendar a card names once one is pressed.
   const helpSlot = el('div', {}, [askClaude({ step: 'calendar' })]);
 
@@ -3059,44 +3076,32 @@ export function calendarPanel({ compact = false, onDone = null, rerender, connec
       el('p', { class: 'quiet-note', text: calendar.url }),
       sourceStatusLine(calendar.id, 'calendars'),
       calendar.id === connectionId ? connectionRecovery(calendar.id, 'calendars') : null,
-      el('div', { class: 'row-inline' }, [
-        button('Edit', {
+      removal.row(calendar, {
+        name: calendar.label || calendar.url,
+        remove: () => saveConfig({ calendars: (state.config.calendars || []).filter((c) => c.id !== calendar.id) }),
+        buttons: [button('Edit', {
           class: 'btn quiet',
-          onClick: () => openEditor(editor, status, (manifests) => calendarForm(calendar, {
-            manifests,
-            onSaved: (text) => { status.good(text); rerender?.(); },
-            onCancel: () => editor.replaceChildren(),
-          })),
-        }),
-        button('Remove', {
-          class: 'btn quiet',
-          onClick: async () => {
-            // Said on the panel's line, which the redraw keeps, so the line
-            // stops describing the last save (TT-3448).
-            status.working('Removing…');
-            try {
-              await saveConfig({ calendars: (state.config.calendars || []).filter((c) => c.id !== calendar.id) });
-            } catch (err) {
-              status.bad(err.message);
-              return;
-            }
-            // The stored password goes with it, as a mail account's does.
-            if (calendar.keyRef) await api.deleteSecret(calendar.keyRef).catch(() => {});
-            status.good(`Removed ${calendar.label || calendar.url}.`);
-            rerender?.();
+          onClick: () => {
+            removal.disarm();
+            openEditor(editor, status, (manifests) => calendarForm(calendar, {
+              manifests,
+              onSaved: (text) => { status.good(text); rerender?.(); },
+              onCancel: () => editor.replaceChildren(),
+            }));
           },
-        }),
-      ]),
+        })],
+      }),
     ]))
     : el('p', { class: 'quiet-note', text: 'No calendar connected yet.' })));
 
   // The four named ways in. Each opens the editor on its guide; "Something
   // else" opens it on the first connector the registry lists, as "Add a
   // calendar" always did.
-  wrap.appendChild(el('div', { class: 'preset-grid' }, CALENDAR_GUIDES.map((guide) => el('button', {
+  const guides = CALENDAR_GUIDES.map((guide) => el('button', {
     type: 'button',
     class: 'preset',
     onclick: () => {
+      removal.disarm();
       const id = randomId('c');
       replace(helpSlot, [askClaude({ step: 'calendar', provider: guide.kind ? guide.id : null })]);
       openEditor(editor, status, (manifests, links) => calendarForm({
@@ -3127,7 +3132,9 @@ export function calendarPanel({ compact = false, onDone = null, rerender, connec
   }, [
     el('span', { class: 'preset-label', text: guide.title }),
     el('span', { class: 'preset-note', text: guide.blurb }),
-  ]))));
+  ]));
+  removal.add(guides[0]);
+  wrap.appendChild(el('div', { class: 'preset-grid' }, guides));
   wrap.appendChild(editor);
   wrap.appendChild(status.node);
   wrap.appendChild(helpSlot);
@@ -3242,6 +3249,7 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
   const wrap = el('div', { class: 'panel panel-sources' });
   const editor = el('div', { class: 'editor' });
   const status = statusLine('sources');
+  const removal = removals('sources', { status, rerender });
 
   wrap.appendChild(el('p', { class: 'panel-lede', text: 'Most people need nothing here. If you use any of these work tools, add them. Zelos only ever reads them — nothing is ever written back.' }));
 
@@ -3254,10 +3262,13 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
       ]),
       sourceStatusLine(src.id, 'sources'),
       src.id === connectionId ? connectionRecovery(src.id, 'sources') : null,
-      el('div', { class: 'row-inline' }, [
-        button(src.enabled === false ? 'Enable' : 'Disable', {
+      removal.row(src, {
+        name: src.label || src.id,
+        remove: () => saveConfig({ sources: (state.config.sources || []).filter((s) => s.id !== src.id) }),
+        buttons: [button(src.enabled === false ? 'Enable' : 'Disable', {
           class: 'btn quiet',
           onClick: async () => {
+            removal.disarm();
             // Said on the panel's line, which the redraw keeps, so the line
             // stops describing the last save (TT-3448).
             status.working(src.enabled === false ? 'Turning on…' : 'Turning off…');
@@ -3274,34 +3285,23 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
         }),
         button('Edit', {
           class: 'btn quiet',
-          onClick: () => openEditor(editor, status, (manifests) => sourceForm(src, {
-            manifests,
-            onSaved: (text) => { status.good(text); rerender?.(); },
-            onCancel: () => editor.replaceChildren(),
-          })),
-        }),
-        button('Remove', {
-          class: 'btn quiet',
-          onClick: async () => {
-            status.working('Removing…');
-            try {
-              await saveConfig({ sources: (state.config.sources || []).filter((s) => s.id !== src.id) });
-            } catch (err) {
-              status.bad(err.message);
-              return;
-            }
-            if (src.keyRef) await api.deleteSecret(src.keyRef).catch(() => {});
-            status.good(`Removed ${src.label || src.id}.`);
-            rerender?.();
+          onClick: () => {
+            removal.disarm();
+            openEditor(editor, status, (manifests) => sourceForm(src, {
+              manifests,
+              onSaved: (text) => { status.good(text); rerender?.(); },
+              onCancel: () => editor.replaceChildren(),
+            }));
           },
-        }),
-      ]),
+        })],
+      }),
     ]))
     : el('p', { class: 'quiet-note', text: 'Nothing else connected yet.' })));
 
-  wrap.appendChild(el('div', { class: 'row-inline' }, button('Add a source', {
+  wrap.appendChild(el('div', { class: 'row-inline' }, removal.add(button('Add a source', {
     class: 'btn solid',
     onClick: () => {
+      removal.disarm();
       const id = randomId('s');
       openEditor(editor, status, (manifests) => sourceForm({
         id,
@@ -3316,11 +3316,149 @@ export function sourcesPanel({ rerender, connectionId = null } = {}) {
         onCancel: () => editor.replaceChildren(),
       }));
     },
-  })));
+  }))));
   wrap.appendChild(editor);
   wrap.appendChild(status.node);
   if (connectionId && !sources.some(src => src.id === connectionId)) wrap.prepend(missingConnection());
   return wrap;
+}
+
+/*
+ * Remove asks first (QA, 2026-10-10, TT-3487). It takes the account out of the
+ * config and deletes what Zelos stored to sign in to it, in one click, and the
+ * second half cannot be undone: an Undo would have to hold that delete back,
+ * and a tab closed in the meantime would leave it stored for good. So the row
+ * turns into a question, as revoking a key in "Share with another AI" does.
+ *
+ * Which row is asking is kept outside the panel, like `outcomes`, so a redraw
+ * rebuilds it still asking; forgetOutcomes() drops it. The question is an
+ * editing region, so a check finishing while focus is on "Remove it" queues
+ * its redraw rather than pulling the buttons out from under the keyboard.
+ */
+const armedRemovals = new Map();   // panel key → { id, busy }
+const shownRemovals = new Map();   // panel key → the newest panel's rows: { rows, order, add }
+
+/**
+ * The Remove control for one panel's rows. `row()` returns the row's action
+ * strip — its other `buttons`, then Remove, or the question in their place —
+ * and `remove()` is the panel's own save. Any other button on the panel calls
+ * `disarm()` first: one question at a time, and only while nothing else is
+ * being done.
+ */
+function removals(key, { status, rerender }) {
+  const shown = { rows: new Map(), order: [], add: null };
+  shownRemovals.set(key, shown);
+  // A save in flight outlives the panel it was pressed in; it answers through
+  // whichever panel is on screen when it lands.
+  const latest = () => shownRemovals.get(key) || shown;
+
+  function disarm() {
+    const armed = armedRemovals.get(key);
+    if (!armed || armed.busy) return;
+    armedRemovals.delete(key);
+    latest().rows.get(armed.id)?.paint();
+  }
+
+  function row(entry, { name, buttons, remove }) {
+    // A password, a Microsoft or Google sign-in, a token: named by what it is
+    // for, so the sentence is true of every one of them. Said whenever there
+    // is a keyRef, because that is when the delete runs — not by the stored
+    // list, which can be stale, or empty when the store could not be listed.
+    const question = entry.keyRef
+      ? `Remove ${name}? Zelos stops reading it, and what it stored to sign in to it is deleted, so adding it back means signing in again.`
+      : `Remove ${name}? Zelos stops reading it.`;
+    const questionId = `remove-q-${key}-${entry.id}`;
+    const slot = el('div', {});
+    const handle = { paint, removeButton: null };
+    shown.rows.set(entry.id, handle);
+    shown.order.push(entry.id);
+
+    function arm() {
+      if (armedRemovals.get(key)?.busy) return;
+      disarm();
+      armedRemovals.set(key, { id: entry.id, busy: false });
+      paint('confirm');
+    }
+
+    function cancel() {
+      const armed = armedRemovals.get(key);
+      if (armed?.id !== entry.id || armed.busy) return;
+      armedRemovals.delete(key);
+      latest().rows.get(entry.id)?.paint('remove');
+    }
+
+    async function confirm(event) {
+      const armed = armedRemovals.get(key);
+      if (armed?.id !== entry.id || armed.busy) return;
+      armed.busy = true;
+      if (event?.currentTarget) event.currentTarget.disabled = true;
+      status.working('Removing…');
+      try {
+        await remove();
+      } catch (err) {
+        // Still asking, with the reason on the panel's line (TT-3448).
+        armed.busy = false;
+        status.bad(err.message);
+        latest().rows.get(entry.id)?.paint('confirm');
+        return;
+      }
+      armedRemovals.delete(key);
+      if (entry.keyRef) await api.deleteSecret(entry.keyRef).catch(() => {});
+      const order = latest().order;
+      const next = order[order.indexOf(entry.id) + 1] ?? null;
+      status.good(`Removed ${name}.`);
+      rerender?.();
+      // The row and its button are gone: the next row's Remove, or the way to add one.
+      const now = latest();
+      focusQuietly((next && now.rows.get(next)?.removeButton) || now.add);
+    }
+
+    function paint(focus = null) {
+      const armed = armedRemovals.get(key);
+      if (armed?.id === entry.id) {
+        const yes = button('Remove it', { class: 'btn solid', 'data-confirm': 'true', 'aria-describedby': questionId, onClick: confirm });
+        yes.disabled = armed.busy;
+        handle.removeButton = null;
+        replace(slot, el('div', {
+          class: 'remove-confirm',
+          role: 'group',
+          // Described once, on "Remove it": on the group as well, a screen
+          // reader reads the sentence twice on the way in.
+          'aria-label': `Confirm removing ${name}`,
+          'data-editing-region': true,
+          onkeydown: (event) => {
+            if (event.key !== 'Escape') return;
+            // This Escape is the question's: it must not also close the capture panel.
+            event.preventDefault();
+            event.stopPropagation();
+            cancel();
+          },
+        }, [
+          el('p', { class: 'remove-confirm-q', id: questionId, text: question }),
+          el('div', { class: 'row-inline' }, [yes, button('Keep it', { class: 'btn quiet', onClick: cancel })]),
+        ]));
+        if (focus === 'confirm') focusQuietly(yes);
+        return;
+      }
+      const removeButton = button('Remove', { class: 'btn quiet', onClick: arm });
+      handle.removeButton = removeButton;
+      replace(slot, el('div', { class: 'row-inline' }, [...buttons, removeButton]));
+      if (focus === 'remove') focusQuietly(removeButton);
+    }
+
+    paint();
+    return slot;
+  }
+
+  return {
+    row,
+    disarm,
+    /** The panel's way to add one: where focus goes when the last row is removed. */
+    add(node) {
+      shown.add = node;
+      return node;
+    },
+  };
 }
 
 function connectionCardProps(connection, target) {
@@ -3987,7 +4125,10 @@ export function renderSettings(ctx) {
     errors.length
       ? el('div', { class: 'banner banner-warn', role: 'status' }, [
         el('h2', { class: 'banner-title', text: 'Still incomplete' }),
-        el('ul', { class: 'banner-list' }, errors.map((e) => el('li', { text: `${e.path}: ${e.message}` }))),
+        el('p', { text: incompleteLead(errors) }),
+        fold('For experts', [
+          el('ul', { class: 'banner-list' }, errors.map((e) => el('li', { text: `${e.path}: ${e.message}` }))),
+        ]),
       ])
       : null,
     body,

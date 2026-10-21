@@ -53,7 +53,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { CALENDAR_DEFAULTS, loadConfig, saveConfig, validateConfig, privacyLimits, paths, isValidRef } from './config.mjs';
+import { CALENDAR_DEFAULTS, loadConfig, saveConfig, validateConfig, privacyLimits, paths, isValidRef, isAccent } from './config.mjs';
 /* The registry, so the two places below that used to name source kinds by hand
    ask it instead. It costs this process nothing new: every module it pulls in —
    core/sources/imap.mjs, caldav.mjs, ics.mjs — is already imported below. */
@@ -1288,6 +1288,17 @@ async function handleConfigGet(ctx) {
 
 async function handleConfigPut(ctx) {
   const patch = await readJSON(ctx.req);
+  /* The one value a PUT refuses rather than saves first. "Saved first,
+     reported second" (below) is for setup, where a half-filled form must
+     come back; no form sends half an accent — the swatches and the colour
+     picker only ever send a hex — and one that is not a hex is never applied,
+     so keeping it would only keep a "Still incomplete" line nobody can act
+     on (QA, 2026-10-10, TT-3491). A config FILE that already holds one is
+     still read, reported and ignored, as before. */
+  const ui = patch?.ui;
+  if (ui && typeof ui === 'object' && !Array.isArray(ui) && Object.hasOwn(ui, 'accent') && !isAccent(ui.accent)) {
+    throw new HttpError(400, 'ui.accent must be a six-digit hex colour like #5b8cff — nothing was written');
+  }
   let saved;
   try {
     saved = saveConfig(stripSecretShaped(patch));

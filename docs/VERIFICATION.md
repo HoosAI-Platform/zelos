@@ -115,7 +115,7 @@ between the consent screen and the redirect.
 | 9 | Open one item | the message rendered, and the draft reply, which Zelos never sends — you copy it into your own mail client | read-only is a product property, shown rather than claimed |
 | 10 | Gmail in another tab | the same messages still unread | `BODY.PEEK` visibly did not change the mailbox |
 | 11 | **Settings → Privacy** | *Send message bodies* and the local-model option | the only transfer is to the model the user chose, and it is switchable |
-| 12 | Remove the mailbox | the account gone from Settings, and from the list `zelos doctor` prints | deletion on request, which the assessment also asks about |
+| 12 | **Remove** on the mailbox, then **Remove it** | the question saying what it stored to sign in is deleted; the account gone from Settings, and from the list `zelos doctor` prints | deletion on request, which the assessment also asks about |
 
 Film against the production project's client id, not a development one: the submission is rejected
 if the id in shot 4 is not the id under review. Do not show a real inbox — use a test account
