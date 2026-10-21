@@ -887,7 +887,7 @@ export function aiAccessPanel() {
 
   function limitsBlock() {
     return el('ul', { class: 'plain-list' }, [
-      el('li', { text: 'Everything here only reads. There is nothing that sends a message, edits an item, deletes anything or changes a setting — not a switched-off one, none at all.' }),
+      el('li', { text: 'Nothing here sends a message, deletes anything or changes a setting — not a switched-off one, none at all. Everything only reads, except that reading the board does what opening Zelos does: a snooze that has come due wakes, and Now is kept to four items by moving the rest down.' }),
       el('li', { text: 'A box that is unticked is not merely hidden: the other program is not even told that part exists, and a request for it is refused.' }),
       el('li', { text: 'The main switch is checked before the key is, so a key that was made and then switched off cannot be used to look at anything.' }),
       el('li', { text: 'This is a door into what Zelos has collected on this computer. It is not a door into your mailbox — nothing here can reach back to your email provider.' }),

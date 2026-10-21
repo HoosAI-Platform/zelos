@@ -30,6 +30,9 @@ import { fileURLToPath } from 'node:url';
 process.env.ZELOS_LOG_LEVEL = 'silent';
 const HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'zelos-mcp-'));
 process.env.ZELOS_HOME = path.join(HOME_ROOT, 'home');
+// The read-only wording test reads zelos.mjs as text, which puts this file in
+// repo.test.mjs's keychain guard; force the backend as that guard asks.
+process.env.ZELOS_SECRETS_BACKEND = 'encrypted-file';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MCP_SOURCE = fs.readFileSync(path.join(ROOT, 'core', 'mcp.mjs'), 'utf8');
@@ -1192,6 +1195,22 @@ describe('nothing here writes, except the one thing that says it does', () => {
           ? `${tool.name} changed a row while telling the host readOnlyHint — that is the field a client `
             + 'consults to skip asking the owner'
           : `${tool.name} does not claim readOnlyHint but changed nothing; say what is true`);
+    }
+  });
+
+  test('no screen, --help or INSTALL.md calls the tools read-only while one of them writes', () => {
+    /* QA, 2026-10-10 (TT-3523): the AI access panel ("Everything here only
+       reads"), the About panel and --help ("the read-only channel") and
+       INSTALL.md ("read-only tools") all still said read-only after
+       zelos_board was annotated readOnlyHint: false for waking due snoozes
+       and demoting items. The person reads those before switching sharing on. */
+    const writes = TOOLS.filter((tool) => tool.annotations.readOnlyHint !== true);
+    assert.ok(writes.length, 'every tool is read-only again; these surfaces may say so');
+    const surfaces = ['zelos.mjs', 'ui/views/settings.js', 'ui/views/ai-access.js', 'docs/INSTALL.md'];
+    for (const file of surfaces) {
+      const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+      const claim = /read-only\s+(?:MCP\s+)?(?:tools|channel)|Everything here only reads/i.exec(text);
+      assert.equal(claim, null, `${file} says "${claim?.[0]}", but ${writes.map((t) => t.name).join(', ')} writes`);
     }
   });
 });

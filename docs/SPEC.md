@@ -49,7 +49,7 @@ zelos/
   ui/  index.html  app.css  app.js  (plus any split modules; all served from disk)
   test/  *.test.mjs
   desktop/  main.js  preload.js  package.json   (Electron shell — its own deps)
-  assets/  icon.png  fonts/
+  assets/  icon.png  icon.svg
   docs/  SPEC.md  README.md  SECURITY.md
 ```
 
@@ -507,6 +507,8 @@ Routes (JSON in/out unless noted):
 | POST | `/api/sweep` | `{mode}` | `{runId}` — starts, returns immediately |
 | GET | `/api/sweep/stream` | | **SSE** progress events |
 | POST | `/api/items/:id/state` | `{state}` | updated item |
+| GET | `/api/items/:id/history` | `?limit&before` — `limit` 1–50, default 20 | `{entries[], nextBefore, recordedSince}` — the item's recorded changes, newest first; 404 for an unknown item |
+| POST | `/api/updates/check` | `{}` — any field is refused with 400 | `{currentVersion, latestVersion, updateAvailable, ahead, releaseUrl, publishedAt, notes, downloads[], checkedAt}` from the official GitHub release; 502 if it cannot be reached |
 | POST | `/api/capture` | `{text}` | `{id}` |
 | GET/PUT | `/api/config` | config patch | `{config, errors, secretRefs, modelKeyStored}` — **never returns secrets** |
 | POST | `/api/secrets` | `{ref, value}` | `{ok}` — write-only, no read route exists; refuses `model.` refs |
@@ -517,7 +519,9 @@ Routes (JSON in/out unless noted):
 | POST | `/api/model/key` | `{baseUrl, value}` | `{ok}` — write-only, filed for that address |
 | DELETE | `/api/model/key` | `?baseUrl` | `{ok}` |
 | GET | `/api/model/presets` | | `PRESETS` |
+| GET | `/api/guides` | | the fixed setup links core/help.mjs and Settings point at: `{microsoftSetup, calendars}` |
 | GET | `/api/local/probe` | | detected local runtimes |
+| GET | `/api/connectors` | | `{connectors[]}` — the JSON-safe `describe()` of every connector this build has; no functions, no user data |
 | POST | `/api/help` | `{step, provider?, signIn?, clientReady?}` — `step` is `install`, `ai`, `email`, `calendar`, `first-check` or `general`; `provider` is what the app calls it (the mail guess's label, a calendar guide, an AI card) and is normalised to a closed list, never echoed; the platform is the server's own `process.platform`, never the body's | `{step, platform, title, prompt, claude, chatgpt}` — the message core/help.mjs writes for that screen, and `https://claude.ai/new?q=…` / `https://chatgpt.com/?q=…` with it url-encoded. The message may name the step, the provider's name, the platform and Zelos's own public pages; never an address, a key, a password, a home path or anything read from mail (test/help.test.mjs) |
 | POST | `/api/mail/guess` | `{email}` — POST so the address is never in a URL | `{label, host, port, secure, auth, signIn, clientReady, appPasswordUrl, note, known}` — `signIn` is `google`, `microsoft` or null; `clientReady` is whether a client id exists to run it (`oauthClient()` in core/sources/oauth.mjs: `config.oauth.clients.<provider>`, else the shipped default, else none) |
 | POST | `/api/mail/test` | mail account — `auth: 'xoauth2'` carries `oauth: {provider, clientId, tenantId?}`; `provider` absent is Microsoft | `{ok, mailboxes, error, reconnect}` |
@@ -529,6 +533,7 @@ Routes (JSON in/out unless noted):
 | POST | `/api/ask` | `{question}` | **SSE** streamed answer grounded in FTS5 hits |
 | PUT | `/api/drafts/:id` | `{body,state}` | draft |
 | GET | `/api/search` | `?q` | FTS5 results |
+| GET | `/api/data` | | `{dbBytes, walBytes, messageCount, oldestMessageAt, eventCount, itemCount, accounts[]}` — the numbers behind Settings → Your data |
 | GET | `/api/sample-data` | | `{installed, version, seededAt, counts, summary}` — SPEC-v2 §4 |
 | POST | `/api/sample-data` | | seeds the demo board; 201, or 200 + `alreadyInstalled` |
 | DELETE | `/api/sample-data` | | same status shape + `{cleared, removed}` |
@@ -538,7 +543,9 @@ Routes (JSON in/out unless noted):
 | DELETE | `/api/ai/tokens/:id` | | updated state |
 | POST | `/api/ai/test` | `{token, …}` | runs the real tool layer the way a client would |
 
-**That is 28 rows and it must stay exact.** `test/security.test.mjs` and
+**Every `ROUTES` entry has a row, and it must stay that way** (GET and PUT `/api/config` share
+one; `/oauth/callback` is the one row outside `ROUTES`). `test/repo.test.mjs` checks this table
+against `ROUTES`. `test/security.test.mjs` and
 `test/ai-security.test.mjs` no longer restate this list — they parse `ROUTES` out of
 `core/server.mjs` (`test/router-table.mjs`) and attack whatever is in it. This table drifting
 was the upstream cause of eight routes going unattacked, `/api/sample-data` among them; keeping
@@ -558,7 +565,8 @@ setup.
 ## 9. `ui/` — the face
 
 Zero build step, zero dependencies, no CDN. Plain ES modules, hand-written CSS.
-Must work offline. All fonts self-hosted in `assets/fonts` (or a good system stack).
+Must work offline. No web fonts: the UI uses system font stacks (`--serif`, `--sans` and
+`--mono` in `ui/app.css`).
 
 **Design identity.** Zelos is Greek — but the *app* is the quiet half of that identity. It is
 not a pottery museum; it is an operator's board that happens to be carved from the same stone

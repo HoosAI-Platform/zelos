@@ -1496,6 +1496,117 @@ test('docs/INSTALL.md sends a desktop user to diagnosis the desktop app actually
   assert.ok(settings.includes("el('dt', { text: 'Folder' })"), 'INSTALL.md points at a Folder line in About that is gone');
 });
 
+test('docs/INSTALL.md lists the files the desktop updater keeps', () => {
+  /* QA, 2026-10-10 (TT-3434): "Where your things live" said the shell's browser
+     profile held "your theme choice, nothing else" and never named
+     ~/.zelos/updates.json. Since 1.9.0 the updater keeps its choices in that
+     file and a downloaded update in the profile's pending-update folder, so
+     someone clearing out Zelos by the table would miss both. */
+  const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const updater = fs.readFileSync(path.join(ROOT, 'desktop', 'updater.js'), 'utf8');
+  const main = fs.readFileSync(path.join(ROOT, 'desktop', 'main.js'), 'utf8');
+  const start = install.indexOf('## Where your things live');
+  assert.ok(start >= 0, 'the "Where your things live" section is gone');
+  const table = install.slice(start, install.indexOf('\n\n**', start));
+  const pending = updater.match(/export const PENDING_DIR = '([^']+)'/)?.[1];
+  assert.ok(pending, 'desktop/updater.js no longer names its download folder');
+  assert.match(main, /downloadDir: path\.join\(app\.getPath\('userData'\), PENDING_DIR\)/, 'the download folder moved out of the shell profile');
+  assert.match(main, /settingsFile: path\.join\(zelos\.paths\.home, 'updates\.json'\)/, 'the update settings moved out of the data folder');
+  assert.ok(table.includes(`${pending}/`), `the table does not name the ${pending}/ folder in the shell profile`);
+  assert.ok(table.includes('~/.zelos/updates.json'), 'the table does not name ~/.zelos/updates.json');
+  assert.ok(!/nothing else/.test(table), 'the table still says the shell profile holds nothing else');
+});
+
+test('every path in the SPEC.md layout exists', () => {
+  /* QA, 2026-10-10 (TT-3435): SPEC §1 drew an assets/fonts/ folder that has
+     never existed; the UI uses system font stacks. The tree is the first map a
+     contributor reads, so each file and folder it names must be there. */
+  const spec = fs.readFileSync(path.join(ROOT, 'docs', 'SPEC.md'), 'utf8');
+  const at = spec.indexOf('## 1. Layout');
+  assert.ok(at >= 0, 'SPEC.md has no "## 1. Layout" section');
+  const tree = spec.slice(spec.indexOf('```\n', at) + 4, spec.indexOf('\n```', at + 20));
+  const named = [];
+  let parent = '';
+  for (const raw of tree.split('\n').slice(1)) {          // the first line is the repo itself
+    const line = raw.replace(/\(.*$/, '').trimEnd();       // drop "(plus any split modules…)" notes
+    const indent = line.length - line.trimStart().length;
+    const words = line.trim().split(/\s+/).filter((w) => /^[\w.-]+(?:\/[\w.-]+)*(?:\/|\.\w+)$/.test(w));   // paths only, not the notes beside them
+    if (!words.length) continue;
+    let base = '';
+    if (indent <= 2) {
+      if (words[0].endsWith('/')) { parent = words.shift(); base = parent; } else parent = '';
+    } else base = parent;
+    for (const w of words) named.push(base + w);
+    if (indent <= 2 && base) named.push(base);
+  }
+  assert.ok(named.includes('core/server.mjs') && named.includes('assets/icon.png'), `the layout parser lost its way: ${named.join(' ')}`);
+  for (const rel of named) assert.ok(fs.existsSync(path.join(ROOT, rel)), `SPEC.md §1 names ${rel}, which does not exist`);
+  assert.ok(!spec.includes('assets/fonts'), 'SPEC.md still names assets/fonts, which does not exist');
+});
+
+test('SPEC.md §8 has a row for every route in ROUTES, and none for a route that is gone', async () => {
+  /* QA, 2026-10-10 (TT-3520): §8 said its route table was "28 rows and it must
+     stay exact" while it had 32 rows and five routes were missing from it. A
+     count in prose cannot hold a table; comparing the table with ROUTES can. */
+  const { readRouterTable } = await import('./router-table.mjs');
+  const spec = fs.readFileSync(path.join(ROOT, 'docs', 'SPEC.md'), 'utf8');
+  const section = spec.slice(spec.indexOf('## 8. '), spec.indexOf('## 9. '));
+  const documented = new Set();
+  // Padding is the table author's choice, so the cells are read with any of it,
+  // and every line that starts like a route row has to have been read as one.
+  const rowLines = section.split('\n').filter((line) => /^\|\s*[A-Z]+(?:\/[A-Z]+)*\s*\|/.test(line));
+  const rows = [...section.matchAll(/^\|\s*([A-Z]+(?:\/[A-Z]+)*)\s*\|\s*`([^`]+)`\s*\|/gm)];
+  assert.equal(rows.length, rowLines.length, `some §8 route rows were not read: ${rowLines.filter((l) => !/^\|\s*[A-Z/]+\s*\|\s*`[^`]+`\s*\|/.test(l)).join(' / ')}`);
+  for (const [, methods, route] of rows) {
+    for (const method of methods.split('/')) documented.add(`${method} ${route.replace(/:\w+/g, ':id')}`);
+  }
+  const served = new Set(readRouterTable().map(([method, route]) => `${method} ${route.replace(/\?.*$/, '').replaceAll('probe.id-1', ':id')}`));
+  served.add('GET /oauth/callback');                     // outside ROUTES on purpose; §8 says so
+  for (const route of served) assert.ok(documented.has(route), `SPEC.md §8 has no row for ${route}`);
+  for (const route of documented) assert.ok(served.has(route), `SPEC.md §8 documents ${route}, which core/server.mjs does not serve`);
+  assert.doesNotMatch(section, /\b\d+ rows\b/, 'SPEC.md §8 states a row count again; the comparison above is what holds the table');
+});
+
+test('docs/INSTALL.md recommends only the Windows installers a release publishes', () => {
+  /* QA, 2026-10-09 (TT-3478): INSTALL.md told a Windows user who was not sure of
+     their machine to take "the combined installer", in three places. A release
+     publishes only the per-architecture installers that scripts/prepare-release.mjs
+     lists, so the advice pointed at a file that is not on the release page. */
+  const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const prepare = fs.readFileSync(path.join(ROOT, 'scripts', 'prepare-release.mjs'), 'utf8');
+  const published = [...prepare.matchAll(/`Zelos-\$\{version\}-(setup-[\w-]+)\.exe`/g)].map((m) => m[1]);
+  assert.deepEqual(published.sort(), ['setup-arm64', 'setup-x64'], 'prepare-release publishes a different set of Windows installers now — revisit INSTALL.md');
+  assert.doesNotMatch(install, /combined\s+installer/i, 'INSTALL.md points at a combined installer no release publishes');
+  for (const [, name] of install.matchAll(/Zelos-[\d.]+-(setup-[\w-]+)\.exe/g)) {
+    assert.ok(published.includes(name), `INSTALL.md names a ${name}.exe that prepare-release does not publish`);
+  }
+});
+
+test('the controls docs/README.md and SOURCES.md send you to are buttons the app has', () => {
+  /* QA, 2026-10-10 (TT-3524): docs/README.md promised a "Forget" control beside
+     every stored password and a "Connect again" for an expired sign-in, and
+     SOURCES.md a Test for every source. None of those buttons exists. Every
+     bold control the two passages name now has to be a real button label. */
+  const ui = ['ui/views/settings.js', 'ui/views/ai-access.js', 'ui/lib/source-status.js']
+    .map((file) => fs.readFileSync(path.join(ROOT, file), 'utf8')).join('\n');
+  const labels = new Set([...ui.matchAll(/button\(\s*(?:[^'`(),]+\?\s*)?'([^']+)'/g)].map((m) => m[1]));
+  assert.ok(labels.has('Remove') && labels.has('Edit'), 'the button scan found nothing — it must be broken');
+  const readme = fs.readFileSync(path.join(ROOT, 'docs', 'README.md'), 'utf8');
+  const sources = fs.readFileSync(path.join(ROOT, 'docs', 'SOURCES.md'), 'utf8');
+  const passages = [
+    readme.slice(readme.indexOf('If Zelos is still running, you can do'), readme.indexOf('Nothing is left anywhere else.')).replace(/\s+/g, ' '),
+    readme.slice(readme.indexOf('**Mail sign-in fails.**') + 24, readme.indexOf('**The model test fails.**')).replace(/\s+/g, ' '),
+    sources.slice(sources.indexOf('You add them in'), sources.indexOf('\n---')).replace(/\s+/g, ' '),
+  ];
+  for (const passage of passages) {
+    for (const [, control] of passage.matchAll(/\*\*([^*]+)\*\*/g)) {
+      if (/^Settings →/.test(control)) continue;              // a place, not a button
+      assert.ok(labels.has(control), `the docs send you to a "${control}" button the app does not have: ${passage.slice(0, 120)}`);
+    }
+  }
+  assert.doesNotMatch(sources.slice(0, sources.indexOf('\n---')), /each has a \*\*Test\*\*/);
+});
+
 test('docs/INSTALL.md leads each first-open warning with what to click, in plain words', () => {
   const install = fs.readFileSync(path.join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
 

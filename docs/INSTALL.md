@@ -67,9 +67,10 @@ node zelos.mjs sweep          Read your sources once, think about them, print wh
                      so it is safe to put in a cron job.
 node zelos.mjs doctor         Check every part of the setup and say, in plain words,
                      what to do about anything that is wrong.
-node zelos.mjs mcp            Serve Zelos's read-only tools over MCP on stdin/stdout,
-                     for an AI client that spawns it. Off unless you have
-                     switched AI access on in Settings.
+node zelos.mjs mcp            Serve Zelos's tools over MCP on stdin/stdout, for an
+                     AI client that spawns it. None of them sends, deletes
+                     or changes a setting. Off unless you have switched AI
+                     access on in Settings.
 ```
 
 Every one of them takes `--home <dir>`. `zelos sweep` and `zelos doctor` also
@@ -180,8 +181,9 @@ Press `Ctrl-C` in the terminal to stop it.
 
 - A real application window and a Dock/taskbar icon.
 - A tray icon with **Check now**, **Open Zelos** and **Quit**.
-- A menu bar, so ⌘C and ⌘V work in the draft editors, and ⌘1…⌘6 jump between
-  views.
+- A menu bar, so ⌘C and ⌘V work in the draft editors, and its Go menu jumps
+  between the seven views: ⌘1…⌘4 for Now, Today, Promises and Calendar, ⌘F for
+  Search, ⌘6 for Ask and ⌘7 for Settings (Ctrl instead of ⌘ on Windows).
 - It keeps running when you close the window, so scheduled sweeps keep
   happening. Exactly when, by platform:
   - **macOS** — always. That is how macOS apps work; ⌘Q quits.
@@ -244,9 +246,11 @@ Zelos-1.8.1-setup-arm64.exe    Windows on ARM
 ```
 
 Windows also gets a third installer from the same run, carrying both
-architectures in one larger file; take it if you are not sure which machine you
-are on. (That is why the workflow collects `*setup*.exe` rather than two fixed
-names.)
+architectures in one larger file. (That is why the workflow collects
+`*setup*.exe` rather than two fixed names.) A release does not publish it, so
+take the installer for your machine; step 1 of
+[Installing on Windows](#installing-on-windows--and-what-you-will-actually-see)
+says how to tell.
 
 A run artifact is not a public download link. GitHub hands artifacts only to
 signed-in users, and deletes them once the repository's retention window is up —
@@ -379,9 +383,10 @@ reasonable to click past *this* one is that you can read the source and build
 the installer yourself.
 
 1. **Take the installer that matches your machine.**
-   `Zelos-1.8.1-setup-x64.exe` for an ordinary PC, `-arm64` for Windows on ARM,
-   or the combined installer if you are not sure. The wrong one either runs
-   slowly under emulation or does not run at all.
+   `Zelos-1.8.1-setup-x64.exe` for an ordinary PC, `-arm64` for Windows on ARM.
+   If you are not sure, **Settings → System → About** says which under
+   *System type*: an *x64-based processor* or an *ARM-based processor*. The
+   wrong one either runs slowly under emulation or does not run at all.
 2. **Your browser may refuse to keep the file.** Edge says *"…setup.exe was
    blocked because it could harm your device"*; Chrome says *"…isn't commonly
    downloaded"*. Open the downloads list, click the **…** beside the file, and
@@ -417,7 +422,7 @@ can clear it first: right-click the `.exe` → **Properties** → tick **Unblock
 at the bottom of the **General** tab → **OK**. In PowerShell that is:
 
 ```
-Unblock-File .\Zelos-1.8.1-setup-x64.exe
+Unblock-File .\Zelos-*-setup-x64.exe
 ```
 
 That marker is a real safety mechanism — clear it only from something you built
@@ -447,7 +452,8 @@ solely administer, read it before you connect a mail account.
 | Window size and position | `~/.zelos/window.json` | same |
 | Logs | `~/.zelos/logs/desktop.log` — **desktop app only** | same |
 | Secrets | your login Keychain, service `com.zelos.app` (or `secrets.enc` + `.seed` in `~/.zelos` if there is no keychain) | `%LOCALAPPDATA%\Zelos\secrets`, DPAPI-encrypted |
-| The shell's browser profile (your theme choice, nothing else) | `~/Library/Application Support/Zelos` | `%APPDATA%\Zelos` |
+| Automatic-update choices (on or off, and a skipped version) | `~/.zelos/updates.json` — **desktop app only** | same |
+| The shell's browser profile (your theme choice, and a downloaded update waiting in `pending-update/` until you restart) | `~/Library/Application Support/Zelos` | `%APPDATA%\Zelos` |
 
 **There is no `zelos.log`.** The `logs/` directory is created on every launch,
 but only the desktop shell ever writes to it, and the file it writes is
@@ -541,8 +547,8 @@ directly.
 - **Architecture matters on both platforms.** Take the `arm64` build for Apple
   Silicon and Windows on ARM, and the `x64` build for Intel Macs and ordinary
   PCs. The wrong one either runs slowly under emulation or does not run at all.
-  Windows is the one place you can dodge the question, by taking the combined
-  installer instead; it is larger because it contains both.
+  On Windows, **Settings → System → About** names the processor under
+  *System type*.
 
 ---
 

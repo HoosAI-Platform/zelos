@@ -522,9 +522,13 @@ Doing it in that order costs you the ability to check: once `~/.zelos` is gone
 so is `secrets.backend.json`, which is the file that would have told you which
 case you were in. Look before you delete, or just do both.
 
-If Zelos is still running, you can do this the easy way instead: in Settings,
-each stored password and key has a **Forget** control beside it that removes it
-from the keychain. Use those first, then delete the folder.
+If Zelos is still running, you can do most of this the easy way instead: in
+Settings, **Remove** on a mail account, a calendar or another source also
+deletes its stored password or token from the keychain, **Forget the stored
+key** under AI deletes the model key, and **Revoke** under Share with another AI
+deletes an AI key. Use those first, then delete the folder. A Google client
+secret saved by a sign-in has no button of its own; your keychain tool removes
+it.
 
 Nothing is left anywhere else. There is no server-side copy, because there is no
 server.
@@ -726,7 +730,8 @@ password will not work for Gmail, iCloud or Yahoo. See [Connecting your
 mail](#connecting-your-mail). Zelos shows you the server's own words for why
 it refused, which is usually specific enough to act on. If you signed in with
 Google or Microsoft instead, the usual cause is a sign-in that expired or was
-revoked — Settings → Mail says so and offers **Connect again**. A Google sign-in
+revoked — Zelos says the sign-in is no longer accepted and sends you to
+Settings → Email, where **Edit** on the account lets you sign in again. A Google sign-in
 made while Zelos is still in Google's testing tier expires every seven days;
 that is Google's rule, not a fault.
 
